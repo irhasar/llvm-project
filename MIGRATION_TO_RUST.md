@@ -430,8 +430,11 @@ the pair into one `leal imm(%r8,%rdi), %r11d` when:
 * the flags written by the ADD are dead: no instruction reads EFLAGS before
   one that redefines it, and reaching the end of the block counts as live.
 
-The expected saving is 29 instructions out of 671 in `body_raw`, about 4%, not
-the 64 implied by the earlier estimate. It does not close the ~10% gap to GCC,
+The measured saving in CI is 27 ADDs (234 -> 207 across the whole crate IR)
+with the LEA count unchanged at 30. Two of the 29 pairs stay because the scan
+stops at the end of the block, where EFLAGS counts as live. That is about 4% of
+`body_raw`, not the 64 implied by the earlier estimate. It does not close the
+~10% gap to GCC,
 because most GCC LEAs are not folds of an existing LEA: GCC forms LEA directly
 from add trees, while LLVM only forms LEA for addressing modes. Closing that
 gap needs a DAG combine that selects LEA for arithmetic add chains on targets
