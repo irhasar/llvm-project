@@ -4,6 +4,7 @@ permissions:
   contents: read
 
 on:
+  pull_request:
   push:
     branches:
       - 'rakit*'
@@ -27,16 +28,9 @@ concurrency:
 
 jobs:
   build-rustc:
-    name: Build rustc ${{ matrix.label }} with this LLVM
+    name: Build rustc nightly with this LLVM
     runs-on: ubuntu-24.04
     timeout-minutes: 240
-    continue-on-error: ${{ matrix.ref == 'main' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { ref: '1.99.0', label: '1.99.0' }
-          - { ref: main, label: nightly }
     steps:
       - name: Checkout pruned LLVM
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -47,7 +41,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: rust-lang/rust
-          ref: ${{ matrix.ref }}
+          ref: main
           fetch-depth: 1
           submodules: true
           path: rust
@@ -88,7 +82,7 @@ jobs:
           cd rust
           ./x.py build --stage 1 --jobs 4
       - name: Build rustc_llvm only (quick)
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'quick')
+        if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'quick')
         run: |
           cd rust
           ./x.py build --stage 1 --jobs 4 compiler/rustc_llvm
