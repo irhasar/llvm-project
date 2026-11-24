@@ -289,7 +289,7 @@ bool FixupLEAsImpl::runOnMachineFunction(MachineFunction &MF) {
 
     // Third pass: fold an immediate ADD into the displacement of the LEA that
     // produced its input. This runs last so the earlier passes do not undo it.
-    if (FoldAddIntoLEA && !IsSlowLEA && !IsSlow3OpsLEA)
+    if (FoldAddIntoLEA)
       foldAddImmediateIntoLEA(MBB);
   }
 

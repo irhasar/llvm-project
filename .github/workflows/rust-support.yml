@@ -106,10 +106,16 @@ jobs:
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: llvm-ccache-${{ github.sha }}
+          restore-keys: llvm-ccache-
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ zlib1g-dev
+          sudo apt-get install -y cmake ninja-build g++ zlib1g-dev ccache
       - name: Install Rust nightly
         run: |
           rustup toolchain install nightly --profile minimal
@@ -125,7 +131,8 @@ jobs:
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
             -DLLVM_ENABLE_ZSTD=OFF \
-            -DLLVM_ENABLE_ZLIB=OFF
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_CCACHE_BUILD=ON
       - name: Build llc
         run: ninja -C build llc
       - name: Emit MD5 IR
@@ -145,5 +152,20 @@ jobs:
             -o /tmp/fold.s
           base=$(grep -cE '^[[:space:]]+add' /tmp/base.s || true)
           fold=$(grep -cE '^[[:space:]]+add' /tmp/fold.s || true)
-          echo "add instructions: base=$base folded=$fold"
-          test "$fold" -lt "$base"
+          lea_base=$(grep -cE '^[[:space:]]+lea' /tmp/base.s || true)
+          lea_fold=$(grep -cE '^[[:space:]]+lea' /tmp/fold.s || true)
+          echo "add: base=$base folded=$fold"
+          echo "lea: base=$lea_base folded=$lea_fold"
+          if ! test "$fold" -lt "$base"; then
+            echo "no fold applied; first lea/add lines of the baseline:"
+            grep -nE '^[[:space:]]+(lea|add)' /tmp/base.s | head -n 40
+            exit 1
+          fi
+      - name: Upload asm
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lea-asm
+          path: |
+            /tmp/base.s
+            /tmp/fold.s
