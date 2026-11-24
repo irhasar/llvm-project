@@ -379,6 +379,25 @@ endif()
 add_executable(llvm-crc-stable EXCLUDE_FROM_ALL rust/crc/test/stable.cpp)
 target_link_libraries(llvm-crc-stable PRIVATE LLVMSupport)
 
+if(LLVM_ENABLE_RUST_MD5)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_md5
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/md5/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_MD5)
+  target_link_libraries(LLVMSupport PRIVATE llvm_md5)
+
+  add_executable(llvm-rust-md5-differential EXCLUDE_FROM_ALL
+    rust/md5/test/differential.cpp)
+  target_link_libraries(llvm-rust-md5-differential PRIVATE llvm_md5)
+  add_custom_target(check-llvm-rust-md5
+    COMMAND llvm-rust-md5-differential
+    DEPENDS llvm-rust-md5-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-md5-stable EXCLUDE_FROM_ALL rust/md5/test/stable.cpp)
+target_link_libraries(llvm-md5-stable PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport

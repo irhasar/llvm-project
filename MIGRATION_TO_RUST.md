@@ -54,6 +54,8 @@ Non-goals (for now):
 
 Crates live next to the component they replace
 (`llvm/lib/<Component>/rust/<crate>/`), and their `Cargo.lock` is committed.
+All crates use edition 2024 (`rust-version = "1.85"`, tested with
+`rustc 1.100.0`) with `no_std`, `panic = "abort"`, LTO and one codegen unit.
 Each component is gated behind its own `LLVM_ENABLE_RUST_<COMPONENT>` option,
 defaulting to `OFF`.
 
@@ -210,7 +212,7 @@ Correctness:
 * `cargo test` covers the same properties against a bit-at-a-time oracle.
 
 Performance. `llvm-crc-differential` prints this table; numbers below are from
-the CMake build on the same machine (AMD EPYC 9B14, GCC 14.2 at `-O2`,
+the CMake build on the same machine (AMD EPYC 9B14, GCC 14.2 at `-O3`,
 `rustc 1.100.0`), ns per call:
 
 | bytes | C++ byte-wise | C++ slicing-by-8 | Rust | vs byte-wise | vs slicing-by-8 |
@@ -239,6 +241,51 @@ port 3x slower than the generic build. Reading the tables through
 gathers. The same applies to any table-driven code in future crates: verify the
 native build, not just the generic one.
 
+## Third port: MD5
+
+Implementation: `llvm/lib/Support/rust/md5`, behind `LLVM_ENABLE_RUST_MD5`.
+Only the compression function (`MD5::body`) is replaced; the buffering,
+padding and `MD5Result` handling stay in C++, so the class layout and the
+ABI are untouched. The crate also exports a one-shot `llvm_md5_hash` that the
+tests use.
+
+Correctness:
+
+* RFC 1321 vectors and 701 differential cases (lengths 0..700 over random
+  data) are bit-identical to the C++ implementation.
+* The golden test over `llvm::MD5::hash`, `MD5Result::digest`, `low()` and
+  `high()` passes with either backend and prints identical values.
+* `cargo test` checks every length from 0 to 4095 against a loop-based
+  RFC 1321 oracle, plus the raw block interface.
+
+Performance, ns per call, generic codegen at the same optimization level
+(`-O3` vs `-C opt-level=3`):
+
+| bytes | C++   | Rust   | ratio |
+| ----- | ----- | ------ | ----- |
+| 16    | 112.1 | 123.8  | 0.90x |
+| 64    | 206.6 | 231.9  | 0.89x |
+| 256   | 488.2 | 572.2  | 0.85x |
+| 1024  | 1619  | 1932   | 0.84x |
+| 4096  | 6148  | 7391   | 0.83x |
+| 65536 | 96542 | 119146 | 0.81x |
+
+With matched target flags (`g++ -O3 -march=native` and
+`-C target-cpu=native`) the result flips: Rust is 1.06-1.13x faster.
+
+This is the first component where the Rust port is slower by default, and the
+cause is visible in the instruction mix. Each MD5 step is
+`a + f(b,c,d) + m + t`, and GCC fuses those additions into LEA
+(82 `add` + 116 `lea` per block), while LLVM's generic x86 model emits plain
+adds (232 `add`) and needs a `mov` in front of every `rol`. Enabling BMI2 alone
+produces `rorx` but still no LEA, so it does not help; only a real scheduling
+model makes LLVM use both `rorx` and LEA.
+
+Because the port misses the 5% performance gate under generic codegen, MD5
+stays opt-in and is documented as "needs a tuned `LLVM_RUST_FLAGS`". It is
+kept in the tree as the control case for the experiment: it shows that the
+gap is a codegen-model issue rather than anything specific to the algorithm.
+
 ## Risks and mitigations
 
 | Risk | Mitigation |
@@ -263,9 +310,9 @@ keeps every step of the migration reversible.
 1. Decide whether host-tuned Rust builds (`LLVM_RUST_FLAGS=-Ctarget-cpu=native`)
    are acceptable for release builds; the generic codegen path still loses
    about 9% on SipHash 4 KiB inputs because of the generic scheduling model.
-2. Port the hash family (`MD5.cpp`, `SHA1.cpp`, `SHA256.cpp`) next; they are the
-   largest remaining leaf functions in `lib/Support`.
-3. Add a CI leg that builds `LLVMSupport` with `LLVM_ENABLE_RUST_SIPHASH=ON`
-   and `LLVM_ENABLE_RUST_CRC=ON` and runs `check-llvm-rust-siphash` and
-   `check-llvm-rust-crc`.
+2. Port `SHA1.cpp` and `SHA256.cpp` next; MD5 is done and serves as the
+   control case for generic-codegen regressions.
+3. Add a CI leg that builds `LLVMSupport` with `LLVM_ENABLE_RUST_SIPHASH=ON`,
+   `LLVM_ENABLE_RUST_CRC=ON` and `LLVM_ENABLE_RUST_MD5=ON` and runs
+   `check-llvm-rust-*` plus the three golden tests.
 4. Extend `AddRustLibrary.cmake` with a `--target` mapping for cross builds.

@@ -21,7 +21,7 @@
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
-    extern "C" {
+    unsafe extern "C" {
         fn abort() -> !;
     }
     unsafe { abort() }
@@ -66,12 +66,12 @@ static TABLES: [[u32; 256]; 32] = make_tables::<32>();
 
 #[inline(always)]
 unsafe fn load32(p: *const u8) -> u32 {
-    u32::from_le(core::ptr::read_unaligned(p as *const u32))
+    unsafe { u32::from_le(core::ptr::read_unaligned(p as *const u32)) }
 }
 
 #[inline(always)]
 unsafe fn load64(p: *const u8) -> u64 {
-    u64::from_le(core::ptr::read_unaligned(p as *const u64))
+    unsafe { u64::from_le(core::ptr::read_unaligned(p as *const u64)) }
 }
 
 /// Volatile reads stop LLVM from turning the eight independent lookups into a
@@ -79,7 +79,7 @@ unsafe fn load64(p: *const u8) -> u64 {
 /// that has them, and SLP vectorization kicks in as soon as AVX2 is enabled.
 #[inline(always)]
 unsafe fn lookup(index: usize, byte: u64) -> u32 {
-    core::ptr::read_volatile(&TABLES[index][(byte & 0xff) as usize])
+    unsafe { core::ptr::read_volatile(&TABLES[index][(byte & 0xff) as usize]) }
 }
 
 macro_rules! fold8 {
@@ -96,55 +96,57 @@ macro_rules! fold8 {
 }
 
 unsafe fn crc32_impl(crc: u32, data: *const u8, len: usize) -> u32 {
-    let mut c = !crc;
-    let mut p = data;
-    let mut n = len;
+    unsafe {
+        let mut c = !crc;
+        let mut p = data;
+        let mut n = len;
 
-    while n >= 32 {
-        let x0 = load64(p) ^ c as u64;
-        let x1 = load64(p.add(8));
-        let x2 = load64(p.add(16));
-        let x3 = load64(p.add(24));
-        c = fold8!(31, 30, 29, 28, 27, 26, 25, 24, x0)
-            ^ fold8!(23, 22, 21, 20, 19, 18, 17, 16, x1)
-            ^ fold8!(15, 14, 13, 12, 11, 10, 9, 8, x2)
-            ^ fold8!(7, 6, 5, 4, 3, 2, 1, 0, x3);
-        p = p.add(32);
-        n -= 32;
+        while n >= 32 {
+            let x0 = load64(p) ^ c as u64;
+            let x1 = load64(p.add(8));
+            let x2 = load64(p.add(16));
+            let x3 = load64(p.add(24));
+            c = fold8!(31, 30, 29, 28, 27, 26, 25, 24, x0)
+                ^ fold8!(23, 22, 21, 20, 19, 18, 17, 16, x1)
+                ^ fold8!(15, 14, 13, 12, 11, 10, 9, 8, x2)
+                ^ fold8!(7, 6, 5, 4, 3, 2, 1, 0, x3);
+            p = p.add(32);
+            n -= 32;
+        }
+
+        if n >= 16 {
+            let x = load64(p) ^ c as u64;
+            let y = load64(p.add(8));
+            c = fold8!(15, 14, 13, 12, 11, 10, 9, 8, x) ^ fold8!(7, 6, 5, 4, 3, 2, 1, 0, y);
+            p = p.add(16);
+            n -= 16;
+        }
+
+        if n >= 8 {
+            let x = load64(p) ^ c as u64;
+            c = fold8!(7, 6, 5, 4, 3, 2, 1, 0, x);
+            p = p.add(8);
+            n -= 8;
+        }
+
+        if n >= 4 {
+            let x = load32(p) ^ c;
+            c = lookup(3, x as u64)
+                ^ lookup(2, (x >> 8) as u64)
+                ^ lookup(1, (x >> 16) as u64)
+                ^ lookup(0, (x >> 24) as u64);
+            p = p.add(4);
+            n -= 4;
+        }
+
+        while n > 0 {
+            c = lookup(0, (c ^ (*p as u32)) as u64) ^ (c >> 8);
+            p = p.add(1);
+            n -= 1;
+        }
+
+        !c
     }
-
-    if n >= 16 {
-        let x = load64(p) ^ c as u64;
-        let y = load64(p.add(8));
-        c = fold8!(15, 14, 13, 12, 11, 10, 9, 8, x) ^ fold8!(7, 6, 5, 4, 3, 2, 1, 0, y);
-        p = p.add(16);
-        n -= 16;
-    }
-
-    if n >= 8 {
-        let x = load64(p) ^ c as u64;
-        c = fold8!(7, 6, 5, 4, 3, 2, 1, 0, x);
-        p = p.add(8);
-        n -= 8;
-    }
-
-    if n >= 4 {
-        let x = load32(p) ^ c;
-        c = lookup(3, x as u64)
-            ^ lookup(2, (x >> 8) as u64)
-            ^ lookup(1, (x >> 16) as u64)
-            ^ lookup(0, (x >> 24) as u64);
-        p = p.add(4);
-        n -= 4;
-    }
-
-    while n > 0 {
-        c = lookup(0, (c ^ (*p as u32)) as u64) ^ (c >> 8);
-        p = p.add(1);
-        n -= 1;
-    }
-
-    !c
 }
 
 /// Running CRC-32 update. `crc` is the previous result, as in
@@ -152,9 +154,9 @@ unsafe fn crc32_impl(crc: u32, data: *const u8, len: usize) -> u32 {
 ///
 /// # Safety
 /// `data` must be readable for `len` bytes (may be null when `len` is 0).
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_crc32_update(crc: u32, data: *const u8, len: usize) -> u32 {
-    crc32_impl(crc, data, len)
+    unsafe { crc32_impl(crc, data, len) }
 }
 
 #[cfg(test)]

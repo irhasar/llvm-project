@@ -17,7 +17,7 @@
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
-    extern "C" {
+    unsafe extern "C" {
         fn abort() -> !;
     }
     unsafe { abort() }
@@ -47,12 +47,14 @@ macro_rules! sipround {
 
 #[inline]
 unsafe fn load_u64_le(p: *const u8) -> u64 {
-    u64::from_le(core::ptr::read_unaligned(p as *const u64))
+    unsafe { u64::from_le(core::ptr::read_unaligned(p as *const u64)) }
 }
 
 #[inline]
 unsafe fn store_u64_le(p: *mut u8, v: u64) {
-    core::ptr::write_unaligned(p as *mut u64, v.to_le());
+    unsafe {
+        core::ptr::write_unaligned(p as *mut u64, v.to_le());
+    }
 }
 
 /// `WIDE` is a compile-time constant so the 64- and 128-bit entry points get
@@ -64,52 +66,54 @@ unsafe fn siphash_2_4_impl<const WIDE: bool>(
     key: *const u8,
     out: *mut u8,
 ) {
-    let k0 = load_u64_le(key);
-    let k1 = load_u64_le(key.add(8));
-    let mut v0 = 0x736f_6d65_7073_6575 ^ k0;
-    let mut v1 = 0x646f_7261_6e64_6f6d ^ k1;
-    let mut v2 = 0x6c79_6765_6e65_7261 ^ k0;
-    let mut v3 = 0x7465_6462_7974_6573 ^ k1;
+    unsafe {
+        let k0 = load_u64_le(key);
+        let k1 = load_u64_le(key.add(8));
+        let mut v0 = 0x736f_6d65_7073_6575 ^ k0;
+        let mut v1 = 0x646f_7261_6e64_6f6d ^ k1;
+        let mut v2 = 0x6c79_6765_6e65_7261 ^ k0;
+        let mut v3 = 0x7465_6462_7974_6573 ^ k1;
 
-    if WIDE {
-        v1 ^= 0xee;
-    }
+        if WIDE {
+            v1 ^= 0xee;
+        }
 
-    let tail = len & 7;
-    let end = data.add(len - tail);
-    let mut p = data;
-    while p != end {
-        let m = load_u64_le(p);
-        v3 ^= m;
+        let tail = len & 7;
+        let end = data.add(len - tail);
+        let mut p = data;
+        while p != end {
+            let m = load_u64_le(p);
+            v3 ^= m;
+            for _ in 0..C_ROUNDS {
+                sipround!(v0, v1, v2, v3);
+            }
+            v0 ^= m;
+            p = p.add(8);
+        }
+
+        let mut b = (len as u64) << 56;
+        for i in 0..tail {
+            b |= (*p.add(i) as u64) << (8 * i);
+        }
+        v3 ^= b;
         for _ in 0..C_ROUNDS {
             sipround!(v0, v1, v2, v3);
         }
-        v0 ^= m;
-        p = p.add(8);
-    }
+        v0 ^= b;
 
-    let mut b = (len as u64) << 56;
-    for i in 0..tail {
-        b |= (*p.add(i) as u64) << (8 * i);
-    }
-    v3 ^= b;
-    for _ in 0..C_ROUNDS {
-        sipround!(v0, v1, v2, v3);
-    }
-    v0 ^= b;
-
-    v2 ^= if WIDE { 0xee } else { 0xff };
-    for _ in 0..D_ROUNDS {
-        sipround!(v0, v1, v2, v3);
-    }
-    store_u64_le(out, v0 ^ v1 ^ v2 ^ v3);
-
-    if WIDE {
-        v1 ^= 0xdd;
+        v2 ^= if WIDE { 0xee } else { 0xff };
         for _ in 0..D_ROUNDS {
             sipround!(v0, v1, v2, v3);
         }
-        store_u64_le(out.add(8), v0 ^ v1 ^ v2 ^ v3);
+        store_u64_le(out, v0 ^ v1 ^ v2 ^ v3);
+
+        if WIDE {
+            v1 ^= 0xdd;
+            for _ in 0..D_ROUNDS {
+                sipround!(v0, v1, v2, v3);
+            }
+            store_u64_le(out.add(8), v0 ^ v1 ^ v2 ^ v3);
+        }
     }
 }
 
@@ -130,14 +134,16 @@ fn siphash_2_4(data: &[u8], key: &[u8; 16], out: &mut [u8]) {
 /// # Safety
 /// `data` must be readable for `len` bytes (may be null when `len` is 0),
 /// `key` must point to 16 readable bytes, `out` to 8 writable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_siphash_2_4_64(
     data: *const u8,
     len: usize,
     key: *const u8,
     out: *mut u8,
 ) {
-    siphash_2_4_impl::<false>(data, len, key, out);
+    unsafe {
+        siphash_2_4_impl::<false>(data, len, key, out);
+    }
 }
 
 /// Computes a SipHash-2-4 128-bit result. Matches llvm::getSipHash_2_4_128.
@@ -145,14 +151,16 @@ pub unsafe extern "C" fn llvm_siphash_2_4_64(
 /// # Safety
 /// `data` must be readable for `len` bytes (may be null when `len` is 0),
 /// `key` must point to 16 readable bytes, `out` to 16 writable bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_siphash_2_4_128(
     data: *const u8,
     len: usize,
     key: *const u8,
     out: *mut u8,
 ) {
-    siphash_2_4_impl::<true>(data, len, key, out);
+    unsafe {
+        siphash_2_4_impl::<true>(data, len, key, out);
+    }
 }
 
 #[cfg(test)]
