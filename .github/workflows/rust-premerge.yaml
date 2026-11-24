@@ -112,7 +112,7 @@ jobs:
             args+=(--test-link)
           fi
           python3 .github/scripts/smoke_test.py "${args[@]}"
-      - name: Build compiler-rt builtins and CRT
+      - name: Build all compiler-rt runtimes rustc can use
         if: matrix.full_checks
         run: |
           cmake -S compiler-rt -B build-rt -G Ninja \
@@ -122,29 +122,50 @@ jobs:
             -DLLVM_CONFIG_PATH="$PWD/build/bin/llvm-config" \
             -DCOMPILER_RT_BUILD_BUILTINS=ON \
             -DCOMPILER_RT_BUILD_CRT=ON \
-            -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
-            -DCOMPILER_RT_BUILD_XRAY=OFF \
-            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
-            -DCOMPILER_RT_BUILD_PROFILE=OFF \
-            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON
-          ninja -C build-rt builtins
-      - name: Build compiler-rt ASan runtime (rustc sanitizer configuration)
-        if: matrix.full_checks
-        run: |
-          cmake -S compiler-rt -B build-rt-asan -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=clang-18 \
-            -DCMAKE_CXX_COMPILER=clang++-18 \
-            -DLLVM_CONFIG_PATH="$PWD/build/bin/llvm-config" \
-            -DCOMPILER_RT_BUILD_BUILTINS=OFF \
-            -DCOMPILER_RT_BUILD_CRT=OFF \
-            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
-            -DCOMPILER_RT_BUILD_PROFILE=OFF \
             -DCOMPILER_RT_BUILD_SANITIZERS=ON \
-            -DCOMPILER_RT_BUILD_XRAY=OFF \
+            -DCOMPILER_RT_BUILD_XRAY=ON \
+            -DCOMPILER_RT_BUILD_LIBFUZZER=ON \
+            -DCOMPILER_RT_BUILD_PROFILE=ON \
+            -DCOMPILER_RT_BUILD_ORC=ON \
+            -DCOMPILER_RT_BUILD_MEMPROF=ON \
+            -DCOMPILER_RT_BUILD_CTX_PROFILE=ON \
+            -DCOMPILER_RT_INCLUDE_TESTS=OFF \
             -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
             -DCOMPILER_RT_USE_LIBCXX=OFF
-          ninja -C build-rt-asan asan
+          ninja -C build-rt
+          python3 .github/scripts/check_compiler_rt.py --build-dir build-rt
+      - name: Build compiler-rt builtins for rustc cross targets
+        if: matrix.full_checks
+        run: |
+          for triple in aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf riscv64-unknown-linux-gnu wasm32-unknown-unknown; do
+            baremetal=OFF
+            case "$triple" in
+              wasm*) baremetal=ON ;;
+            esac
+            build_dir="build-rt-${triple}"
+            cmake -S compiler-rt -B "$build_dir" -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=clang-18 \
+              -DCMAKE_CXX_COMPILER=clang++-18 \
+              -DCMAKE_C_COMPILER_TARGET="$triple" \
+              -DCMAKE_CXX_COMPILER_TARGET="$triple" \
+              -DCMAKE_ASM_COMPILER_TARGET="$triple" \
+              -DLLVM_CONFIG_PATH="$PWD/build/bin/llvm-config" \
+              -DCOMPILER_RT_BUILD_BUILTINS=ON \
+              -DCOMPILER_RT_BUILD_CRT=OFF \
+              -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+              -DCOMPILER_RT_BUILD_XRAY=OFF \
+              -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+              -DCOMPILER_RT_BUILD_PROFILE=OFF \
+              -DCOMPILER_RT_BUILD_ORC=OFF \
+              -DCOMPILER_RT_BUILD_MEMPROF=OFF \
+              -DCOMPILER_RT_BUILD_CTX_PROFILE=OFF \
+              -DCOMPILER_RT_INCLUDE_TESTS=OFF \
+              -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+              -DCOMPILER_RT_BAREMETAL_BUILD="$baremetal"
+            ninja -C "$build_dir" builtins
+            python3 .github/scripts/check_compiler_rt.py --build-dir "$build_dir" --builtins-only
+          done
       - name: Check libunwind sources used by rustc
         if: matrix.full_checks
         run: |
@@ -157,6 +178,15 @@ jobs:
           done
           for src in UnwindRegistersRestore.S UnwindRegistersSave.S; do
             clang-18 -c -Ilibunwind/include "libunwind/src/${src}" -o /dev/null
+          done
+          for triple in aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf riscv64-unknown-linux-gnu; do
+            for src in Unwind-sjlj.c UnwindLevel1-gcc-ext.c UnwindLevel1.c; do
+              clang-18 --target="$triple" -std=c99 -fsyntax-only -Ilibunwind/include "libunwind/src/${src}"
+            done
+            for src in Unwind-EHABI.cpp Unwind-seh.cpp libunwind.cpp; do
+              clang++-18 --target="$triple" -std=c++11 -fno-exceptions -fno-rtti \
+                -fsyntax-only -Ilibunwind/include "libunwind/src/${src}"
+            done
           done
       - name: Check rustc_llvm wrapper against the built LLVM
         if: matrix.full_checks
@@ -174,8 +204,8 @@ jobs:
 
   macos-build-test:
     name: Build & test macOS
-    runs-on: macos-14
-    timeout-minutes: 300
+    runs-on: macos-latest
+    timeout-minutes: 360
     steps:
       - name: Checkout LLVM
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -188,8 +218,8 @@ jobs:
           cmake -S llvm -B build -G Ninja \
             -DLLVM_ENABLE_PROJECTS=lld \
             -DLLVM_ENABLE_ASSERTIONS=ON \
-            -DLLVM_TARGETS_TO_BUILD="X86;AArch64;ARM;WebAssembly" \
-            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="" \
+            -DLLVM_TARGETS_TO_BUILD="AArch64;AMDGPU;ARM;BPF;Hexagon;LoongArch;MSP430;Mips;NVPTX;PowerPC;RISCV;Sparc;SystemZ;WebAssembly;X86" \
+            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="AVR;M68k;CSKY;Xtensa" \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_DOCS=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -209,12 +239,12 @@ jobs:
         run: |
           python3 .github/scripts/smoke_test.py \
             --build-dir build \
-            --expected-targets "X86;AArch64;ARM;WebAssembly"
+            --expected-targets "AArch64;AMDGPU;ARM;BPF;Hexagon;LoongArch;MSP430;Mips;NVPTX;PowerPC;RISCV;Sparc;SystemZ;WebAssembly;X86;AVR;M68k;CSKY;Xtensa"
 
   windows-build-test:
     name: Build & test Windows
     runs-on: windows-2022
-    timeout-minutes: 300
+    timeout-minutes: 360
     defaults:
       run:
         shell: bash
@@ -232,8 +262,8 @@ jobs:
           cmake -S llvm -B build -G Ninja \
             -DLLVM_ENABLE_PROJECTS=lld \
             -DLLVM_ENABLE_ASSERTIONS=ON \
-            -DLLVM_TARGETS_TO_BUILD="X86;AArch64;ARM" \
-            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="" \
+            -DLLVM_TARGETS_TO_BUILD="AArch64;AMDGPU;ARM;BPF;Hexagon;LoongArch;MSP430;Mips;NVPTX;PowerPC;RISCV;Sparc;SystemZ;WebAssembly;X86" \
+            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="AVR;M68k;CSKY;Xtensa" \
             -DLLVM_INCLUDE_EXAMPLES=OFF \
             -DLLVM_INCLUDE_DOCS=OFF \
             -DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -254,4 +284,4 @@ jobs:
         run: |
           python3 .github/scripts/smoke_test.py \
             --build-dir build \
-            --expected-targets "X86;AArch64;ARM"
+            --expected-targets "AArch64;AMDGPU;ARM;BPF;Hexagon;LoongArch;MSP430;Mips;NVPTX;PowerPC;RISCV;Sparc;SystemZ;WebAssembly;X86;AVR;M68k;CSKY;Xtensa"

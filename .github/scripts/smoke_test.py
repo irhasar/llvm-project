@@ -64,18 +64,76 @@ ASSEMBLY_TRIPLES = {
 # Backends for which we also check MC/object emission on the host.
 OBJECT_TRIPLES = {
     "AArch64": "aarch64-unknown-linux-gnu",
+    "AMDGPU": "amdgcn-amd-amdhsa",
     "ARM": "armv7-unknown-linux-gnueabihf",
+    "AVR": "avr-unknown-gnu-atmega328",
     "BPF": "bpfel-unknown-unknown",
+    "CSKY": "csky-unknown-linux-gnuabiv2",
+    "Hexagon": "hexagon-unknown-elf",
     "LoongArch": "loongarch64-unknown-linux-gnu",
+    "M68k": "m68k-unknown-linux-gnu",
+    "MSP430": "msp430-unknown-unknown",
     "Mips": "mips64el-unknown-linux-gnuabi64",
     "NVPTX": "nvptx64-nvidia-cuda",
     "PowerPC": "powerpc64le-unknown-linux-gnu",
     "RISCV": "riscv64-unknown-linux-gnu",
+    "Sparc": "sparcv9-unknown-linux-gnu",
     "SystemZ": "s390x-unknown-linux-gnu",
     "WebAssembly": "wasm32-unknown-unknown",
     "X86": "x86_64-unknown-linux-gnu",
-    "AMDGPU": "amdgcn-amd-amdhsa",
+    "Xtensa": "xtensa-unknown-elf",
 }
+
+# Tools rustc distributes in its `llvm-tools` component (src/bootstrap/src/lib.rs).
+RUSTC_LLVM_TOOLS = [
+    "llvm-cov",
+    "llvm-nm",
+    "llvm-objcopy",
+    "llvm-objdump",
+    "llvm-profdata",
+    "llvm-readobj",
+    "llvm-size",
+    "llvm-strip",
+    "llvm-ar",
+    "llvm-as",
+    "llvm-dis",
+    "llvm-link",
+    "llc",
+    "opt",
+]
+
+# (name, llc triple, lld emulation) for ELF targets rustc supports.
+ELF_LINK_CASES = [
+    ("x86_64", "x86_64-unknown-linux-gnu", "elf_x86_64"),
+    ("i386", "i686-unknown-linux-gnu", "elf_i386"),
+    ("aarch64", "aarch64-unknown-linux-gnu", "aarch64linux"),
+    ("arm", "armv7-unknown-linux-gnueabihf", "armelf_linux_eabi"),
+    ("riscv64", "riscv64-unknown-linux-gnu", "elf64lriscv"),
+    ("riscv32", "riscv32-unknown-linux-gnu", "elf32lriscv"),
+    ("loongarch64", "loongarch64-unknown-linux-gnu", "elf64loongarch"),
+    ("ppc64le", "powerpc64le-unknown-linux-gnu", "elf64lppc"),
+    ("ppc64", "powerpc64-unknown-linux-gnu", "elf64ppc"),
+    ("s390x", "s390x-unknown-linux-gnu", "elf64_s390"),
+    ("mips64el", "mips64el-unknown-linux-gnuabi64", "elf64ltsmip"),
+    ("mipsel", "mipsel-unknown-linux-gnu", "elf32ltsmip"),
+    ("sparcv9", "sparcv9-unknown-linux-gnu", "elf64_sparc"),
+    ("sparc", "sparc-unknown-linux-gnu", "elf32_sparc"),
+]
+
+COFF_LINK_CASES = [
+    ("x86_64", "x86_64-pc-windows-msvc"),
+    ("aarch64", "aarch64-pc-windows-msvc"),
+]
+
+MACHO_LINK_CASES = [
+    ("x86_64", "x86_64-apple-darwin"),
+    ("arm64", "arm64-apple-darwin"),
+]
+
+WASM_LINK_CASES = [
+    ("wasm32", "wasm32-unknown-unknown"),
+    ("wasm64", "wasm64-unknown-unknown"),
+]
 
 IR = """\
 define i32 @add(i32 %a, i32 %b) {
@@ -183,6 +241,10 @@ def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
     link_shared = h.run([llvm_config, "--link-shared"]).stdout.decode().strip()
     print(f"llvm-config --link-shared: {link_shared or '(no)'}")
 
+    for tool in RUSTC_LLVM_TOOLS:
+        path = h.tool(tool)
+        h.check(path.stat().st_size > 0, f"{tool}: empty or missing binary")
+
     ir = write(h.tmp / "sample.ll", IR)
     opt_ir = write(h.tmp / "opt.ll", OPT_IR)
 
@@ -257,10 +319,93 @@ def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
 
 
 def smoke_lld(h: Harness, test_link: bool) -> None:
-    for flavor in ("ld.lld", "ld64.lld", "lld-link", "wasm-ld"):
-        tool = h.tool(flavor)
+    ld_lld = h.tool("ld.lld")
+    ld64_lld = h.tool("ld64.lld")
+    lld_link = h.tool("lld-link")
+    wasm_ld = h.tool("wasm-ld")
+
+    for flavor, tool in (
+        ("ld.lld", ld_lld),
+        ("ld64.lld", ld64_lld),
+        ("lld-link", lld_link),
+        ("wasm-ld", wasm_ld),
+    ):
         result = h.run([tool, "--version"]).stdout.decode()
         h.check("LLD" in result or "lld" in result, f"{flavor} did not report its version")
+
+    llc = h.tool("llc")
+    ir = h.tmp / "sample.ll"
+
+    for name, triple, emulation in ELF_LINK_CASES:
+        obj = h.tmp / f"elf-{name}.o"
+        out = h.tmp / f"elf-{name}"
+        h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
+        h.run(
+            [
+                ld_lld,
+                "-m",
+                emulation,
+                "-static",
+                "-nostdlib",
+                "-e",
+                "add",
+                "-o",
+                out,
+                obj,
+            ]
+        )
+        h.check(out.stat().st_size > 0, f"ELF {name}: empty lld output")
+        h.run([h.tool("llvm-readobj"), "--file-headers", out])
+
+    for name, triple in COFF_LINK_CASES:
+        obj = h.tmp / f"coff-{name}.o"
+        out = h.tmp / f"coff-{name}.exe"
+        h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
+        h.run(
+            [
+                lld_link,
+                "/entry:add",
+                "/subsystem:console",
+                "/nodefaultlib",
+                f"/out:{out}",
+                obj,
+            ]
+        )
+        h.check(out.stat().st_size > 0, f"COFF {name}: empty lld-link output")
+        h.run([h.tool("llvm-readobj"), "--file-headers", out])
+
+    for name, triple in MACHO_LINK_CASES:
+        obj = h.tmp / f"macho-{name}.o"
+        out = h.tmp / f"macho-{name}.dylib"
+        h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
+        h.run(
+            [
+                ld64_lld,
+                "-dylib",
+                "-arch",
+                name,
+                "-platform_version",
+                "macos",
+                "11.0",
+                "11.0",
+                "-o",
+                out,
+                obj,
+            ]
+        )
+        h.check(out.stat().st_size > 0, f"Mach-O {name}: empty ld64.lld output")
+        h.check(
+            out.read_bytes()[:4] in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe"),
+            f"Mach-O {name}: bad magic",
+        )
+
+    for name, triple in WASM_LINK_CASES:
+        obj = h.tmp / f"wasm-{name}.o"
+        out = h.tmp / f"wasm-{name}.wasm"
+        h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
+        h.run([wasm_ld, "--no-entry", "--export=add", "-o", out, obj])
+        h.check(out.stat().st_size > 0, f"wasm {name}: empty wasm-ld output")
+        h.check(out.read_bytes()[:4] == b"\0asm", f"wasm {name}: bad magic")
 
     if not test_link:
         return
@@ -287,7 +432,7 @@ def smoke_lld(h: Harness, test_link: bool) -> None:
     object_file = h.tmp / "hello.o"
     h.run([cc, "-c", "-o", object_file, hello])
     relocatable = h.tmp / "hello.r.o"
-    h.run([h.tool("ld.lld"), "-r", "-o", relocatable, object_file])
+    h.run([ld_lld, "-r", "-o", relocatable, object_file])
     h.run([h.tool("llvm-readobj"), "--file-headers", relocatable])
 
 

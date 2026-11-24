@@ -5,6 +5,14 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "quick builds rustc_llvm only; full also builds std and runs codegen tests"
+        type: choice
+        options:
+          - quick
+          - full
+        default: quick
   schedule:
     - cron: '0 3 * * 1'
 
@@ -61,15 +69,22 @@ jobs:
           lld = true
           EOF
           cat rust/bootstrap.toml
-      - name: Build stage 1 rustc and std
+      - name: Build stage 1 rustc and std (full)
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'full'
         run: |
           cd rust
           ./x.py build --stage 1 --jobs 4
+      - name: Build rustc_llvm only (quick)
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'quick'
+        run: |
+          cd rust
+          ./x.py build --stage 1 --jobs 4 compiler/rustc_llvm
       - name: Test rustc_llvm bindings
         run: |
           cd rust
           ./x.py test --stage 1 compiler/rustc_llvm --no-fail-fast
-      - name: Run codegen test suite
+      - name: Run codegen test suite (full)
+        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'full'
         run: |
           cd rust
           ./x.py test --stage 1 tests/codegen --no-fail-fast

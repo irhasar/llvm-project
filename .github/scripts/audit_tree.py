@@ -84,6 +84,11 @@ EXPECTED_LLVM_MISSING_DIRS = {
     "unittests",
 }
 
+# Utilities that pull in tools rustc does not build.
+EXPECTED_LLVM_MISSING_UTILS = {
+    "llvm-locstats",
+}
+
 EXPECTED_LLD_SUBDIRS = {
     "COFF",
     "Common",
@@ -191,6 +196,10 @@ def check_llvm_layout(files: set[str]) -> None:
     for required in ("llvm/projects/CMakeLists.txt", "llvm/runtimes/CMakeLists.txt"):
         if required not in files:
             fail(f"missing LLVM build glue: {required}")
+
+    for removed in EXPECTED_LLVM_MISSING_UTILS:
+        if any(path.startswith(f"llvm/utils/{removed}/") for path in files):
+            fail(f"llvm/utils/{removed} must not be present (pulls in unused tools)")
 
     target_dir = REPO_ROOT / "llvm/lib/Target"
     if not target_dir.is_dir():
