@@ -4,6 +4,11 @@ permissions:
   contents: read
 
 on:
+  push:
+    branches:
+      - 'rakit*'
+    paths:
+      - '.github/workflows/rustc-integration.yml'
   workflow_dispatch:
     inputs:
       mode:
@@ -70,12 +75,12 @@ jobs:
           EOF
           cat rust/bootstrap.toml
       - name: Build stage 1 rustc and std (full)
-        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'full'
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
         run: |
           cd rust
           ./x.py build --stage 1 --jobs 4
       - name: Build rustc_llvm only (quick)
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'quick'
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'quick')
         run: |
           cd rust
           ./x.py build --stage 1 --jobs 4 compiler/rustc_llvm
@@ -84,7 +89,7 @@ jobs:
           cd rust
           ./x.py test --stage 1 compiler/rustc_llvm --no-fail-fast
       - name: Run codegen test suite (full)
-        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'full'
+        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
         run: |
           cd rust
           ./x.py test --stage 1 tests/codegen --no-fail-fast
