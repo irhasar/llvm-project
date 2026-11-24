@@ -55,6 +55,7 @@ EXPECTED_TOOLS = {
     "llvm-objdump",
     "llvm-profdata",
     "llvm-readobj",
+    "llvm-shlib",
     "llvm-size",
     "llubi",
     "opt",
