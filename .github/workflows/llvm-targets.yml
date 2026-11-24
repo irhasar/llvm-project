@@ -58,7 +58,7 @@ jobs:
           LLVM_EXPERIMENTAL_TARGETS: ${{ matrix.experimental }}
         run: |
           cmake -S llvm -B build -G Ninja \
-            -DLLVM_ENABLE_PROJECTS= \
+            -DLLVM_ENABLE_PROJECTS=lld \
             -DLLVM_TARGETS_TO_BUILD="${LLVM_TARGETS}" \
             -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="${LLVM_EXPERIMENTAL_TARGETS}" \
             -DLLVM_ENABLE_ASSERTIONS=ON \
@@ -78,6 +78,6 @@ jobs:
             -DCMAKE_C_COMPILER=clang-18 \
             -DCMAKE_CXX_COMPILER=clang++-18
       - name: Build target tools
-        run: cmake --build build --target llc llvm-config llvm-readobj llvm-objdump -j 4
+        run: cmake --build build --target llc llvm-config llvm-readobj llvm-objdump ld.lld wasm-ld -j 4
       - name: Smoke test the backend
         run: python3 .github/scripts/target_smoke.py --build-dir build --target "${{ matrix.target }}"

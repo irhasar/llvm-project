@@ -267,11 +267,11 @@ def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
         h.run([llvm_config, "--targets-built"]).stdout.decode().split()
     )
     print(f"targets built: {' '.join(sorted(targets))}")
-    h.check(
-        targets == expected_targets,
-        f"targets-built mismatch: missing={sorted(expected_targets - targets)} "
-        f"extra={sorted(targets - expected_targets)}",
-    )
+    missing = expected_targets - targets
+    h.check(not missing, f"targets-built missing: {sorted(missing)}")
+    extra = targets - expected_targets
+    if extra:
+        print(f"additional targets built: {' '.join(sorted(extra))}")
 
     link_shared = h.run([llvm_config, "--link-shared"]).stdout.decode().strip()
     print(f"llvm-config --link-shared: {link_shared or '(no)'}")

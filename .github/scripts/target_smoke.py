@@ -33,6 +33,33 @@ TARGETS = {
     "Xtensa": ("xtensa-unknown-elf", True),
 }
 
+LINK_CASES = {
+    "AArch64": [("aarch64", "aarch64-unknown-linux-gnu", "aarch64linux")],
+    "ARM": [("arm", "armv7-unknown-linux-gnueabihf", "armelf_linux_eabi")],
+    "LoongArch": [("loongarch64", "loongarch64-unknown-linux-gnu", "elf64loongarch")],
+    "Mips": [
+        ("mips64el", "mips64el-unknown-linux-gnuabi64", "elf64ltsmip"),
+        ("mipsel", "mipsel-unknown-linux-gnu", "elf32ltsmip"),
+    ],
+    "PowerPC": [
+        ("ppc64le", "powerpc64le-unknown-linux-gnu", "elf64lppc"),
+        ("ppc64", "powerpc64-unknown-linux-gnu", "elf64lppc"),
+    ],
+    "RISCV": [
+        ("riscv64", "riscv64-unknown-linux-gnu", "elf64lriscv"),
+        ("riscv32", "riscv32-unknown-linux-gnu", "elf32lriscv"),
+    ],
+    "Sparc": [
+        ("sparcv9", "sparcv9-unknown-linux-gnu", "elf64_sparc"),
+        ("sparc", "sparc-unknown-linux-gnu", "elf32_sparc"),
+    ],
+    "SystemZ": [("s390x", "s390x-unknown-linux-gnu", "elf64_s390")],
+    "X86": [
+        ("x86_64", "x86_64-unknown-linux-gnu", "elf_x86_64"),
+        ("i386", "i686-unknown-linux-gnu", "elf_i386"),
+    ],
+}
+
 IR = """\
 define i32 @add(i32 %a, i32 %b) {
 entry:
@@ -93,18 +120,48 @@ def main() -> int:
 
     ir = harness.tmp / "sample.ll"
     ir.write_text(IR)
+    extra = ["-mcpu", "gfx900"] if args.target == "AMDGPU" else []
 
     asm = harness.tmp / f"{args.target}.s"
-    harness.run([llc, "-mtriple", triple, "-filetype=asm", "-o", asm, ir])
+    harness.run([llc, "-mtriple", triple, *extra, "-filetype=asm", "-o", asm, ir])
     harness.check(asm.stat().st_size > 0, f"{args.target}: empty assembly output")
     harness.check("add" in asm.read_text(errors="replace"), f"{args.target}: assembly lost @add")
 
     if object_supported:
         obj = harness.tmp / f"{args.target}.o"
-        harness.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
+        harness.run([llc, "-mtriple", triple, *extra, "-filetype=obj", "-o", obj, ir])
         harness.check(obj.stat().st_size > 0, f"{args.target}: empty object output")
         harness.run([harness.tool("llvm-readobj"), "--file-headers", obj])
         harness.run([harness.tool("llvm-objdump"), "-d", obj])
+
+    for name, link_triple, emulation in LINK_CASES.get(args.target, []):
+        obj = harness.tmp / f"link-{name}.o"
+        out = harness.tmp / f"link-{name}"
+        harness.run([llc, "-mtriple", link_triple, "-filetype=obj", "-o", obj, ir])
+        harness.run(
+            [
+                harness.tool("ld.lld"),
+                "-m",
+                emulation,
+                "-static",
+                "-nostdlib",
+                "-e",
+                "add",
+                "-o",
+                out,
+                obj,
+            ]
+        )
+        harness.check(out.stat().st_size > 0, f"{args.target} {name}: empty ld.lld output")
+        harness.run([harness.tool("llvm-readobj"), "--file-headers", out])
+
+    if args.target == "WebAssembly":
+        obj = harness.tmp / "wasm.o"
+        out = harness.tmp / "wasm.wasm"
+        harness.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
+        harness.run([harness.tool("wasm-ld"), "--no-entry", "--export=add", "-o", out, obj])
+        harness.check(out.stat().st_size > 0, "WebAssembly: empty wasm-ld output")
+        harness.check(out.read_bytes()[:4] == b"\0asm", "WebAssembly: bad wasm magic")
 
     print(f"{args.target} target smoke test passed.")
     return 0

@@ -26,8 +26,8 @@ jobs:
         include:
           - name: builtins and CRT
             options: '-DCOMPILER_RT_BUILD_BUILTINS=ON -DCOMPILER_RT_BUILD_CRT=ON'
-            build_target: builtins
-            expect: 'libclang_rt.builtins-* crtbegin*.o'
+            build_target: ''
+            expect: 'libclang_rt.builtins-* clang_rt.crtbegin*.o clang_rt.crtend*.o'
           - name: sanitizers
             options: '-DCOMPILER_RT_BUILD_SANITIZERS=ON'
             build_target: ''
@@ -47,7 +47,7 @@ jobs:
           - name: orc
             options: '-DCOMPILER_RT_BUILD_ORC=ON'
             build_target: ''
-            expect: 'libclang_rt.orc-*'
+            expect: 'liborc_rt*.a'
           - name: memprof
             options: '-DCOMPILER_RT_BUILD_MEMPROF=ON'
             build_target: ''
@@ -86,6 +86,8 @@ jobs:
             -DCMAKE_C_COMPILER=clang-18 \
             -DCMAKE_CXX_COMPILER=clang++-18
           cmake --build build-llvm --target llvm-config -j 4
+      - name: Determine native target
+        run: echo "NATIVE_TRIPLE=$(clang-18 -print-target-triple)" >> "${GITHUB_ENV}"
       - name: Configure compiler-rt
         env:
           RT_OPTIONS: ${{ matrix.options }}
@@ -94,6 +96,9 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-18 \
             -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DCMAKE_C_COMPILER_TARGET="${NATIVE_TRIPLE}" \
+            -DCMAKE_CXX_COMPILER_TARGET="${NATIVE_TRIPLE}" \
+            -DCMAKE_ASM_COMPILER_TARGET="${NATIVE_TRIPLE}" \
             -DLLVM_CONFIG_PATH="$PWD/build-llvm/bin/llvm-config" \
             -DCOMPILER_RT_BUILD_BUILTINS=OFF \
             -DCOMPILER_RT_BUILD_CRT=OFF \
@@ -185,6 +190,7 @@ jobs:
             -DCMAKE_C_COMPILER_TARGET="${TRIPLE}" \
             -DCMAKE_CXX_COMPILER_TARGET="${TRIPLE}" \
             -DCMAKE_ASM_COMPILER_TARGET="${TRIPLE}" \
+            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
             -DLLVM_CONFIG_PATH="$PWD/build-llvm/bin/llvm-config" \
             -DCOMPILER_RT_BUILD_BUILTINS=ON \
             -DCOMPILER_RT_BUILD_CRT=OFF \

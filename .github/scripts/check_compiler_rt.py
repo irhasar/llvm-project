@@ -22,12 +22,12 @@ HOST_PATTERNS = [
     "libclang_rt.lsan-*",
     "libclang_rt.profile-*",
     "libclang_rt.fuzzer-*",
-    "libclang_rt.orc-*",
+    "liborc_rt*",
     "libclang_rt.xray-*",
     "libclang_rt.memprof-*",
     "libclang_rt.ctx_profile-*",
-    "crtbegin*.o",
-    "crtend*.o",
+    "clang_rt.crtbegin*.o",
+    "clang_rt.crtend*.o",
 ]
 
 BUILTINS_PATTERNS = [

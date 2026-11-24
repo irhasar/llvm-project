@@ -41,11 +41,37 @@ jobs:
             .github/scripts/target_smoke.py \
             .github/scripts/check_compiler_rt.py \
             .github/scripts/check_rustc_wrapper.py
-      - name: Validate workflow YAML
+      - name: Validate workflow structure
         run: |
           python3 - <<'PY'
-          import pathlib, yaml
+          import pathlib
+          import sys
+          import yaml
+
+          problems = []
           for path in sorted(pathlib.Path('.github/workflows').glob('*.y*ml')):
-              yaml.safe_load(path.read_text())
+              doc = yaml.safe_load(path.read_text())
+              if not isinstance(doc, dict):
+                  problems.append(f'{path}: top level is not a mapping')
+                  continue
+              # PyYAML 1.1 parses the unquoted GitHub key `on` as True.
+              if 'on' not in doc and True not in doc:
+                  problems.append(f'{path}: missing on: trigger')
+              jobs = doc.get('jobs')
+              if not isinstance(jobs, dict) or not jobs:
+                  problems.append(f'{path}: missing or empty jobs mapping')
+                  continue
+              for name, job in jobs.items():
+                  if not isinstance(job, dict):
+                      problems.append(f'{path}: job {name} is not a mapping')
+                      continue
+                  if 'runs-on' not in job and 'uses' not in job:
+                      problems.append(f'{path}: job {name} has no runs-on or uses')
+                  steps = job.get('steps')
+                  if steps is not None and not isinstance(steps, list):
+                      problems.append(f'{path}: job {name} steps is not a list')
               print(f'{path}: ok')
+          if problems:
+              print('\n'.join(problems), file=sys.stderr)
+              sys.exit(1)
           PY
