@@ -254,7 +254,7 @@ def write(path: Path, contents: str) -> Path:
     return path
 
 
-def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
+def smoke_llvm(h: Harness, expected_targets: set[str], expect_shared: bool = False) -> None:
     llvm_config = h.tool("llvm-config")
 
     version = h.run([llvm_config, "--version"]).stdout.decode().strip()
@@ -271,8 +271,10 @@ def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
     if extra:
         print(f"additional targets built: {' '.join(sorted(extra))}")
 
-    link_shared = h.run([llvm_config, "--link-shared"]).stdout.decode().strip()
-    print(f"llvm-config --link-shared: {link_shared or '(no)'}")
+    shared_mode = h.run([llvm_config, "--shared-mode"]).stdout.decode().strip()
+    print(f"llvm-config --shared-mode: {shared_mode}")
+    if expect_shared:
+        h.check(shared_mode == "shared", f"expected shared LLVM, got {shared_mode}")
 
     for tool in RUSTC_LLVM_TOOLS:
         path = h.tool(tool)
@@ -497,6 +499,11 @@ def main() -> int:
         action="store_true",
         help="run a real clang + ld.lld link and execute the result",
     )
+    parser.add_argument(
+        "--expect-shared",
+        action="store_true",
+        help="require llvm-config --shared-mode to report a shared build",
+    )
     args = parser.parse_args()
 
     if args.only_target:
@@ -509,7 +516,7 @@ def main() -> int:
         }
 
     harness = Harness(args.build_dir.resolve())
-    smoke_llvm(harness, expected_targets)
+    smoke_llvm(harness, expected_targets, args.expect_shared)
     smoke_lld(harness, args.test_link, expected_targets)
     print("LLVM/LLD smoke tests passed.")
     return 0

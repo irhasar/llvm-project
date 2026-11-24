@@ -109,9 +109,13 @@ jobs:
           CC: ${{ runner.os == 'Linux' && 'clang-18' || 'clang' }}
           LLVM_TARGETS: ${{ matrix.targets }}
           LLVM_TEST_LINK: ${{ matrix.test_link }}
+          LLVM_DYLIB: ${{ matrix.dylib }}
         run: |
           args=(--build-dir build --expected-targets "${LLVM_TARGETS}")
           if [[ "${LLVM_TEST_LINK}" == "true" ]]; then
             args+=(--test-link)
+          fi
+          if [[ "${LLVM_DYLIB}" == "ON" ]]; then
+            args+=(--expect-shared)
           fi
           python3 .github/scripts/smoke_test.py "${args[@]}"
