@@ -65,7 +65,9 @@ EXPECTED_TOP_LEVEL = {
     ".github",
     ".gitattributes",
     ".gitignore",
+    "AGENTS.md",
     "LICENSE.TXT",
+    "MIGRATION_TO_RUST.md",
     "README.md",
     "cmake",
     "compiler-rt",
@@ -73,6 +75,7 @@ EXPECTED_TOP_LEVEL = {
     "libunwind",
     "lld",
     "llvm",
+    "rust-toolchain.toml",
     "third-party",
 }
 
