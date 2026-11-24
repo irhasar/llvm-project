@@ -286,6 +286,46 @@ stays opt-in and is documented as "needs a tuned `LLVM_RUST_FLAGS`". It is
 kept in the tree as the control case for the experiment: it shows that the
 gap is a codegen-model issue rather than anything specific to the algorithm.
 
+## Codegen investigation: why the generic x86-64 build loses
+
+The MD5 regression is not specific to Rust. It is the difference between GCC and
+LLVM for the same algorithm on baseline x86-64, and it is visible pass by pass.
+Dumping the machine pipeline of the MD5 crate (`-C llvm-args=-print-after-all`)
+and following `body_raw` gives:
+
+| target | after ISel | after two-address | final asm |
+| ------ | ---------- | ----------------- | --------- |
+| `generic`   | 736 (64 `rol`)  | 868 | 646 (29 `lea`, 231 `add`, 64 `rol`) |
+| `x86-64-v3` | 736 (64 `rorx`) | 773 | 650 (19 `lea`, 241 `add`, 64 `rorx`) |
+| `znver4`    | 736 (64 `rorx`) | 773 | 593 (65 `lea`, 131 `add`, 64 `rorx`) |
+
+Three separate effects:
+
+1. `rol` versus `rorx` is decided during instruction selection and needs BMI2.
+   A two-operand `rol` forces a copy whenever the input is still live, which is
+   why the two-address pass grows the function from 736 to 868 instructions on
+   `generic` but only to 773 with `rorx`.
+2. `x86-64-v3` and `znver4` produce byte-identical machine code after the
+   two-address pass. They first differ in the machine scheduler and diverge from
+   there through register allocation. `x86-fixup-leas` then rewrites 34 LEAs back
+   into ADDs in the generic and `x86-64-v3` runs but only 2 in the `znver4` run.
+   This is why `-C target-feature=+bmi2` alone does not help: it buys `rorx` but
+   not the register allocation that keeps the LEAs.
+3. GCC fuses `add(add(x, y), imm)` into `lea imm(x, y)` (82 `add` + 116 `lea`
+   per MD5 block) while LLVM emits 231 plain adds and only 29 LEAs. That fusion
+   accounts for most of the remaining ~10% instruction-count gap.
+
+So there is no single flag to flip. The `generic` model needs LEA fusion for
+arithmetic chains to match GCC; the `znver4` model already has it.
+
+A targeted improvement would be a post-RA fold in `X86FixupLEAs`: when an
+`ADD32ri`/`ADD64ri32` reads the result of a `LEA` with a zero displacement, the
+register is dead after the add and EFLAGS is dead, merge the immediate into the
+LEA displacement and delete the add. That is worth about 64 instructions per MD5
+block on baseline x86-64. It is not implemented here: it changes shared codegen
+for every x86 target, and this fork does not carry `llvm/test`, so there is no
+CodeGen suite to check it against.
+
 ## Risks and mitigations
 
 | Risk | Mitigation |
@@ -311,7 +351,9 @@ keeps every step of the migration reversible.
    are acceptable for release builds; the generic codegen path still loses
    about 9% on SipHash 4 KiB inputs because of the generic scheduling model.
 2. Port `SHA1.cpp` and `SHA256.cpp` next; MD5 is done and serves as the
-   control case for generic-codegen regressions.
+   control case for generic-codegen regressions. Both will hit the same
+   `generic`-codegen gap documented above, so land the x86 LEA fusion first if
+   the goal is for the default build to win.
 3. Add a CI leg that builds `LLVMSupport` with `LLVM_ENABLE_RUST_SIPHASH=ON`,
    `LLVM_ENABLE_RUST_CRC=ON` and `LLVM_ENABLE_RUST_MD5=ON` and runs
    `check-llvm-rust-*` plus the three golden tests.
