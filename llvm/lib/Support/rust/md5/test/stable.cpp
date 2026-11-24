@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/MD5.h"
 
@@ -55,9 +56,7 @@ int main(int Argc, char **Argv) {
   for (const Case &C : Cases) {
     ArrayRef<uint8_t> Data(reinterpret_cast<const uint8_t *>(C.Data), C.Len);
     MD5::MD5Result Result = MD5::hash(Data);
-    char Hex[33];
-    for (int I = 0; I < 16; ++I)
-      std::snprintf(Hex + I * 2, 3, "%02x", Result[I]);
+    SmallString<32> Hex = Result.digest();
 
     if (Emit) {
       std::printf("    {\"");
@@ -68,15 +67,29 @@ int main(int Argc, char **Argv) {
         else
           std::printf("\\x%02x", Ch);
       }
-      std::printf("\", %zu, \"%s\", 0x%016llXULL, 0x%016llXULL},\n", C.Len, Hex,
-                  static_cast<unsigned long long>(Result.low()),
+      std::printf("\", %zu, \"%s\", 0x%016llXULL, 0x%016llXULL},\n", C.Len,
+                  Hex.c_str(), static_cast<unsigned long long>(Result.low()),
                   static_cast<unsigned long long>(Result.high()));
       continue;
     }
 
-    if (std::strcmp(Hex, C.Hex) != 0) {
-      std::fprintf(stderr, "digest mismatch for \"%s\": %s vs %s\n", C.Data, Hex,
-                   C.Hex);
+    // A mid-stream result() snapshot must not consume the state, and the same
+    // bytes fed in two updates must produce the same digest.
+    MD5 Split;
+    size_t First = C.Len / 2;
+    Split.update(Data.take_front(First));
+    (void)Split.result();
+    Split.update(Data.drop_front(First));
+    MD5::MD5Result SplitResult;
+    Split.final(SplitResult);
+    if (SplitResult.digest() != Hex) {
+      std::fprintf(stderr, "split update mismatch for \"%s\"\n", C.Data);
+      return 1;
+    }
+
+    if (Hex != StringRef(C.Hex)) {
+      std::fprintf(stderr, "digest mismatch for \"%s\": %s vs %s\n", C.Data,
+                   Hex.c_str(), C.Hex);
       return 1;
     }
     if (Result.low() != C.Low || Result.high() != C.High) {

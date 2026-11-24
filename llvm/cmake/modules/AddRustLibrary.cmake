@@ -29,9 +29,20 @@ function(add_llvm_rust_staticlib name manifest)
     "${crate_dir}/src/*.rs" "${crate_dir}/Cargo.lock")
   list(APPEND crate_sources "${manifest}")
 
+  # Cargo picks its own target, independently of the C++ compiler, so ask it
+  # which host triple it will build for and derive the archive name from that.
+  execute_process(
+    COMMAND "${LLVM_RUST_CARGO_EXECUTABLE}" -vV
+    OUTPUT_VARIABLE rust_version
+    ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(rust_version MATCHES "host: ([A-Za-z0-9_.-]+)")
+    set(rust_host "${CMAKE_MATCH_1}")
+  endif()
+
   set(target_dir "${CMAKE_CURRENT_BINARY_DIR}/rust/${name}")
-  # Rust's MSVC target writes <name>.lib, the GNU targets write lib<name>.a.
-  if(MSVC)
+  # Rust's MSVC targets write <name>.lib, the GNU targets write lib<name>.a.
+  if(rust_host MATCHES "-msvc$" OR (NOT rust_host AND MSVC))
     set(archive "${target_dir}/release/${name}.lib")
   else()
     set(archive "${target_dir}/release/lib${name}.a")

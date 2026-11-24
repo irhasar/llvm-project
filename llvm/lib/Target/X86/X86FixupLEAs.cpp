@@ -327,15 +327,22 @@ bool FixupLEAsImpl::flagsLiveAfter(MachineBasicBlock::iterator I) const {
       continue;
     if (J->readsRegister(X86::EFLAGS, TRI))
       return true;
-    if (J->modifiesRegister(X86::EFLAGS, TRI))
-      return !fullyDefinesStatusFlags(TII->getName(J->getOpcode()));
+    // Only a full overwrite ends the scan. Partial writers such as ROL or INC
+    // leave part of the ADD's flags live, so keep looking for a reader.
+    if (J->modifiesRegister(X86::EFLAGS, TRI) &&
+        fullyDefinesStatusFlags(TII->getName(J->getOpcode())))
+      return false;
   }
   return true;
 }
 
 bool FixupLEAsImpl::foldAddImmediateIntoLEA(MachineBasicBlock &MBB) const {
-  SmallVector<std::pair<MachineInstr *, int64_t>, 8> LEAUpdates;
-  SmallVector<MachineInstr *, 8> AddToErase;
+  struct Fold {
+    MachineInstr *LEA;
+    MachineInstr *Add;
+    int64_t Disp;
+  };
+  SmallVector<Fold, 8> Folds;
 
   for (auto I = MBB.begin(), E = MBB.end(); I != E; ++I) {
     MachineInstr &Add = *I;
@@ -391,17 +398,31 @@ bool FixupLEAsImpl::foldAddImmediateIntoLEA(MachineBasicBlock &MBB) const {
     if (flagsLiveAfter(I))
       continue;
 
-    LEAUpdates.push_back({&LEA, NewDisp});
-    AddToErase.push_back(&Add);
+    Folds.push_back({&LEA, &Add, NewDisp});
   }
 
-  for (auto &Update : LEAUpdates)
-    Update.first->getOperand(4).setImm(Update.second);
-  for (MachineInstr *Add : AddToErase)
-    Add->eraseFromParent();
+  MachineFunction *MF = MBB.getParent();
+  for (const Fold &F : Folds) {
+    MachineInstr &LEA = *F.LEA;
+    MachineInstr &Add = *F.Add;
+    // Build a fresh LEA instead of rewriting the old one so debug instruction
+    // references to either the LEA or the ADD become unavailable rather than
+    // silently describing a different value.
+    MachineInstrBuilder MIB =
+        BuildMI(MBB, Add, LEA.getDebugLoc(), TII->get(LEA.getOpcode()));
+    for (unsigned I = 0, E = LEA.getNumOperands(); I != E; ++I) {
+      if (I == 4)
+        MIB.addImm(F.Disp);
+      else
+        MIB.add(LEA.getOperand(I));
+    }
+    MF->substituteDebugValuesForInst(Add, *MIB);
+    Add.eraseFromParent();
+    LEA.eraseFromParent();
+  }
 
-  NumFoldedAddImmediates += AddToErase.size();
-  return !AddToErase.empty();
+  NumFoldedAddImmediates += Folds.size();
+  return !Folds.empty();
 }
 
 FixupLEAsImpl::RegUsageState

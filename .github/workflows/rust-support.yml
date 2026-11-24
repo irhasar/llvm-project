@@ -32,10 +32,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Install Rust nightly
+      - name: Install Rust
         run: |
-          rustup toolchain install nightly --profile minimal --component clippy,rustfmt
-          rustup default nightly
+          rustup toolchain install --profile minimal
           rustc --version
       - name: fmt, clippy and unit tests
         run: |
@@ -61,11 +60,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++ zlib1g-dev
-      - name: Install Rust nightly
+      - name: Install Rust
         if: matrix.backend == 'rust'
         run: |
-          rustup toolchain install nightly --profile minimal
-          rustup default nightly
+          rustup toolchain install --profile minimal
           rustc --version
       - name: Configure
         run: |
@@ -118,10 +116,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++ zlib1g-dev ccache
-      - name: Install Rust nightly
+      - name: Install Rust
         run: |
-          rustup toolchain install nightly --profile minimal
-          rustup default nightly
+          rustup toolchain install --profile minimal
           rustc --version
       - name: Configure
         run: |

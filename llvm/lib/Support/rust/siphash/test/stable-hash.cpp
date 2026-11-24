@@ -67,7 +67,7 @@ int Failures = 0;
 
 void EmitHex(const uint8_t *Bytes, size_t Len) {
   for (size_t I = 0; I < Len; ++I)
-    std::printf("%02x", Bytes[I]);
+    std::printf(I ? ", 0x%02x" : "0x%02x", Bytes[I]);
 }
 
 int Run(bool Emit) {
