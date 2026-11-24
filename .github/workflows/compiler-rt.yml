@@ -183,6 +183,16 @@ jobs:
           TRIPLE: ${{ matrix.triple }}
           BAREMETAL: ${{ matrix.baremetal }}
         run: |
+          extra=()
+          if [[ "${BAREMETAL}" == "ON" ]]; then
+            extra+=(-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY)
+          else
+            case "${TRIPLE}" in
+              aarch64-*) extra+=(-DCMAKE_SYSROOT=/usr/aarch64-linux-gnu) ;;
+              armv7-*) extra+=(-DCMAKE_SYSROOT=/usr/arm-linux-gnueabihf) ;;
+              riscv64-*) extra+=(-DCMAKE_SYSROOT=/usr/riscv64-linux-gnu) ;;
+            esac
+          fi
           cmake -S compiler-rt -B build-rt -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-18 \
@@ -190,7 +200,7 @@ jobs:
             -DCMAKE_C_COMPILER_TARGET="${TRIPLE}" \
             -DCMAKE_CXX_COMPILER_TARGET="${TRIPLE}" \
             -DCMAKE_ASM_COMPILER_TARGET="${TRIPLE}" \
-            -DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+            "${extra[@]}" \
             -DLLVM_CONFIG_PATH="$PWD/build-llvm/bin/llvm-config" \
             -DCOMPILER_RT_BUILD_BUILTINS=ON \
             -DCOMPILER_RT_BUILD_CRT=OFF \

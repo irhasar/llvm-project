@@ -50,6 +50,7 @@ jobs:
 
           problems = []
           for path in sorted(pathlib.Path('.github/workflows').glob('*.y*ml')):
+              before = len(problems)
               doc = yaml.safe_load(path.read_text())
               if not isinstance(doc, dict):
                   problems.append(f'{path}: top level is not a mapping')
@@ -70,7 +71,8 @@ jobs:
                   steps = job.get('steps')
                   if steps is not None and not isinstance(steps, list):
                       problems.append(f'{path}: job {name} steps is not a list')
-              print(f'{path}: ok')
+              if len(problems) == before:
+                  print(f'{path}: ok')
           if problems:
               print('\n'.join(problems), file=sys.stderr)
               sys.exit(1)

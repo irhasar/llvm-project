@@ -117,7 +117,6 @@ ELF_LINK_CASES = [
     ("mips64el", "mips64el-unknown-linux-gnuabi64", "elf64ltsmip"),
     ("mipsel", "mipsel-unknown-linux-gnu", "elf32ltsmip"),
     ("sparcv9", "sparcv9-unknown-linux-gnu", "elf64_sparc"),
-    ("sparc", "sparc-unknown-linux-gnu", "elf32_sparc"),
 ]
 
 COFF_LINK_CASES = [

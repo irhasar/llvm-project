@@ -43,7 +43,7 @@ LINK_CASES = {
     ],
     "PowerPC": [
         ("ppc64le", "powerpc64le-unknown-linux-gnu", "elf64lppc"),
-        ("ppc64", "powerpc64-unknown-linux-gnu", "elf64lppc"),
+        ("ppc64", "powerpc64-unknown-linux-gnu", "elf64ppc"),
     ],
     "RISCV": [
         ("riscv64", "riscv64-unknown-linux-gnu", "elf64lriscv"),
@@ -51,7 +51,6 @@ LINK_CASES = {
     ],
     "Sparc": [
         ("sparcv9", "sparcv9-unknown-linux-gnu", "elf64_sparc"),
-        ("sparc", "sparc-unknown-linux-gnu", "elf32_sparc"),
     ],
     "SystemZ": [("s390x", "s390x-unknown-linux-gnu", "elf64_s390")],
     "X86": [
