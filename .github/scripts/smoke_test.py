@@ -501,7 +501,7 @@ def main() -> int:
     parser.add_argument(
         "--expect-shared",
         action="store_true",
-        help="require shared LLVM libraries and link-shared flags",
+        help="require llvm-config to emit shared-link flags",
     )
     args = parser.parse_args()
 
