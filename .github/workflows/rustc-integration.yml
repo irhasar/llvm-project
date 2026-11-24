@@ -4,6 +4,7 @@ permissions:
   contents: read
 
 on:
+  pull_request:
   push:
     branches:
       - 'rakit*'
@@ -22,14 +23,34 @@ on:
     - cron: '0 3 * * 1'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}-${{ inputs.mode || 'default' }}
   cancel-in-progress: true
 
 jobs:
-  build-rustc:
-    name: Build rustc 1.99.0 with this LLVM
+  resolve-rust:
+    name: Resolve rustc nightly revision
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Resolve rust-lang/rust main
+        id: sha
+        run: |
+          set -euo pipefail
+          sha="$(git ls-remote https://github.com/rust-lang/rust main | cut -f1)"
+          if [[ ! "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "failed to resolve rust-lang/rust main" >&2
+            exit 1
+          fi
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+
+  quick:
+    name: Build and test rustc_llvm (nightly)
+    needs: resolve-rust
+    if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'quick')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
     steps:
       - name: Checkout pruned LLVM
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -40,7 +61,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: rust-lang/rust
-          ref: 1.99.0
+          ref: ${{ needs.resolve-rust.outputs.sha }}
           fetch-depth: 1
           submodules: true
           path: rust
@@ -75,13 +96,7 @@ jobs:
           lld = true
           EOF
           cat rust/bootstrap.toml
-      - name: Build stage 1 rustc and std (full)
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
-        run: |
-          cd rust
-          ./x.py build --stage 1 --jobs 4
-      - name: Build rustc_llvm only (quick)
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'quick')
+      - name: Build rustc_llvm only
         run: |
           cd rust
           ./x.py build --stage 1 --jobs 4 compiler/rustc_llvm
@@ -89,8 +104,139 @@ jobs:
         run: |
           cd rust
           ./x.py test --stage 1 compiler/rustc_llvm --no-fail-fast
-      - name: Run codegen test suite (full)
-        if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+
+  full-build:
+    name: Build stage 1 rustc (full)
+    needs: resolve-rust
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout pruned LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          path: llvm-project
+      - name: Checkout rustc
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: rust-lang/rust
+          ref: ${{ needs.resolve-rust.outputs.sha }}
+          fetch-depth: 1
+          submodules: true
+          path: rust
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake ninja-build zlib1g-dev libzstd-dev \
+            pkg-config libssl-dev
+      - name: Vendor this tree as rustc's src/llvm-project
+        run: |
+          rm -rf rust/src/llvm-project
+          cp -a llvm-project rust/src/llvm-project
+          rm -rf rust/src/llvm-project/.git
+      - name: Configure rustc to build LLVM, LLD and compiler-rt from source
+        run: |
+          cat > rust/bootstrap.toml <<'EOF'
+          [build]
+          submodules = false
+          optimized-compiler-builtins = true
+
+          [llvm]
+          download-ci-llvm = false
+          assertions = true
+
+          [rust]
+          download-rustc = false
+          lld = true
+          EOF
+          cat rust/bootstrap.toml
+      - name: Build stage 1 rustc and std
+        run: |
+          cd rust
+          ./x.py build --stage 1 --jobs 8
+      - name: Archive stage 1 build
+        run: |
+          cd rust/build
+          tar -cf "${RUNNER_TEMP}/rustc-stage1.tar" \
+            x86_64-unknown-linux-gnu/stage0* \
+            x86_64-unknown-linux-gnu/stage1* \
+            x86_64-unknown-linux-gnu/llvm
+      - name: Upload stage 1 build
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustc-stage1
+          path: ${{ runner.temp }}/rustc-stage1.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  full-codegen:
+    name: Run codegen tests (full)
+    needs: [resolve-rust, full-build]
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout pruned LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          path: llvm-project
+      - name: Checkout rustc
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: rust-lang/rust
+          ref: ${{ needs.resolve-rust.outputs.sha }}
+          fetch-depth: 1
+          submodules: true
+          path: rust
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake ninja-build zlib1g-dev libzstd-dev \
+            pkg-config libssl-dev
+      - name: Vendor this tree as rustc's src/llvm-project
+        run: |
+          rm -rf rust/src/llvm-project
+          cp -a llvm-project rust/src/llvm-project
+          rm -rf rust/src/llvm-project/.git
+      - name: Configure rustc to build LLVM, LLD and compiler-rt from source
+        run: |
+          cat > rust/bootstrap.toml <<'EOF'
+          [build]
+          submodules = false
+          optimized-compiler-builtins = true
+
+          [llvm]
+          download-ci-llvm = false
+          assertions = true
+
+          [rust]
+          download-rustc = false
+          lld = true
+          EOF
+          cat rust/bootstrap.toml
+      - name: Download stage 1 build
+        uses: actions/download-artifact@v4
+        with:
+          name: rustc-stage1
+          path: ${{ runner.temp }}
+      - name: Restore stage 1 build
+        run: |
+          mkdir -p rust/build
+          tar -C rust/build -xf "${RUNNER_TEMP}/rustc-stage1.tar"
+      - name: Run codegen test suite
         run: |
           cd rust
           ./x.py test --stage 1 tests/codegen --no-fail-fast

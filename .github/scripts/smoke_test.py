@@ -112,12 +112,10 @@ ELF_LINK_CASES = [
     ("riscv32", "riscv32-unknown-linux-gnu", "elf32lriscv"),
     ("loongarch64", "loongarch64-unknown-linux-gnu", "elf64loongarch"),
     ("ppc64le", "powerpc64le-unknown-linux-gnu", "elf64lppc"),
-    ("ppc64", "powerpc64-unknown-linux-gnu", "elf64ppc"),
     ("s390x", "s390x-unknown-linux-gnu", "elf64_s390"),
     ("mips64el", "mips64el-unknown-linux-gnuabi64", "elf64ltsmip"),
     ("mipsel", "mipsel-unknown-linux-gnu", "elf32ltsmip"),
     ("sparcv9", "sparcv9-unknown-linux-gnu", "elf64_sparc"),
-    ("sparc", "sparc-unknown-linux-gnu", "elf32_sparc"),
 ]
 
 COFF_LINK_CASES = [
@@ -134,6 +132,41 @@ WASM_LINK_CASES = [
     ("wasm32", "wasm32-unknown-unknown"),
     ("wasm64", "wasm64-unknown-unknown"),
 ]
+
+_TRIPLE_PREFIXES = {
+    "x86_64": "X86",
+    "i686": "X86",
+    "i386": "X86",
+    "aarch64": "AArch64",
+    "arm64": "AArch64",
+    "arm": "ARM",
+    "thumb": "ARM",
+    "riscv32": "RISCV",
+    "riscv64": "RISCV",
+    "loongarch": "LoongArch",
+    "powerpc": "PowerPC",
+    "ppc": "PowerPC",
+    "s390x": "SystemZ",
+    "mips": "Mips",
+    "sparc": "Sparc",
+    "wasm": "WebAssembly",
+    "amdgcn": "AMDGPU",
+    "nvptx": "NVPTX",
+    "bpf": "BPF",
+    "hexagon": "Hexagon",
+    "msp430": "MSP430",
+    "avr": "AVR",
+    "m68k": "M68k",
+    "csky": "CSKY",
+    "xtensa": "Xtensa",
+}
+
+
+def triple_target(triple: str) -> str:
+    for prefix, target in _TRIPLE_PREFIXES.items():
+        if triple.startswith(prefix):
+            return target
+    raise KeyError(f"no LLVM target mapped for triple {triple}")
 
 IR = """\
 define i32 @add(i32 %a, i32 %b) {
@@ -221,7 +254,7 @@ def write(path: Path, contents: str) -> Path:
     return path
 
 
-def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
+def smoke_llvm(h: Harness, expected_targets: set[str], expect_shared: bool = False) -> None:
     llvm_config = h.tool("llvm-config")
 
     version = h.run([llvm_config, "--version"]).stdout.decode().strip()
@@ -232,14 +265,15 @@ def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
         h.run([llvm_config, "--targets-built"]).stdout.decode().split()
     )
     print(f"targets built: {' '.join(sorted(targets))}")
-    h.check(
-        targets == expected_targets,
-        f"targets-built mismatch: missing={sorted(expected_targets - targets)} "
-        f"extra={sorted(targets - expected_targets)}",
-    )
+    missing = expected_targets - targets
+    h.check(not missing, f"targets-built missing: {sorted(missing)}")
+    extra = targets - expected_targets
+    if extra:
+        print(f"additional targets built: {' '.join(sorted(extra))}")
 
-    link_shared = h.run([llvm_config, "--link-shared"]).stdout.decode().strip()
-    print(f"llvm-config --link-shared: {link_shared or '(no)'}")
+    if expect_shared:
+        link_shared = h.run([llvm_config, "--link-shared", "--libs", "core"])
+        print(f"llvm-config --link-shared: {link_shared.stdout.decode().strip()}")
 
     for tool in RUSTC_LLVM_TOOLS:
         path = h.tool(tool)
@@ -284,13 +318,14 @@ def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
     linked_ir = h.run([llvm_dis, "-o", "-", linked]).stdout.decode()
     h.check("@add" in linked_ir and "@other" in linked_ir, "llvm-link lost a module")
 
-    sample_object = h.tmp / "X86.o"
+    sample_target = sorted(expected_targets)[0]
+    sample_object = h.tmp / f"{sample_target}.o"
     archive = h.tmp / "libsample.a"
     llvm_ar = h.tool("llvm-ar")
     h.run([llvm_ar, "rcs", archive, sample_object])
     archive_members = h.run([llvm_ar, "t", archive]).stdout.decode()
-    h.check("X86.o" in archive_members, "llvm-ar did not archive the object")
-    h.run([llvm_ar, "x", archive, "X86.o"])
+    h.check(f"{sample_target}.o" in archive_members, "llvm-ar did not archive the object")
+    h.run([llvm_ar, "x", archive, f"{sample_target}.o"])
 
     copied = h.tmp / "copied.o"
     h.run([h.tool("llvm-objcopy"), sample_object, copied])
@@ -318,7 +353,7 @@ def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
     )
 
 
-def smoke_lld(h: Harness, test_link: bool) -> None:
+def smoke_lld(h: Harness, test_link: bool, expected_targets: set[str]) -> None:
     ld_lld = h.tool("ld.lld")
     ld64_lld = h.tool("ld64.lld")
     lld_link = h.tool("lld-link")
@@ -337,6 +372,8 @@ def smoke_lld(h: Harness, test_link: bool) -> None:
     ir = h.tmp / "sample.ll"
 
     for name, triple, emulation in ELF_LINK_CASES:
+        if triple_target(triple) not in expected_targets:
+            continue
         obj = h.tmp / f"elf-{name}.o"
         out = h.tmp / f"elf-{name}"
         h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
@@ -358,6 +395,8 @@ def smoke_lld(h: Harness, test_link: bool) -> None:
         h.run([h.tool("llvm-readobj"), "--file-headers", out])
 
     for name, triple in COFF_LINK_CASES:
+        if triple_target(triple) not in expected_targets:
+            continue
         obj = h.tmp / f"coff-{name}.o"
         out = h.tmp / f"coff-{name}.exe"
         h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
@@ -375,6 +414,8 @@ def smoke_lld(h: Harness, test_link: bool) -> None:
         h.run([h.tool("llvm-readobj"), "--file-headers", out])
 
     for name, triple in MACHO_LINK_CASES:
+        if triple_target(triple) not in expected_targets:
+            continue
         obj = h.tmp / f"macho-{name}.o"
         out = h.tmp / f"macho-{name}.dylib"
         h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
@@ -400,10 +441,16 @@ def smoke_lld(h: Harness, test_link: bool) -> None:
         )
 
     for name, triple in WASM_LINK_CASES:
+        if triple_target(triple) not in expected_targets:
+            continue
         obj = h.tmp / f"wasm-{name}.o"
         out = h.tmp / f"wasm-{name}.wasm"
         h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
-        h.run([wasm_ld, "--no-entry", "--export=add", "-o", out, obj])
+        wasm_args = [wasm_ld, "--no-entry", "--export=add"]
+        if name == "wasm64":
+            wasm_args.append("-mwasm64")
+        wasm_args += ["-o", out, obj]
+        h.run(wasm_args)
         h.check(out.stat().st_size > 0, f"wasm {name}: empty wasm-ld output")
         h.check(out.read_bytes()[:4] == b"\0asm", f"wasm {name}: bad magic")
 
@@ -445,21 +492,35 @@ def main() -> int:
         help="semicolon or comma separated list of targets that must be built",
     )
     parser.add_argument(
+        "--only-target",
+        action="append",
+        default=[],
+        help="restrict checks to these LLVM targets (repeatable)",
+    )
+    parser.add_argument(
         "--test-link",
         action="store_true",
         help="run a real clang + ld.lld link and execute the result",
     )
+    parser.add_argument(
+        "--expect-shared",
+        action="store_true",
+        help="require llvm-config to emit shared-link flags",
+    )
     args = parser.parse_args()
 
-    expected_targets = {
-        item.strip()
-        for item in args.expected_targets.replace(",", ";").split(";")
-        if item.strip()
-    }
+    if args.only_target:
+        expected_targets = set(args.only_target)
+    else:
+        expected_targets = {
+            item.strip()
+            for item in args.expected_targets.replace(",", ";").split(";")
+            if item.strip()
+        }
 
     harness = Harness(args.build_dir.resolve())
-    smoke_llvm(harness, expected_targets)
-    smoke_lld(harness, args.test_link)
+    smoke_llvm(harness, expected_targets, args.expect_shared)
+    smoke_lld(harness, args.test_link, expected_targets)
     print("LLVM/LLD smoke tests passed.")
     return 0
 

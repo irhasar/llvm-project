@@ -1,0 +1,67 @@
+name: Rustc wrapper
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  push:
+    branches:
+      - 'rakit*'
+      - 'rustc/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wrapper:
+    name: rustc_llvm wrapper (nightly)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake ninja-build
+      - name: Configure LLVM headers
+        run: |
+          cmake -S llvm -B build -G Ninja \
+            -DLLVM_ENABLE_PROJECTS= \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_ENABLE_LIBEDIT=OFF \
+            -DLLVM_ENABLE_BINDINGS=OFF \
+            -DLLVM_ENABLE_Z3_SOLVER=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-18 \
+            -DCMAKE_CXX_COMPILER=clang++-18
+          cmake --build build -j 4
+      - name: Fetch rustc_llvm wrapper
+        run: |
+          wrapper_dir="${RUNNER_TEMP}/llvm-wrapper"
+          mkdir -p "${wrapper_dir}"
+          for file in CoverageMappingWrapper.cpp LLVMWrapper.h Linker.cpp PassWrapper.cpp RustWrapper.cpp SuppressLLVMWarnings.h SymbolWrapper.cpp; do
+            curl -fsSL -o "${wrapper_dir}/${file}" \
+              "https://raw.githubusercontent.com/rust-lang/rust/main/compiler/rustc_llvm/llvm-wrapper/${file}"
+          done
+          echo "WRAPPER_DIR=${wrapper_dir}" >> "${GITHUB_ENV}"
+      - name: Compile the wrapper
+        run: |
+          python3 .github/scripts/check_rustc_wrapper.py \
+            --build-dir build \
+            --wrapper-dir "${WRAPPER_DIR}" \
+            --cxx clang++-18

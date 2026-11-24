@@ -1,0 +1,79 @@
+name: Audit
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  push:
+    branches:
+      - 'rakit*'
+      - 'rustc/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Pruning and script audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PyYAML
+        run: python3 -m pip install --quiet pyyaml
+      - name: Check the pruned tree
+        run: python3 .github/scripts/audit_tree.py
+      - name: Compile helper scripts
+        run: |
+          python3 -m py_compile \
+            .github/scripts/audit_tree.py \
+            .github/scripts/smoke_test.py \
+            .github/scripts/target_smoke.py \
+            .github/scripts/check_compiler_rt.py \
+            .github/scripts/check_rustc_wrapper.py
+      - name: Validate workflow structure
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import sys
+          import yaml
+
+          problems = []
+          for path in sorted(pathlib.Path('.github/workflows').glob('*.y*ml')):
+              before = len(problems)
+              doc = yaml.safe_load(path.read_text())
+              if not isinstance(doc, dict):
+                  problems.append(f'{path}: top level is not a mapping')
+                  continue
+              # PyYAML 1.1 parses the unquoted GitHub key `on` as True.
+              if 'on' not in doc and True not in doc:
+                  problems.append(f'{path}: missing on: trigger')
+              jobs = doc.get('jobs')
+              if not isinstance(jobs, dict) or not jobs:
+                  problems.append(f'{path}: missing or empty jobs mapping')
+                  continue
+              for name, job in jobs.items():
+                  if not isinstance(job, dict):
+                      problems.append(f'{path}: job {name} is not a mapping')
+                      continue
+                  if 'runs-on' not in job and 'uses' not in job:
+                      problems.append(f'{path}: job {name} has no runs-on or uses')
+                  steps = job.get('steps')
+                  if steps is not None and not isinstance(steps, list):
+                      problems.append(f'{path}: job {name} steps is not a list')
+              if len(problems) == before:
+                  print(f'{path}: ok')
+          if problems:
+              print('\n'.join(problems), file=sys.stderr)
+              sys.exit(1)
+          PY

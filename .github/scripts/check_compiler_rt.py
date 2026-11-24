@@ -22,9 +22,12 @@ HOST_PATTERNS = [
     "libclang_rt.lsan-*",
     "libclang_rt.profile-*",
     "libclang_rt.fuzzer-*",
-    "libclang_rt.orc-*",
-    "crtbegin*.o",
-    "crtend*.o",
+    "liborc_rt*",
+    "libclang_rt.xray-*",
+    "libclang_rt.memprof-*",
+    "libclang_rt.ctx_profile-*",
+    "clang_rt.crtbegin*.o",
+    "clang_rt.crtend*.o",
 ]
 
 BUILTINS_PATTERNS = [
@@ -40,10 +43,21 @@ def main() -> int:
         action="store_true",
         help="only require the builtins archive (cross-target builds)",
     )
+    parser.add_argument(
+        "--expect",
+        action="append",
+        default=[],
+        help="require this glob (repeatable; overrides the default pattern set)",
+    )
     args = parser.parse_args()
 
     files = [path.name for path in args.build_dir.rglob("*") if path.is_file()]
-    patterns = BUILTINS_PATTERNS if args.builtins_only else HOST_PATTERNS
+    if args.expect:
+        patterns = args.expect
+    elif args.builtins_only:
+        patterns = BUILTINS_PATTERNS
+    else:
+        patterns = HOST_PATTERNS
     missing = [
         pattern
         for pattern in patterns
