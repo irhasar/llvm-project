@@ -338,6 +338,28 @@ add_llvm_component_library(LLVMSupport
   Demangle
   )
 
+if(LLVM_ENABLE_RUST_SIPHASH)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_siphash
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/siphash/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_SIPHASH)
+  target_link_libraries(LLVMSupport PRIVATE llvm_siphash)
+
+  add_executable(llvm-rust-siphash-differential EXCLUDE_FROM_ALL
+    rust/siphash/test/differential.cpp)
+  target_include_directories(llvm-rust-siphash-differential PRIVATE
+    ${LLVM_THIRD_PARTY_DIR}/siphash/include)
+  target_link_libraries(llvm-rust-siphash-differential PRIVATE llvm_siphash)
+  add_custom_target(check-llvm-rust-siphash
+    COMMAND llvm-rust-siphash-differential
+    DEPENDS llvm-rust-siphash-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-siphash-stable-hash EXCLUDE_FROM_ALL
+  rust/siphash/test/stable-hash.cpp)
+target_link_libraries(llvm-siphash-stable-hash PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport
