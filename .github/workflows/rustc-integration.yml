@@ -27,8 +27,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  resolve-rust:
+    name: Resolve rustc nightly revision
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Resolve rust-lang/rust main
+        id: sha
+        run: echo "sha=$(git ls-remote https://github.com/rust-lang/rust main | cut -f1)" >> "${GITHUB_OUTPUT}"
+
   quick:
     name: Build and test rustc_llvm (nightly)
+    needs: resolve-rust
     if: github.event_name == 'pull_request' || github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'quick')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -42,7 +54,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: rust-lang/rust
-          ref: main
+          ref: ${{ needs.resolve-rust.outputs.sha }}
           fetch-depth: 1
           submodules: true
           path: rust
@@ -88,6 +100,7 @@ jobs:
 
   full-build:
     name: Build stage 1 rustc (full)
+    needs: resolve-rust
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -101,7 +114,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: rust-lang/rust
-          ref: main
+          ref: ${{ needs.resolve-rust.outputs.sha }}
           fetch-depth: 1
           submodules: true
           path: rust
@@ -140,20 +153,24 @@ jobs:
         run: |
           cd rust
           ./x.py build --stage 1 --jobs 8
-      - name: Upload stage 1 toolchain
+      - name: Archive stage 1 build
+        run: |
+          tar -C rust/build -cf "${RUNNER_TEMP}/rustc-stage1.tar" \
+            x86_64-unknown-linux-gnu/stage0* \
+            x86_64-unknown-linux-gnu/stage1* \
+            x86_64-unknown-linux-gnu/llvm
+      - name: Upload stage 1 build
         uses: actions/upload-artifact@v4
         with:
           name: rustc-stage1
-          path: |
-            rust/build/host/stage0*
-            rust/build/host/stage1*
+          path: ${{ runner.temp }}/rustc-stage1.tar
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
 
   full-codegen:
     name: Run codegen tests (full)
-    needs: full-build
+    needs: [resolve-rust, full-build]
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'full')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -167,7 +184,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           repository: rust-lang/rust
-          ref: main
+          ref: ${{ needs.resolve-rust.outputs.sha }}
           fetch-depth: 1
           submodules: true
           path: rust
@@ -202,11 +219,15 @@ jobs:
           lld = true
           EOF
           cat rust/bootstrap.toml
-      - name: Download stage 1 toolchain
+      - name: Download stage 1 build
         uses: actions/download-artifact@v4
         with:
           name: rustc-stage1
-          path: rust/build/host
+          path: ${{ runner.temp }}
+      - name: Restore stage 1 build
+        run: |
+          mkdir -p rust/build
+          tar -C rust/build -xf "${RUNNER_TEMP}/rustc-stage1.tar"
       - name: Run codegen test suite
         run: |
           cd rust
