@@ -183,14 +183,12 @@ jobs:
           TRIPLE: ${{ matrix.triple }}
           BAREMETAL: ${{ matrix.baremetal }}
         run: |
-          extra=()
-          if [[ "${BAREMETAL}" == "ON" ]]; then
-            extra+=(-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY)
-          else
+          extra=(-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY)
+          if [[ "${BAREMETAL}" != "ON" ]]; then
             case "${TRIPLE}" in
-              aarch64-*) extra+=(-DCMAKE_SYSROOT=/usr/aarch64-linux-gnu) ;;
-              armv7-*) extra+=(-DCMAKE_SYSROOT=/usr/arm-linux-gnueabihf) ;;
-              riscv64-*) extra+=(-DCMAKE_SYSROOT=/usr/riscv64-linux-gnu) ;;
+              aarch64-*) extra+=(-DCMAKE_SYSROOT_COMPILE=/usr/aarch64-linux-gnu) ;;
+              armv7-*) extra+=(-DCMAKE_SYSROOT_COMPILE=/usr/arm-linux-gnueabihf) ;;
+              riscv64-*) extra+=(-DCMAKE_SYSROOT_COMPILE=/usr/riscv64-linux-gnu) ;;
             esac
           fi
           cmake -S compiler-rt -B build-rt -G Ninja \

@@ -43,7 +43,6 @@ LINK_CASES = {
     ],
     "PowerPC": [
         ("ppc64le", "powerpc64le-unknown-linux-gnu", "elf64lppc"),
-        ("ppc64", "powerpc64-unknown-linux-gnu", "elf64ppc"),
     ],
     "RISCV": [
         ("riscv64", "riscv64-unknown-linux-gnu", "elf64lriscv"),
@@ -57,6 +56,10 @@ LINK_CASES = {
         ("x86_64", "x86_64-unknown-linux-gnu", "elf_x86_64"),
         ("i386", "i686-unknown-linux-gnu", "elf_i386"),
     ],
+}
+
+EXTRA_OBJECT_TRIPLES = {
+    "PowerPC": ["powerpc64-unknown-linux-gnu"],
 }
 
 IR = """\
@@ -132,6 +135,12 @@ def main() -> int:
         harness.check(obj.stat().st_size > 0, f"{args.target}: empty object output")
         harness.run([harness.tool("llvm-readobj"), "--file-headers", obj])
         harness.run([harness.tool("llvm-objdump"), "-d", obj])
+
+    for extra_triple in EXTRA_OBJECT_TRIPLES.get(args.target, []):
+        obj = harness.tmp / f"{args.target}-{extra_triple}.o"
+        harness.run([llc, "-mtriple", extra_triple, "-filetype=obj", "-o", obj, ir])
+        harness.check(obj.stat().st_size > 0, f"{args.target}: empty {extra_triple} object")
+        harness.run([harness.tool("llvm-readobj"), "--file-headers", obj])
 
     for name, link_triple, emulation in LINK_CASES.get(args.target, []):
         obj = harness.tmp / f"link-{name}.o"

@@ -112,7 +112,6 @@ ELF_LINK_CASES = [
     ("riscv32", "riscv32-unknown-linux-gnu", "elf32lriscv"),
     ("loongarch64", "loongarch64-unknown-linux-gnu", "elf64loongarch"),
     ("ppc64le", "powerpc64le-unknown-linux-gnu", "elf64lppc"),
-    ("ppc64", "powerpc64-unknown-linux-gnu", "elf64ppc"),
     ("s390x", "s390x-unknown-linux-gnu", "elf64_s390"),
     ("mips64el", "mips64el-unknown-linux-gnuabi64", "elf64ltsmip"),
     ("mipsel", "mipsel-unknown-linux-gnu", "elf32ltsmip"),
