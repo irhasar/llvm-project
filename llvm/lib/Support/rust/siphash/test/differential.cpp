@@ -15,6 +15,7 @@
 
 #include "siphash/SipHash.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -153,13 +154,19 @@ volatile uint64_t Sink;
 template <typename Fn>
 double BenchNsPerOp(Fn Hash, const std::vector<uint8_t> &Data,
                     const uint8_t *Key, size_t Iterations) {
+  // Call through a volatile pointer so neither backend gets inlined into the
+  // timing loop; otherwise the C++ side is measured without call overhead and
+  // the comparison is meaningless.
+  Fn volatile F = Hash;
+  uint64_t Accum = 0;
   auto Start = std::chrono::steady_clock::now();
   for (size_t I = 0; I < Iterations; ++I) {
     uint8_t Out[8];
-    Hash(Data.data(), Data.size(), Key, Out);
-    Sink += Out[0];
+    F(Data.data(), Data.size(), Key, Out);
+    Accum += Out[0];
   }
   auto End = std::chrono::steady_clock::now();
+  Sink = Accum;
   double Ns =
       std::chrono::duration_cast<std::chrono::nanoseconds>(End - Start).count();
   return Ns / static_cast<double>(Iterations);
@@ -175,8 +182,18 @@ void Benchmark() {
   for (size_t Len : {size_t{8}, size_t{16}, size_t{32}, size_t{128}, size_t{1024}}) {
     std::vector<uint8_t> Data(Len, 0x5a);
     constexpr size_t Iterations = 2000000;
-    double Cpp = BenchNsPerOp(Reference64, Data, Key, Iterations);
-    double Rust = BenchNsPerOp(llvm_siphash_2_4_64, Data, Key, Iterations);
+    double Cpp = 1e30, Rust = 1e30;
+    for (int Round = 0; Round < 5; ++Round) {
+      if (Round & 1) {
+        Rust = std::min(Rust,
+                        BenchNsPerOp(llvm_siphash_2_4_64, Data, Key, Iterations));
+        Cpp = std::min(Cpp, BenchNsPerOp(Reference64, Data, Key, Iterations));
+      } else {
+        Cpp = std::min(Cpp, BenchNsPerOp(Reference64, Data, Key, Iterations));
+        Rust = std::min(Rust,
+                        BenchNsPerOp(llvm_siphash_2_4_64, Data, Key, Iterations));
+      }
+    }
     std::printf("%-10zu %14.3f %14.3f %7.2fx\n", Len, Cpp, Rust, Cpp / Rust);
   }
 }

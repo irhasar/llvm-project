@@ -69,9 +69,10 @@ native configurations.
 * `SipHash.cpp` dispatches to Rust behind the existing `LLVM_ABI` entry points.
 * Differential and golden tests wired into the build.
 
-### Phase 1 - pure leaf functions in lib/Support
+### Phase 1 - pure leaf functions in lib/Support (in progress)
 
-Candidates: `CRC.cpp`, `MD5.cpp`, `SHA1.cpp`, `SHA256.cpp`, `Base64.cpp`,
+Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback).
+Remaining candidates: `MD5.cpp`, `SHA1.cpp`, `SHA256.cpp`, `Base64.cpp`,
 `ConvertUTF.cpp`. Selection criteria: small, deterministic, byte-buffer in /
 byte-buffer out, no LLVM types in the interface, existing unit tests.
 
@@ -133,31 +134,38 @@ Performance. Measured on one x86-64 container (AMD EPYC 9B14, Zen 4,
 `rustc 1.100.0`, GCC 14.2), 64-bit output, alternating A/B runs, minimum of 12
 rounds per configuration:
 
-Same flags, generic codegen (C++: `g++ -O2`; Rust: `-C opt-level=3`):
+Same optimization level, generic codegen (C++: `g++ -O3`; Rust:
+`-C opt-level=3`):
 
 | input bytes | C++ ns/op | Rust ns/op | ratio |
 | ----------- | --------- | ---------- | ----- |
-| 8           | 12.7      | 11.8       | 1.08x |
-| 16          | 15.9      | 15.0       | 1.06x |
-| 32          | 22.2      | 21.6       | 1.03x |
-| 64          | 32.8      | 34.3       | 0.96x |
-| 256         | 98.0      | 110.8      | 0.89x |
-| 1024        | 362.3     | 417.2      | 0.87x |
-| 4096        | 1426.2    | 1725.9     | 0.83x |
+| 8           | 11.5      | 11.7       | 0.98x |
+| 16          | 14.8      | 14.7       | 1.00x |
+| 32          | 20.3      | 20.6       | 0.99x |
+| 64          | 32.7      | 32.7       | 1.00x |
+| 256         | 103.4     | 103.3      | 1.00x |
+| 1024        | 386.1     | 386.2      | 1.00x |
+| 4096        | 1519.9    | 1667.3     | 0.91x |
 
 Same flags, host-tuned codegen (C++: `g++ -O3 -march=native`; Rust:
 `-C target-cpu=native -C opt-level=3`):
 
 | input bytes | C++ ns/op | Rust ns/op | ratio |
 | ----------- | --------- | ---------- | ----- |
-| 64          | 33.1      | 31.3       | 1.06x |
-| 256         | 106.0     | 100.9      | 1.05x |
-| 1024        | 399.3     | 377.1      | 1.06x |
-| 4096        | 1563.8    | 1481.9     | 1.06x |
+| 8           | 11.5      | 10.9       | 1.06x |
+| 16          | 14.7      | 13.5       | 1.09x |
+| 32          | 20.3      | 19.0       | 1.07x |
+| 64          | 32.2      | 30.3       | 1.06x |
+| 256         | 102.8     | 97.5       | 1.05x |
+| 1024        | 386.2     | 367.0      | 1.05x |
+| 4096        | 1515.1    | 1438.2     | 1.05x |
 
-With identical target flags the Rust port is consistently about 5-6% faster at
-every size, including 4 KiB. With generic flags it wins on short inputs, where
-most `getStableSipHash` calls live, but loses on long ones.
+With identical target flags the Rust port is 5-9% faster at every size,
+including 4 KiB. With generic codegen the two are at parity up to 1 KiB, where
+most `getStableSipHash` calls live, and Rust is 9% slower at 4 KiB. Comparing
+`g++ -O2` against `-C opt-level=3` is not a fair fight and makes Rust look
+faster on short inputs than it is; the tables above use the same optimization
+level on both sides.
 
 The long-input gap is a scheduling-model artifact, not an algorithmic one.
 `GenericX86Model` in `X86Schedule.td` sets `CompleteModel = 0` and provides no
@@ -186,6 +194,51 @@ C++ SipHash body is replaced by a call into the Rust archive.
 Build cost: the crate builds in well under a second; configurations with the
 option `OFF` do not invoke cargo at all.
 
+## Second port: CRC-32
+
+Implementation: `llvm/lib/Support/rust/crc`, behind `LLVM_ENABLE_RUST_CRC`.
+`llvm::crc32(uint32_t, ArrayRef<uint8_t>)` forwards to the crate; `JamCRC`
+keeps its C++ code and inherits the speedup.
+
+Correctness:
+
+* Check value `0xCBF43926` for `"123456789"`.
+* 830 differential cases (lengths 0..700 with random seeds, plus every
+  incremental split of a 128-byte buffer) are bit-identical to the C++ code.
+* The golden test over `llvm::crc32` and `JamCRC` passes with either backend,
+  and the two binaries print identical values.
+* `cargo test` covers the same properties against a bit-at-a-time oracle.
+
+Performance. `llvm-crc-differential` prints this table; numbers below are from
+the CMake build on the same machine (AMD EPYC 9B14, GCC 14.2 at `-O2`,
+`rustc 1.100.0`), ns per call:
+
+| bytes | C++ byte-wise | C++ slicing-by-8 | Rust | vs byte-wise | vs slicing-by-8 |
+| ----- | ------------- | ---------------- | ---- | ------------ | --------------- |
+| 16    | 41.0          | 8.3              | 7.5  | 5.45x        | 1.10x           |
+| 64    | 151.4         | 31.6             | 24.3 | 6.24x        | 1.30x           |
+| 256   | 604.3         | 124.3            | 93.7 | 6.45x        | 1.33x           |
+| 1024  | 2414.9        | 494.9            | 372.8| 6.48x        | 1.33x           |
+| 4096  | 9651.8        | 2028.8           | 1504.3| 6.42x       | 1.35x           |
+| 65536 | 154289.8      | 32459.9          | 24804.7| 6.22x      | 1.31x           |
+
+With matched target flags (`g++ -O3 -march=native` and
+`-C target-cpu=native`) the picture holds: 5.4-6.7x over the byte-wise loop and
+1.09-1.26x over the same slicing-by-8 algorithm.
+
+The C++ implementation LLVM ships is byte-at-a-time, so most of the win comes
+from the algorithm: 32 bytes per iteration with 32 slicing tables, then 16, 8,
+4 and 1 byte steps. Tables are generated at compile time by a `const fn`, so
+there is no runtime initialization and no build script.
+
+One codegen trap is worth recording. With AVX2 enabled, LLVM's SLP vectorizer
+turns the eight independent table lookups into `vpgatherdd`, which is much
+slower than eight scalar loads; enabling `-C target-cpu=native` made the Rust
+port 3x slower than the generic build. Reading the tables through
+`read_volatile` blocks that transformation and is neutral on targets without
+gathers. The same applies to any table-driven code in future crates: verify the
+native build, not just the generic one.
+
 ## Risks and mitigations
 
 | Risk | Mitigation |
@@ -209,9 +262,10 @@ keeps every step of the migration reversible.
 
 1. Decide whether host-tuned Rust builds (`LLVM_RUST_FLAGS=-Ctarget-cpu=native`)
    are acceptable for release builds; the generic codegen path still loses
-   10-17% on long inputs because of the generic scheduling model.
-2. Port `CRC.cpp` as the second crate to exercise the conventions at small
-   scale.
-3. Add a CI leg that builds `LLVMSupport` with `LLVM_ENABLE_RUST_SIPHASH=ON` and
-   runs `check-llvm-rust-siphash`.
+   about 9% on SipHash 4 KiB inputs because of the generic scheduling model.
+2. Port the hash family (`MD5.cpp`, `SHA1.cpp`, `SHA256.cpp`) next; they are the
+   largest remaining leaf functions in `lib/Support`.
+3. Add a CI leg that builds `LLVMSupport` with `LLVM_ENABLE_RUST_SIPHASH=ON`
+   and `LLVM_ENABLE_RUST_CRC=ON` and runs `check-llvm-rust-siphash` and
+   `check-llvm-rust-crc`.
 4. Extend `AddRustLibrary.cmake` with a `--target` mapping for cross builds.

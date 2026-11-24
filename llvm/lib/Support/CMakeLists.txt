@@ -360,6 +360,25 @@ add_executable(llvm-siphash-stable-hash EXCLUDE_FROM_ALL
   rust/siphash/test/stable-hash.cpp)
 target_link_libraries(llvm-siphash-stable-hash PRIVATE LLVMSupport)
 
+if(LLVM_ENABLE_RUST_CRC)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_crc
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/crc/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_CRC)
+  target_link_libraries(LLVMSupport PRIVATE llvm_crc)
+
+  add_executable(llvm-rust-crc-differential EXCLUDE_FROM_ALL
+    rust/crc/test/differential.cpp)
+  target_link_libraries(llvm-rust-crc-differential PRIVATE llvm_crc)
+  add_custom_target(check-llvm-rust-crc
+    COMMAND llvm-rust-crc-differential
+    DEPENDS llvm-rust-crc-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-crc-stable EXCLUDE_FROM_ALL rust/crc/test/stable.cpp)
+target_link_libraries(llvm-crc-stable PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport

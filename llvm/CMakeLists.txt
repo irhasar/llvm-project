@@ -668,6 +668,8 @@ option(LLVM_WINDOWS_PREFER_FORWARD_SLASH "Prefer path names with forward slashes
 
 option(LLVM_ENABLE_RUST_SIPHASH
   "Use the Rust implementation of SipHash in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_CRC
+  "Use the Rust implementation of CRC-32 in LLVM Support (experimental)" OFF)
 set(LLVM_RUST_FLAGS "" CACHE STRING
   "Extra flags passed to rustc via RUSTFLAGS when building Rust components")
 

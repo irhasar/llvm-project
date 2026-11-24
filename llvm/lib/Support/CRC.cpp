@@ -25,7 +25,16 @@
 
 using namespace llvm;
 
-#if !LLVM_ENABLE_ZLIB
+#if defined(LLVM_RUST_CRC)
+
+extern "C" uint32_t llvm_crc32_update(uint32_t CRC, const uint8_t *Data,
+                                      size_t Len);
+
+uint32_t llvm::crc32(uint32_t CRC, ArrayRef<uint8_t> Data) {
+  return llvm_crc32_update(CRC, Data.data(), Data.size());
+}
+
+#elif !LLVM_ENABLE_ZLIB
 
 static const uint32_t CRCTable[256] = {
     0x00000000, 0x77073096, 0xee0e612c, 0x990951ba, 0x076dc419, 0x706af48f,
