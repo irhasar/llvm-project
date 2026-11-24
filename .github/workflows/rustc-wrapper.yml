@@ -49,7 +49,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER=clang-18 \
             -DCMAKE_CXX_COMPILER=clang++-18
-          cmake --build build --target llvm-config intrinsics_gen -j 4
+          cmake --build build -j 4
       - name: Fetch rustc_llvm wrapper
         run: |
           wrapper_dir="${RUNNER_TEMP}/llvm-wrapper"
