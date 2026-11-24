@@ -271,11 +271,9 @@ def smoke_llvm(h: Harness, expected_targets: set[str], expect_shared: bool = Fal
     if extra:
         print(f"additional targets built: {' '.join(sorted(extra))}")
 
-    shared_mode = h.run([llvm_config, "--shared-mode"]).stdout.decode().strip()
-    print(f"llvm-config --shared-mode: {shared_mode}")
     if expect_shared:
-        h.check(shared_mode == "shared", f"expected shared LLVM, got {shared_mode}")
-        h.run([llvm_config, "--link-shared"])
+        link_shared = h.run([llvm_config, "--link-shared", "--libs", "all"])
+        print(f"llvm-config --link-shared: {link_shared.stdout.decode().strip()}")
 
     for tool in RUSTC_LLVM_TOOLS:
         path = h.tool(tool)
