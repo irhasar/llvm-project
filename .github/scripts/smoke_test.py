@@ -446,7 +446,11 @@ def smoke_lld(h: Harness, test_link: bool, expected_targets: set[str]) -> None:
         obj = h.tmp / f"wasm-{name}.o"
         out = h.tmp / f"wasm-{name}.wasm"
         h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
-        h.run([wasm_ld, "--no-entry", "--export=add", "-o", out, obj])
+        wasm_args = [wasm_ld, "--no-entry", "--export=add"]
+        if name == "wasm64":
+            wasm_args.append("-mwasm64")
+        wasm_args += ["-o", out, obj]
+        h.run(wasm_args)
         h.check(out.stat().st_size > 0, f"wasm {name}: empty wasm-ld output")
         h.check(out.read_bytes()[:4] == b"\0asm", f"wasm {name}: bad magic")
 
