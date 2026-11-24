@@ -38,9 +38,8 @@ constexpr std::array<std::array<uint32_t, 256>, 8> MakeTables() {
 constexpr auto T = MakeTables();
 
 uint32_t Load32(const uint8_t *P) {
-  uint32_t V;
-  std::memcpy(&V, P, 4);
-  return V;
+  return uint32_t(P[0]) | (uint32_t(P[1]) << 8) | (uint32_t(P[2]) << 16) |
+         (uint32_t(P[3]) << 24);
 }
 
 __attribute__((noinline)) uint32_t ReferenceByte(uint32_t CRC,

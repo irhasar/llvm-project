@@ -30,9 +30,8 @@ inline u32 I(u32 x, u32 y, u32 z) { return y ^ (x | ~z); }
   (a) += (b);
 
 u32 Load32(const uint8_t *P) {
-  u32 V;
-  std::memcpy(&V, P, 4);
-  return V;
+  return u32(P[0]) | (u32(P[1]) << 8) | (u32(P[2]) << 16) |
+         (u32(P[3]) << 24);
 }
 
 __attribute__((noinline)) void RefBody(u32 S[4], const uint8_t *P,

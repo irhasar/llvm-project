@@ -31,6 +31,10 @@ extern "C" uint32_t llvm_crc32_update(uint32_t CRC, const uint8_t *Data,
                                       size_t Len);
 
 uint32_t llvm::crc32(uint32_t CRC, ArrayRef<uint8_t> Data) {
+  // zlib's crc32() returns 0 for a null buffer, and lld's PDB writer relies on
+  // that for sections without file contents.
+  if (LLVM_ENABLE_ZLIB && !Data.data())
+    return 0;
   return llvm_crc32_update(CRC, Data.data(), Data.size());
 }
 

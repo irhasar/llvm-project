@@ -30,11 +30,18 @@ function(add_llvm_rust_staticlib name manifest)
   list(APPEND crate_sources "${manifest}")
 
   set(target_dir "${CMAKE_CURRENT_BINARY_DIR}/rust/${name}")
-  if(WIN32)
+  # Rust's MSVC target writes <name>.lib, the GNU targets write lib<name>.a.
+  if(MSVC)
     set(archive "${target_dir}/release/${name}.lib")
   else()
     set(archive "${target_dir}/release/lib${name}.a")
   endif()
+
+  # Makefiles do not rerun a rule when only its recipe changes, so the
+  # configured flags have to be a real dependency of the archive.
+  set(flags_file "${target_dir}/rust-flags.txt")
+  file(GENERATE OUTPUT "${flags_file}" CONTENT "${LLVM_RUST_FLAGS}\n")
+  list(APPEND crate_sources "${flags_file}")
 
   # RUSTFLAGS has to be passed through the environment; only set it when the
   # user opted into extra flags so the ambient environment keeps working.

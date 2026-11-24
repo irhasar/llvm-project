@@ -459,6 +459,7 @@ it to win: the default SHA-NI path is 1.8-4.1x faster than the C++ baseline.
 | Performance regressions | Per-component benchmark gate with a 5% threshold |
 | Maintainer burden | Only accept ports of components that are stable and well tested |
 | Cross-compilation | Not supported yet; must be solved before phase 3 |
+| Downstream static linking | In-tree tools link; installed `LLVMSupport` still needs the Rust archives added |
 
 ## Rollback
 
@@ -480,6 +481,9 @@ keeps every step of the migration reversible.
 4. Extend `AddRustLibrary.cmake` with a `--target` mapping for cross builds.
    Runtime dispatch inside the crates already keeps the produced archives
    usable across x86-64 feature levels.
-5. Keep `rust-toolchain.toml` on nightly and the CI legs in
+5. Keep `rust-toolchain.toml` on a pinned nightly and the CI legs in
    `.github/workflows/rust-support.yml` (lint, C++/Rust golden tests,
    differential checks, and the `codegen-lea` llc job).
+6. Merge the enabled Rust archives into the installed `LLVMSupport`, or
+   install them as companions and list them in `llvm-config`, so downstream
+   static links keep working outside the build tree.
