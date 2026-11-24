@@ -17,23 +17,32 @@ concurrency:
 
 jobs:
   target:
-    name: Build and smoke ${{ matrix.name }}
+    name: Build and smoke ${{ matrix.target }}
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: 'X86 and AArch64', targets: 'X86;AArch64', experimental: '', smoke: 'X86 AArch64' }
-          - { name: 'ARM and RISCV', targets: 'ARM;RISCV', experimental: '', smoke: 'ARM RISCV' }
-          - { name: 'AMDGPU and NVPTX', targets: 'AMDGPU;NVPTX', experimental: '', smoke: 'AMDGPU NVPTX' }
-          - { name: 'BPF and Hexagon', targets: 'BPF;Hexagon', experimental: '', smoke: 'BPF Hexagon' }
-          - { name: 'LoongArch and Mips', targets: 'LoongArch;Mips', experimental: '', smoke: 'LoongArch Mips' }
-          - { name: 'MSP430 and AVR', targets: 'MSP430', experimental: 'AVR', smoke: 'MSP430 AVR' }
-          - { name: 'M68k and CSKY', targets: 'X86', experimental: 'M68k;CSKY', smoke: 'M68k CSKY' }
-          - { name: 'PowerPC and Xtensa', targets: 'PowerPC', experimental: 'Xtensa', smoke: 'PowerPC Xtensa' }
-          - { name: 'Sparc and SystemZ', targets: 'Sparc;SystemZ', experimental: '', smoke: 'Sparc SystemZ' }
-          - { name: 'WebAssembly', targets: 'WebAssembly', experimental: '', smoke: 'WebAssembly' }
+          - { target: AArch64, targets: AArch64, experimental: '' }
+          - { target: AMDGPU, targets: AMDGPU, experimental: '' }
+          - { target: ARM, targets: ARM, experimental: '' }
+          - { target: BPF, targets: BPF, experimental: '' }
+          - { target: Hexagon, targets: Hexagon, experimental: '' }
+          - { target: LoongArch, targets: LoongArch, experimental: '' }
+          - { target: MSP430, targets: MSP430, experimental: '' }
+          - { target: Mips, targets: Mips, experimental: '' }
+          - { target: NVPTX, targets: NVPTX, experimental: '' }
+          - { target: PowerPC, targets: PowerPC, experimental: '' }
+          - { target: RISCV, targets: RISCV, experimental: '' }
+          - { target: Sparc, targets: Sparc, experimental: '' }
+          - { target: SystemZ, targets: SystemZ, experimental: '' }
+          - { target: WebAssembly, targets: WebAssembly, experimental: '' }
+          - { target: X86, targets: X86, experimental: '' }
+          - { target: AVR, targets: X86, experimental: AVR }
+          - { target: M68k, targets: X86, experimental: M68k }
+          - { target: CSKY, targets: X86, experimental: CSKY }
+          - { target: Xtensa, targets: X86, experimental: Xtensa }
     steps:
       - name: Checkout LLVM
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -70,11 +79,5 @@ jobs:
             -DCMAKE_CXX_COMPILER=clang++-18
       - name: Build target tools
         run: cmake --build build --target llc llvm-config llvm-readobj llvm-objdump -j 4
-      - name: Smoke test the backends
-        env:
-          SMOKE_TARGETS: ${{ matrix.smoke }}
-        run: |
-          set -f
-          for target in ${SMOKE_TARGETS}; do
-            python3 .github/scripts/target_smoke.py --build-dir build --target "${target}"
-          done
+      - name: Smoke test the backend
+        run: python3 .github/scripts/target_smoke.py --build-dir build --target "${{ matrix.target }}"
