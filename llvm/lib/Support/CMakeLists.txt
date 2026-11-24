@@ -412,4 +412,3 @@ if(NOT MSVC)
 endif()
 
 # SupportLSP depends on Support and therefore must be included afterwards.
-add_subdirectory(LSP)

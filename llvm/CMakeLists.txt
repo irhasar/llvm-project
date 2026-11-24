@@ -610,7 +610,6 @@ set(LLVM_ALL_TARGETS
   AVR
   BPF
   Hexagon
-  Lanai
   LoongArch
   Mips
   MSP430
@@ -618,18 +617,13 @@ set(LLVM_ALL_TARGETS
   PowerPC
   RISCV
   Sparc
-  SPIRV
   SystemZ
-  VE
   WebAssembly
   X86
-  XCore
   )
 
 set(LLVM_ALL_EXPERIMENTAL_TARGETS
-  ARC
   CSKY
-  DirectX
   M68k
   Xtensa
 )
