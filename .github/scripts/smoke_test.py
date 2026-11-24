@@ -501,7 +501,7 @@ def main() -> int:
     parser.add_argument(
         "--expect-shared",
         action="store_true",
-        help="require llvm-config --shared-mode to report a shared build",
+        help="require shared LLVM libraries and link-shared flags",
     )
     args = parser.parse_args()
 
