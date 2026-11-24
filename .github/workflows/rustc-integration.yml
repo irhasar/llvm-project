@@ -62,15 +62,15 @@ jobs:
         run: |
           cat > rust/bootstrap.toml <<'EOF'
           [build]
-          download-ci-llvm = false
-          download-rustc = false
           submodules = false
           optimized-compiler-builtins = true
 
           [llvm]
+          download-ci-llvm = false
           assertions = true
 
           [rust]
+          download-rustc = false
           lld = true
           EOF
           cat rust/bootstrap.toml
