@@ -36,7 +36,14 @@ jobs:
     steps:
       - name: Resolve rust-lang/rust main
         id: sha
-        run: echo "sha=$(git ls-remote https://github.com/rust-lang/rust main | cut -f1)" >> "${GITHUB_OUTPUT}"
+        run: |
+          set -euo pipefail
+          sha="$(git ls-remote https://github.com/rust-lang/rust main | cut -f1)"
+          if [[ ! "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "failed to resolve rust-lang/rust main" >&2
+            exit 1
+          fi
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
 
   quick:
     name: Build and test rustc_llvm (nightly)
@@ -155,7 +162,8 @@ jobs:
           ./x.py build --stage 1 --jobs 8
       - name: Archive stage 1 build
         run: |
-          tar -C rust/build -cf "${RUNNER_TEMP}/rustc-stage1.tar" \
+          cd rust/build
+          tar -cf "${RUNNER_TEMP}/rustc-stage1.tar" \
             x86_64-unknown-linux-gnu/stage0* \
             x86_64-unknown-linux-gnu/stage1* \
             x86_64-unknown-linux-gnu/llvm
