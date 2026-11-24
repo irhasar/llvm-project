@@ -104,6 +104,11 @@ jobs:
         run: |
           cmake --build build -j 4
           cmake --build build --target FileCheck not -j 4
+      - name: Create build-tree LLVM dylib alias
+        if: runner.os == 'Linux' && matrix.dylib == 'ON'
+        run: |
+          major="$(build/bin/llvm-config --version | cut -d. -f1)"
+          ln -sf libLLVM.so "build/lib/libLLVM-${major}.so"
       - name: Smoke test tools and object formats
         env:
           CC: ${{ runner.os == 'Linux' && 'clang-18' || 'clang' }}

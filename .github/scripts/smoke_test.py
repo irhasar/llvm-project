@@ -274,17 +274,8 @@ def smoke_llvm(h: Harness, expected_targets: set[str], expect_shared: bool = Fal
     shared_mode = h.run([llvm_config, "--shared-mode"]).stdout.decode().strip()
     print(f"llvm-config --shared-mode: {shared_mode}")
     if expect_shared:
-        libdir = Path(h.run([llvm_config, "--libdir"]).stdout.decode().strip())
-        candidates = list(libdir.glob("libLLVM*")) + list(h.bin.glob("LLVM*.dll"))
-        shared = [
-            path
-            for path in candidates
-            if path.suffix in {".so", ".dylib", ".dll"}
-            or ".so." in path.name
-            or ".dylib." in path.name
-        ]
-        h.check(bool(shared), f"expected shared LLVM library, found {candidates}")
-        print(f"shared LLVM library: {shared[0]}")
+        h.check(shared_mode == "shared", f"expected shared LLVM, got {shared_mode}")
+        h.run([llvm_config, "--link-shared"])
 
     for tool in RUSTC_LLVM_TOOLS:
         path = h.tool(tool)
