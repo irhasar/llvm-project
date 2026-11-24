@@ -310,6 +310,16 @@ static bool isAddImmediate(unsigned Opcode) {
   }
 }
 
+static bool fullyDefinesStatusFlags(StringRef Name) {
+  // These forms set CF, PF, ZF, SF and OF unconditionally (AF is undefined for
+  // CMP and TEST). Anything else that writes EFLAGS, notably INC and DEC which
+  // preserve CF, only defines part of the register and must not end the scan.
+  return Name.starts_with("ADD") || Name.starts_with("SUB") ||
+         Name.starts_with("AND") || Name.starts_with("OR") ||
+         Name.starts_with("XOR") || Name.starts_with("CMP") ||
+         Name.starts_with("TEST") || Name.starts_with("NEG");
+}
+
 bool FixupLEAsImpl::flagsLiveAfter(MachineBasicBlock::iterator I) const {
   MachineBasicBlock *MBB = I->getParent();
   for (auto E = MBB->end(), J = std::next(I); J != E; ++J) {
@@ -318,7 +328,7 @@ bool FixupLEAsImpl::flagsLiveAfter(MachineBasicBlock::iterator I) const {
     if (J->readsRegister(X86::EFLAGS, TRI))
       return true;
     if (J->modifiesRegister(X86::EFLAGS, TRI))
-      return false;
+      return !fullyDefinesStatusFlags(TII->getName(J->getOpcode()));
   }
   return true;
 }
