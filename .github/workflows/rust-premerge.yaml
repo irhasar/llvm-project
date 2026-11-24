@@ -1,0 +1,257 @@
+name: CI Checks (Rust fork)
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  push:
+    branches:
+      - 'rakit*'
+      - 'rustc/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Pruning audit
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check that only rustc-required components are present
+        run: python3 .github/scripts/audit_tree.py
+
+  linux-build-test:
+    name: Build & test Linux (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: static-all-targets
+            targets: 'AArch64;AMDGPU;ARM;BPF;Hexagon;LoongArch;MSP430;Mips;NVPTX;PowerPC;RISCV;Sparc;SystemZ;WebAssembly;X86'
+            experimental: 'AVR;M68k;CSKY;Xtensa'
+            dylib: 'OFF'
+            assertions: 'ON'
+            full_checks: true
+            test_link: true
+          - name: shared-core-targets
+            targets: 'X86;AArch64;ARM;RISCV;WebAssembly'
+            experimental: ''
+            dylib: 'ON'
+            assertions: 'OFF'
+            full_checks: false
+            test_link: true
+    steps:
+      - name: Checkout LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld lld-18 cmake ninja-build zlib1g-dev libzstd-dev
+      - name: Configure LLVM
+        env:
+          LLVM_TARGETS: ${{ matrix.targets }}
+          LLVM_EXPERIMENTAL_TARGETS: ${{ matrix.experimental }}
+          LLVM_DYLIB: ${{ matrix.dylib }}
+          LLVM_ASSERTIONS: ${{ matrix.assertions }}
+        run: |
+          cmake -S llvm -B build -G Ninja \
+            -DLLVM_ENABLE_PROJECTS=lld \
+            -DLLVM_ENABLE_ASSERTIONS="${LLVM_ASSERTIONS}" \
+            -DLLVM_ENABLE_LLD=ON \
+            -DLLVM_UNREACHABLE_OPTIMIZE=OFF \
+            -DLLVM_ENABLE_PLUGINS=ON \
+            -DLLVM_TARGETS_TO_BUILD="${LLVM_TARGETS}" \
+            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="${LLVM_EXPERIMENTAL_TARGETS}" \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_ENABLE_LIBEDIT=OFF \
+            -DLLVM_ENABLE_BINDINGS=OFF \
+            -DLLVM_ENABLE_Z3_SOLVER=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_ZLIB=ON \
+            -DLLVM_ENABLE_ZSTD=FORCE_ON \
+            -DLLVM_BUILD_LLVM_DYLIB="${LLVM_DYLIB}" \
+            -DLLVM_LINK_LLVM_DYLIB="${LLVM_DYLIB}" \
+            -DLLVM_INSTALL_UTILS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-18 \
+            -DCMAKE_CXX_COMPILER=clang++-18
+      - name: Build LLVM and LLD
+        run: ninja -C build
+      - name: Smoke test LLVM and LLD
+        env:
+          CC: clang-18
+          LLVM_TARGETS: ${{ matrix.targets }}
+          LLVM_EXPERIMENTAL_TARGETS: ${{ matrix.experimental }}
+          LLVM_TEST_LINK: ${{ matrix.test_link }}
+        run: |
+          args=(--build-dir build --expected-targets "${LLVM_TARGETS};${LLVM_EXPERIMENTAL_TARGETS}")
+          if [[ "${LLVM_TEST_LINK}" == "true" ]]; then
+            args+=(--test-link)
+          fi
+          python3 .github/scripts/smoke_test.py "${args[@]}"
+      - name: Build compiler-rt builtins and CRT
+        if: matrix.full_checks
+        run: |
+          cmake -S compiler-rt -B build-rt -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-18 \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DLLVM_CONFIG_PATH="$PWD/build/bin/llvm-config" \
+            -DCOMPILER_RT_BUILD_BUILTINS=ON \
+            -DCOMPILER_RT_BUILD_CRT=ON \
+            -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+            -DCOMPILER_RT_BUILD_XRAY=OFF \
+            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+            -DCOMPILER_RT_BUILD_PROFILE=OFF \
+            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON
+          ninja -C build-rt builtins
+      - name: Build compiler-rt ASan runtime (rustc sanitizer configuration)
+        if: matrix.full_checks
+        run: |
+          cmake -S compiler-rt -B build-rt-asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-18 \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DLLVM_CONFIG_PATH="$PWD/build/bin/llvm-config" \
+            -DCOMPILER_RT_BUILD_BUILTINS=OFF \
+            -DCOMPILER_RT_BUILD_CRT=OFF \
+            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+            -DCOMPILER_RT_BUILD_PROFILE=OFF \
+            -DCOMPILER_RT_BUILD_SANITIZERS=ON \
+            -DCOMPILER_RT_BUILD_XRAY=OFF \
+            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+            -DCOMPILER_RT_USE_LIBCXX=OFF
+          ninja -C build-rt-asan asan
+      - name: Check libunwind sources used by rustc
+        if: matrix.full_checks
+        run: |
+          for src in Unwind-sjlj.c UnwindLevel1-gcc-ext.c UnwindLevel1.c; do
+            clang-18 -std=c99 -fsyntax-only -Ilibunwind/include "libunwind/src/${src}"
+          done
+          for src in Unwind-EHABI.cpp Unwind-seh.cpp libunwind.cpp; do
+            clang++-18 -std=c++11 -fno-exceptions -fno-rtti -fsyntax-only \
+              -Ilibunwind/include "libunwind/src/${src}"
+          done
+          for src in UnwindRegistersRestore.S UnwindRegistersSave.S; do
+            clang-18 -c -Ilibunwind/include "libunwind/src/${src}" -o /dev/null
+          done
+      - name: Check rustc_llvm wrapper against the built LLVM
+        if: matrix.full_checks
+        run: |
+          wrapper_dir="${RUNNER_TEMP}/llvm-wrapper"
+          mkdir -p "${wrapper_dir}"
+          for file in CoverageMappingWrapper.cpp LLVMWrapper.h Linker.cpp PassWrapper.cpp RustWrapper.cpp SuppressLLVMWarnings.h SymbolWrapper.cpp; do
+            curl -fsSL -o "${wrapper_dir}/${file}" \
+              "https://raw.githubusercontent.com/rust-lang/rust/1.99.0/compiler/rustc_llvm/llvm-wrapper/${file}"
+          done
+          python3 .github/scripts/check_rustc_wrapper.py \
+            --build-dir build \
+            --wrapper-dir "${wrapper_dir}" \
+            --cxx clang++-18
+
+  macos-build-test:
+    name: Build & test macOS
+    runs-on: macos-14
+    timeout-minutes: 300
+    steps:
+      - name: Checkout LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Install build dependencies
+        run: brew install cmake ninja zstd
+      - name: Configure LLVM
+        run: |
+          cmake -S llvm -B build -G Ninja \
+            -DLLVM_ENABLE_PROJECTS=lld \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DLLVM_TARGETS_TO_BUILD="X86;AArch64;ARM;WebAssembly" \
+            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="" \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_ENABLE_LIBEDIT=OFF \
+            -DLLVM_ENABLE_BINDINGS=OFF \
+            -DLLVM_ENABLE_Z3_SOLVER=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_ZLIB=ON \
+            -DLLVM_ENABLE_ZSTD=FORCE_ON \
+            -DLLVM_INSTALL_UTILS=ON \
+            -DCMAKE_PREFIX_PATH="$(brew --prefix zstd)" \
+            -DCMAKE_BUILD_TYPE=Release
+      - name: Build LLVM and LLD
+        run: ninja -C build
+      - name: Smoke test LLVM and LLD
+        run: |
+          python3 .github/scripts/smoke_test.py \
+            --build-dir build \
+            --expected-targets "X86;AArch64;ARM;WebAssembly"
+
+  windows-build-test:
+    name: Build & test Windows
+    runs-on: windows-2022
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Configure LLVM
+        run: |
+          cmake -S llvm -B build -G Ninja \
+            -DLLVM_ENABLE_PROJECTS=lld \
+            -DLLVM_ENABLE_ASSERTIONS=ON \
+            -DLLVM_TARGETS_TO_BUILD="X86;AArch64;ARM" \
+            -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="" \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_ENABLE_LIBEDIT=OFF \
+            -DLLVM_ENABLE_BINDINGS=OFF \
+            -DLLVM_ENABLE_Z3_SOLVER=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_INSTALL_UTILS=ON \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=cl \
+            -DCMAKE_CXX_COMPILER=cl
+      - name: Build LLVM and LLD
+        run: ninja -C build
+      - name: Smoke test LLVM and LLD
+        run: |
+          python3 .github/scripts/smoke_test.py \
+            --build-dir build \
+            --expected-targets "X86;AArch64;ARM"

@@ -1,0 +1,75 @@
+name: Rustc integration
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-rustc:
+    name: Build rustc 1.99.0 with this LLVM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout pruned LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+          path: llvm-project
+      - name: Checkout rustc
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: rust-lang/rust
+          ref: 1.99.0
+          fetch-depth: 1
+          path: rust
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h /
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake ninja-build zlib1g-dev libzstd-dev \
+            pkg-config libssl-dev
+      - name: Vendor this tree as rustc's src/llvm-project
+        run: |
+          rm -rf rust/src/llvm-project
+          cp -a llvm-project rust/src/llvm-project
+          rm -rf rust/src/llvm-project/.git
+      - name: Configure rustc to build LLVM, LLD and compiler-rt from source
+        run: |
+          cat > rust/bootstrap.toml <<'EOF'
+          [build]
+          download-ci-llvm = false
+          download-rustc = false
+          submodules = false
+          optimized-compiler-builtins = true
+
+          [llvm]
+          assertions = true
+
+          [rust]
+          lld = true
+          EOF
+          cat rust/bootstrap.toml
+      - name: Build stage 1 rustc and std
+        run: |
+          cd rust
+          ./x.py build --stage 1 --jobs 4
+      - name: Test rustc_llvm bindings
+        run: |
+          cd rust
+          ./x.py test --stage 1 compiler/rustc_llvm --no-fail-fast
+      - name: Run codegen test suite
+        run: |
+          cd rust
+          ./x.py test --stage 1 tests/codegen --no-fail-fast
