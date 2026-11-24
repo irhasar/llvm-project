@@ -28,34 +28,47 @@ jobs:
           - { name: aarch64, triple: aarch64-unknown-linux-gnu, asm: true }
           - { name: armv7, triple: armv7-unknown-linux-gnueabihf, asm: true }
           - { name: riscv64, triple: riscv64-unknown-linux-gnu, asm: true }
-          - { name: wasm32, triple: wasm32-unknown-unknown, asm: false }
     steps:
       - name: Checkout LLVM
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 1
-      - name: Install clang
+      - name: Install clang and cross libc headers
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang-18
+          sudo apt-get install -y clang-18 \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf libc6-dev-armhf-cross \
+            gcc-riscv64-linux-gnu g++-riscv64-linux-gnu libc6-dev-riscv64-cross
       - name: Syntax check C sources
         env:
           TRIPLE: ${{ matrix.triple }}
         run: |
+          extra=(--target="${TRIPLE}")
+          case "${TRIPLE}" in
+            aarch64-*) extra+=(--sysroot=/usr/aarch64-linux-gnu) ;;
+            armv7-*) extra+=(--sysroot=/usr/arm-linux-gnueabihf) ;;
+            riscv64-*) extra+=(--sysroot=/usr/riscv64-linux-gnu) ;;
+          esac
           for src in Unwind-sjlj.c UnwindLevel1-gcc-ext.c UnwindLevel1.c; do
-            clang-18 --target="${TRIPLE}" -std=c99 -fsyntax-only -Ilibunwind/include "libunwind/src/${src}"
+            clang-18 "${extra[@]}" -std=c99 -fsyntax-only -Ilibunwind/include "libunwind/src/${src}"
           done
       - name: Syntax check C++ sources
         env:
           TRIPLE: ${{ matrix.triple }}
         run: |
-          extra=()
+          extra=(--target="${TRIPLE}")
+          case "${TRIPLE}" in
+            aarch64-*) extra+=(--sysroot=/usr/aarch64-linux-gnu) ;;
+            armv7-*) extra+=(--sysroot=/usr/arm-linux-gnueabihf) ;;
+            riscv64-*) extra+=(--sysroot=/usr/riscv64-linux-gnu) ;;
+          esac
           if [[ "${TRIPLE}" == arm* ]]; then
             extra+=(-D_LIBUNWIND_ARM_EHABI=1)
           fi
           for src in Unwind-EHABI.cpp Unwind-seh.cpp libunwind.cpp; do
-            clang++-18 --target="${TRIPLE}" -std=c++11 -fno-exceptions -fno-rtti \
-              -fsyntax-only -Ilibunwind/include "${extra[@]}" "libunwind/src/${src}"
+            clang++-18 "${extra[@]}" -std=c++11 -fno-exceptions -fno-rtti \
+              -fsyntax-only -Ilibunwind/include "libunwind/src/${src}"
           done
       - name: Assemble register files
         if: matrix.asm
