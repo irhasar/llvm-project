@@ -135,6 +135,41 @@ WASM_LINK_CASES = [
     ("wasm64", "wasm64-unknown-unknown"),
 ]
 
+_TRIPLE_PREFIXES = {
+    "x86_64": "X86",
+    "i686": "X86",
+    "i386": "X86",
+    "aarch64": "AArch64",
+    "arm64": "AArch64",
+    "arm": "ARM",
+    "thumb": "ARM",
+    "riscv32": "RISCV",
+    "riscv64": "RISCV",
+    "loongarch": "LoongArch",
+    "powerpc": "PowerPC",
+    "ppc": "PowerPC",
+    "s390x": "SystemZ",
+    "mips": "Mips",
+    "sparc": "Sparc",
+    "wasm": "WebAssembly",
+    "amdgcn": "AMDGPU",
+    "nvptx": "NVPTX",
+    "bpf": "BPF",
+    "hexagon": "Hexagon",
+    "msp430": "MSP430",
+    "avr": "AVR",
+    "m68k": "M68k",
+    "csky": "CSKY",
+    "xtensa": "Xtensa",
+}
+
+
+def triple_target(triple: str) -> str:
+    for prefix, target in _TRIPLE_PREFIXES.items():
+        if triple.startswith(prefix):
+            return target
+    raise KeyError(f"no LLVM target mapped for triple {triple}")
+
 IR = """\
 define i32 @add(i32 %a, i32 %b) {
 entry:
@@ -284,13 +319,14 @@ def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
     linked_ir = h.run([llvm_dis, "-o", "-", linked]).stdout.decode()
     h.check("@add" in linked_ir and "@other" in linked_ir, "llvm-link lost a module")
 
-    sample_object = h.tmp / "X86.o"
+    sample_target = sorted(expected_targets)[0]
+    sample_object = h.tmp / f"{sample_target}.o"
     archive = h.tmp / "libsample.a"
     llvm_ar = h.tool("llvm-ar")
     h.run([llvm_ar, "rcs", archive, sample_object])
     archive_members = h.run([llvm_ar, "t", archive]).stdout.decode()
-    h.check("X86.o" in archive_members, "llvm-ar did not archive the object")
-    h.run([llvm_ar, "x", archive, "X86.o"])
+    h.check(f"{sample_target}.o" in archive_members, "llvm-ar did not archive the object")
+    h.run([llvm_ar, "x", archive, f"{sample_target}.o"])
 
     copied = h.tmp / "copied.o"
     h.run([h.tool("llvm-objcopy"), sample_object, copied])
@@ -318,7 +354,7 @@ def smoke_llvm(h: Harness, expected_targets: set[str]) -> None:
     )
 
 
-def smoke_lld(h: Harness, test_link: bool) -> None:
+def smoke_lld(h: Harness, test_link: bool, expected_targets: set[str]) -> None:
     ld_lld = h.tool("ld.lld")
     ld64_lld = h.tool("ld64.lld")
     lld_link = h.tool("lld-link")
@@ -337,6 +373,8 @@ def smoke_lld(h: Harness, test_link: bool) -> None:
     ir = h.tmp / "sample.ll"
 
     for name, triple, emulation in ELF_LINK_CASES:
+        if triple_target(triple) not in expected_targets:
+            continue
         obj = h.tmp / f"elf-{name}.o"
         out = h.tmp / f"elf-{name}"
         h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
@@ -358,6 +396,8 @@ def smoke_lld(h: Harness, test_link: bool) -> None:
         h.run([h.tool("llvm-readobj"), "--file-headers", out])
 
     for name, triple in COFF_LINK_CASES:
+        if triple_target(triple) not in expected_targets:
+            continue
         obj = h.tmp / f"coff-{name}.o"
         out = h.tmp / f"coff-{name}.exe"
         h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
@@ -375,6 +415,8 @@ def smoke_lld(h: Harness, test_link: bool) -> None:
         h.run([h.tool("llvm-readobj"), "--file-headers", out])
 
     for name, triple in MACHO_LINK_CASES:
+        if triple_target(triple) not in expected_targets:
+            continue
         obj = h.tmp / f"macho-{name}.o"
         out = h.tmp / f"macho-{name}.dylib"
         h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
@@ -400,6 +442,8 @@ def smoke_lld(h: Harness, test_link: bool) -> None:
         )
 
     for name, triple in WASM_LINK_CASES:
+        if triple_target(triple) not in expected_targets:
+            continue
         obj = h.tmp / f"wasm-{name}.o"
         out = h.tmp / f"wasm-{name}.wasm"
         h.run([llc, "-mtriple", triple, "-filetype=obj", "-o", obj, ir])
@@ -445,21 +489,30 @@ def main() -> int:
         help="semicolon or comma separated list of targets that must be built",
     )
     parser.add_argument(
+        "--only-target",
+        action="append",
+        default=[],
+        help="restrict checks to these LLVM targets (repeatable)",
+    )
+    parser.add_argument(
         "--test-link",
         action="store_true",
         help="run a real clang + ld.lld link and execute the result",
     )
     args = parser.parse_args()
 
-    expected_targets = {
-        item.strip()
-        for item in args.expected_targets.replace(",", ";").split(";")
-        if item.strip()
-    }
+    if args.only_target:
+        expected_targets = set(args.only_target)
+    else:
+        expected_targets = {
+            item.strip()
+            for item in args.expected_targets.replace(",", ";").split(";")
+            if item.strip()
+        }
 
     harness = Harness(args.build_dir.resolve())
     smoke_llvm(harness, expected_targets)
-    smoke_lld(harness, args.test_link)
+    smoke_lld(harness, args.test_link, expected_targets)
     print("LLVM/LLD smoke tests passed.")
     return 0
 

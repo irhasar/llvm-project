@@ -1,0 +1,203 @@
+name: Compiler-rt
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  push:
+    branches:
+      - 'rakit*'
+      - 'rustc/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  runtime:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: builtins and CRT
+            options: '-DCOMPILER_RT_BUILD_BUILTINS=ON -DCOMPILER_RT_BUILD_CRT=ON'
+            build_target: builtins
+            expect: 'libclang_rt.builtins-* crtbegin*.o'
+          - name: sanitizers
+            options: '-DCOMPILER_RT_BUILD_SANITIZERS=ON'
+            build_target: ''
+            expect: 'libclang_rt.asan-* libclang_rt.asan_cxx-* libclang_rt.ubsan_standalone-* libclang_rt.ubsan_minimal-* libclang_rt.tsan-* libclang_rt.msan-* libclang_rt.dfsan-* libclang_rt.lsan-*'
+          - name: profile
+            options: '-DCOMPILER_RT_BUILD_PROFILE=ON'
+            build_target: ''
+            expect: 'libclang_rt.profile-*'
+          - name: fuzzer
+            options: '-DCOMPILER_RT_BUILD_LIBFUZZER=ON'
+            build_target: ''
+            expect: 'libclang_rt.fuzzer-*'
+          - name: xray
+            options: '-DCOMPILER_RT_BUILD_XRAY=ON'
+            build_target: ''
+            expect: 'libclang_rt.xray-*'
+          - name: orc
+            options: '-DCOMPILER_RT_BUILD_ORC=ON'
+            build_target: ''
+            expect: 'libclang_rt.orc-*'
+          - name: memprof
+            options: '-DCOMPILER_RT_BUILD_MEMPROF=ON'
+            build_target: ''
+            expect: 'libclang_rt.memprof-*'
+          - name: ctx_profile
+            options: '-DCOMPILER_RT_BUILD_CTX_PROFILE=ON'
+            build_target: ''
+            expect: 'libclang_rt.ctx_profile-*'
+    steps:
+      - name: Checkout LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake ninja-build
+      - name: Build minimal llvm-config
+        run: |
+          cmake -S llvm -B build-llvm -G Ninja \
+            -DLLVM_ENABLE_PROJECTS= \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_ENABLE_LIBEDIT=OFF \
+            -DLLVM_ENABLE_BINDINGS=OFF \
+            -DLLVM_ENABLE_Z3_SOLVER=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-18 \
+            -DCMAKE_CXX_COMPILER=clang++-18
+          cmake --build build-llvm --target llvm-config -j 4
+      - name: Configure compiler-rt
+        env:
+          RT_OPTIONS: ${{ matrix.options }}
+        run: |
+          cmake -S compiler-rt -B build-rt -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-18 \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DLLVM_CONFIG_PATH="$PWD/build-llvm/bin/llvm-config" \
+            -DCOMPILER_RT_BUILD_BUILTINS=OFF \
+            -DCOMPILER_RT_BUILD_CRT=OFF \
+            -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+            -DCOMPILER_RT_BUILD_XRAY=OFF \
+            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+            -DCOMPILER_RT_BUILD_PROFILE=OFF \
+            -DCOMPILER_RT_BUILD_ORC=OFF \
+            -DCOMPILER_RT_BUILD_MEMPROF=OFF \
+            -DCOMPILER_RT_BUILD_CTX_PROFILE=OFF \
+            -DCOMPILER_RT_INCLUDE_TESTS=OFF \
+            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+            -DCOMPILER_RT_USE_LIBCXX=OFF \
+            ${RT_OPTIONS}
+      - name: Build the runtime
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+        run: |
+          if [[ -n "${BUILD_TARGET}" ]]; then
+            cmake --build build-rt --target "${BUILD_TARGET}" -j 4
+          else
+            cmake --build build-rt -j 4
+          fi
+      - name: Verify the artefacts
+        env:
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          set -f
+          args=()
+          for pattern in ${EXPECT}; do
+            args+=(--expect "${pattern}")
+          done
+          python3 .github/scripts/check_compiler_rt.py --build-dir build-rt "${args[@]}"
+
+  cross-builtins:
+    name: Cross builtins ${{ matrix.triple }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { triple: aarch64-unknown-linux-gnu, baremetal: 'OFF' }
+          - { triple: armv7-unknown-linux-gnueabihf, baremetal: 'OFF' }
+          - { triple: riscv64-unknown-linux-gnu, baremetal: 'OFF' }
+          - { triple: wasm32-unknown-unknown, baremetal: 'ON' }
+    steps:
+      - name: Checkout LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 cmake ninja-build \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
+            gcc-arm-linux-gnueabihf libc6-dev-armhf-cross \
+            gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+      - name: Build minimal llvm-config
+        run: |
+          cmake -S llvm -B build-llvm -G Ninja \
+            -DLLVM_ENABLE_PROJECTS= \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_ENABLE_ASSERTIONS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_ENABLE_LIBEDIT=OFF \
+            -DLLVM_ENABLE_BINDINGS=OFF \
+            -DLLVM_ENABLE_Z3_SOLVER=OFF \
+            -DLLVM_ENABLE_LIBXML2=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_TERMINFO=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-18 \
+            -DCMAKE_CXX_COMPILER=clang++-18
+          cmake --build build-llvm --target llvm-config -j 4
+      - name: Configure cross builtins
+        env:
+          TRIPLE: ${{ matrix.triple }}
+          BAREMETAL: ${{ matrix.baremetal }}
+        run: |
+          cmake -S compiler-rt -B build-rt -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-18 \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DCMAKE_C_COMPILER_TARGET="${TRIPLE}" \
+            -DCMAKE_CXX_COMPILER_TARGET="${TRIPLE}" \
+            -DCMAKE_ASM_COMPILER_TARGET="${TRIPLE}" \
+            -DLLVM_CONFIG_PATH="$PWD/build-llvm/bin/llvm-config" \
+            -DCOMPILER_RT_BUILD_BUILTINS=ON \
+            -DCOMPILER_RT_BUILD_CRT=OFF \
+            -DCOMPILER_RT_BUILD_SANITIZERS=OFF \
+            -DCOMPILER_RT_BUILD_XRAY=OFF \
+            -DCOMPILER_RT_BUILD_LIBFUZZER=OFF \
+            -DCOMPILER_RT_BUILD_PROFILE=OFF \
+            -DCOMPILER_RT_BUILD_ORC=OFF \
+            -DCOMPILER_RT_BUILD_MEMPROF=OFF \
+            -DCOMPILER_RT_BUILD_CTX_PROFILE=OFF \
+            -DCOMPILER_RT_INCLUDE_TESTS=OFF \
+            -DCOMPILER_RT_DEFAULT_TARGET_ONLY=ON \
+            -DCOMPILER_RT_BAREMETAL_BUILD="${BAREMETAL}"
+          cmake --build build-rt --target builtins -j 4
+      - name: Verify builtins
+        run: python3 .github/scripts/check_compiler_rt.py --build-dir build-rt --builtins-only

@@ -138,8 +138,13 @@ REQUIRED_FILES = [
 ]
 
 REQUIRED_WORKFLOWS = [
-    ".github/workflows/rust-premerge.yaml",
+    ".github/workflows/audit.yml",
+    ".github/workflows/compiler-rt.yml",
+    ".github/workflows/libunwind.yml",
+    ".github/workflows/llvm-host.yml",
+    ".github/workflows/llvm-targets.yml",
     ".github/workflows/rustc-integration.yml",
+    ".github/workflows/rustc-wrapper.yml",
 ]
 
 failures: list[str] = []

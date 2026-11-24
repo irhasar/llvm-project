@@ -1,0 +1,117 @@
+name: LLVM host
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  push:
+    branches:
+      - 'rakit*'
+      - 'rustc/**'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux X86 tools and LLD
+            os: ubuntu-24.04
+            targets: X86
+            dylib: 'OFF'
+            test_link: true
+          - name: Linux shared library and LLD
+            os: ubuntu-24.04
+            targets: 'X86;AArch64;ARM;RISCV;WebAssembly'
+            dylib: 'ON'
+            test_link: true
+          - name: macOS X86 and AArch64 tools and LLD
+            os: macos-latest
+            targets: 'X86;AArch64'
+            dylib: 'OFF'
+            test_link: false
+          - name: Windows X86 and AArch64 tools and LLD
+            os: windows-2022
+            targets: 'X86;AArch64'
+            dylib: 'OFF'
+            test_link: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout LLVM
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 1
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 lld lld-18 cmake ninja-build zlib1g-dev libzstd-dev
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake ninja zstd
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Configure LLVM
+        env:
+          LLVM_TARGETS: ${{ matrix.targets }}
+          LLVM_DYLIB: ${{ matrix.dylib }}
+        run: |
+          args=(
+            -S llvm -B build -G Ninja
+            -DLLVM_ENABLE_PROJECTS=lld
+            -DLLVM_TARGETS_TO_BUILD="${LLVM_TARGETS}"
+            -DLLVM_ENABLE_ASSERTIONS=ON
+            -DLLVM_BUILD_LLVM_DYLIB="${LLVM_DYLIB}"
+            -DLLVM_LINK_LLVM_DYLIB="${LLVM_DYLIB}"
+            -DLLVM_INCLUDE_EXAMPLES=OFF
+            -DLLVM_INCLUDE_DOCS=OFF
+            -DLLVM_INCLUDE_BENCHMARKS=OFF
+            -DLLVM_INCLUDE_TESTS=OFF
+            -DLLVM_ENABLE_LIBEDIT=OFF
+            -DLLVM_ENABLE_BINDINGS=OFF
+            -DLLVM_ENABLE_Z3_SOLVER=OFF
+            -DLLVM_ENABLE_LIBXML2=OFF
+            -DLLVM_ENABLE_TERMINFO=OFF
+            -DLLVM_INSTALL_UTILS=ON
+            -DCMAKE_BUILD_TYPE=Release
+          )
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            args+=(-DLLVM_ENABLE_LLD=ON -DLLVM_ENABLE_ZLIB=ON -DLLVM_ENABLE_ZSTD=FORCE_ON)
+            args+=(-DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18)
+          elif [[ "${RUNNER_OS}" == "macOS" ]]; then
+            args+=(-DLLVM_ENABLE_ZLIB=ON -DLLVM_ENABLE_ZSTD=FORCE_ON)
+            args+=(-DCMAKE_PREFIX_PATH="$(brew --prefix zstd)")
+          else
+            args+=(-DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF)
+            args+=(-DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl)
+          fi
+          cmake "${args[@]}"
+      - name: Build LLVM, LLD and test tools
+        run: |
+          cmake --build build -j 4
+          cmake --build build --target FileCheck not -j 4
+      - name: Smoke test tools and object formats
+        env:
+          CC: ${{ runner.os == 'Linux' && 'clang-18' || 'clang' }}
+          LLVM_TARGETS: ${{ matrix.targets }}
+          LLVM_TEST_LINK: ${{ matrix.test_link }}
+        run: |
+          args=(--build-dir build --expected-targets "${LLVM_TARGETS}")
+          if [[ "${LLVM_TEST_LINK}" == "true" ]]; then
+            args+=(--test-link)
+          fi
+          python3 .github/scripts/smoke_test.py "${args[@]}"
