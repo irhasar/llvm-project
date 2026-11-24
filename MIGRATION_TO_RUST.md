@@ -35,7 +35,9 @@ Non-goals (for now):
    across an FFI frame is never allowed.
 4. No global mutable state, no thread-local storage, and no allocation unless
    the C++ side already allocated. This keeps the port compatible with LLVM's
-   existing threading and allocator assumptions.
+   existing threading and allocator assumptions. The one exception is a
+   write-once, relaxed atomic cache of the CPU feature check used to pick the
+   SHA-NI path; it is idempotent and thread-safe.
 5. Symbol names are prefixed with the component: `llvm_<component>_<function>`.
 6. Every crate carries the LLVM license header and
    `license = "Apache-2.0 WITH LLVM-exception"` in `Cargo.toml`.
@@ -54,8 +56,10 @@ Non-goals (for now):
 
 Crates live next to the component they replace
 (`llvm/lib/<Component>/rust/<crate>/`), and their `Cargo.lock` is committed.
-All crates use edition 2024 (`rust-version = "1.85"`, tested with
-`rustc 1.100.0`) with `no_std`, `panic = "abort"`, LTO and one codegen unit.
+All crates use edition 2024 (`rust-version = "1.85"`) with `no_std`,
+`panic = "abort"`, LTO and one codegen unit. `rust-toolchain.toml` pins the
+latest nightly (tested with `rustc 1.102.0-nightly`); the crates still build on
+stable Rust 1.85 and newer.
 Each component is gated behind its own `LLVM_ENABLE_RUST_<COMPONENT>` option,
 defaulting to `OFF`.
 
@@ -73,9 +77,10 @@ native configurations.
 
 ### Phase 1 - pure leaf functions in lib/Support (in progress)
 
-Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback).
-Remaining candidates: `MD5.cpp`, `SHA1.cpp`, `SHA256.cpp`, `Base64.cpp`,
-`ConvertUTF.cpp`. Selection criteria: small, deterministic, byte-buffer in /
+Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
+`MD5.cpp` (`LLVM_ENABLE_RUST_MD5`), `SHA1.cpp` (`LLVM_ENABLE_RUST_SHA1`) and
+`SHA256.cpp` (`LLVM_ENABLE_RUST_SHA256`). Remaining candidates: `Base64.cpp`
+and `ConvertUTF.cpp`. Selection criteria: small, deterministic, byte-buffer in /
 byte-buffer out, no LLVM types in the interface, existing unit tests.
 
 The point of this phase is volume: prove that the plumbing works for many small
@@ -286,6 +291,83 @@ stays opt-in and is documented as "needs a tuned `LLVM_RUST_FLAGS`". It is
 kept in the tree as the control case for the experiment: it shows that the
 gap is a codegen-model issue rather than anything specific to the algorithm.
 
+## Fourth port: SHA-1
+
+Implementation: `llvm/lib/Support/rust/sha1`, behind `LLVM_ENABLE_RUST_SHA1`.
+`SHA1::hashBlock()` forwards to `llvm_sha1_block`; the bulk path in `update()`
+forwards whole blocks to `llvm_sha1_blocks`. Buffering, padding and the public
+class layout stay in C++, so the ABI is unchanged.
+
+Correctness:
+
+* FIPS 180-4 vectors, including the one-million-`a` message.
+* `cargo test` checks every length from 0 to 4095 against a loop-based
+  reference, and the SHA-NI path against the scalar path on 2000 random
+  blocks.
+* The differential test checks 3 published vectors and 701 lengths against the
+  C++ compression function copied verbatim from `SHA1.cpp`.
+* The golden test over `llvm::SHA1::hash` passes with either backend and also
+  checks that `update()` in odd-sized chunks matches the one-shot hash.
+
+Performance, ns per call, generic codegen (`g++ -O3` vs `-C opt-level=3`, no
+`-march=native`, AMD EPYC 9B14, rustc 1.102.0-nightly):
+
+| bytes | C++ | Rust scalar | Rust auto | scalar vs C++ | auto vs C++ |
+| ----- | --- | ----------- | --------- | ------------- | ----------- |
+| 16    | 104.5 | 99.9      | 59.6      | 1.05x         | 1.75x       |
+| 64    | 190.8 | 190.4     | 104.7     | 1.00x         | 1.82x       |
+| 256   | 440.2 | 452.4     | 238.6     | 0.97x         | 1.84x       |
+| 1024  | 1437.4 | 1502.2   | 774.9     | 0.96x         | 1.86x       |
+| 4096  | 5438.9 | 5669.4   | 2919.5    | 0.96x         | 1.86x       |
+| 65536 | 85607.0 | 88710.2 | 45774.1   | 0.97x         | 1.87x       |
+
+The scalar port is at parity up to 64 bytes and about 4% behind on long inputs,
+inside the 5% gate. The default (auto) path is 1.75-1.87x faster because it
+dispatches at runtime to the x86 SHA extensions.
+
+## Fifth port: SHA-256
+
+Implementation: `llvm/lib/Support/rust/sha256`, behind `LLVM_ENABLE_RUST_SHA256`.
+Only the compression function is replaced, using the same 16-word rolling
+schedule and variable rotation as `SHA256.cpp`; buffering and padding stay in
+C++.
+
+Correctness: the same protocol as SHA-1 (FIPS 180-4 vectors, every length from
+0 to 4095 against an independent oracle, 701 differential lengths against the
+C++ code, golden values through `llvm::SHA256::hash`, incremental chunks, and
+2000 random blocks comparing SHA-NI with scalar).
+
+Performance, same machine and flags:
+
+| bytes | C++ | Rust scalar | Rust auto | scalar vs C++ | auto vs C++ |
+| ----- | --- | ----------- | --------- | ------------- | ----------- |
+| 16    | 229.4 | 202.5     | 62.5      | 1.13x         | 3.67x       |
+| 64    | 423.1 | 393.8     | 109.5     | 1.07x         | 3.86x       |
+| 256   | 1003.6 | 962.5    | 250.2     | 1.04x         | 4.01x       |
+| 1024  | 3327.3 | 3224.1   | 812.3     | 1.03x         | 4.10x       |
+| 4096  | 12586.6 | 12306.0 | 3062.6    | 1.02x         | 4.11x       |
+| 65536 | 198934.3 | 194453.7 | 48043.9 | 1.02x         | 4.14x       |
+
+Unlike MD5, the scalar SHA-256 port already beats the C++ baseline on generic
+codegen (2-13%). The default path is 3.7-4.1x faster.
+
+### Runtime SHA-NI dispatch
+
+Both crates contain a second compression function written with the x86 SHA
+intrinsics (`sha256rnds2`, `sha256msg1/2`, `sha1rnds4`, `sha1nexte`,
+`sha1msg1/2`). It is compiled with `#[target_feature(enable = "sha,sse2,ssse3,
+sse4.1")]` and is only called after a CPUID check (SSSE3 and SSE4.1 in leaf 1,
+SHA in leaf 7). The result is cached in a relaxed `AtomicU8`; a CPU without
+SHA-NI runs the scalar code, so the archive stays usable on baseline x86-64 and
+on other architectures.
+
+This is the first place where the Rust port wins for a reason other than
+instruction selection: the win comes from dispatching to hardware that the C++
+baseline never uses. `llvm_sha{1,256}_hash_scalar` and
+`llvm_sha{1,256}_has_sha_ni` are exported so the differential test can report
+the scalar and accelerated numbers separately and state whether the host has
+SHA-NI.
+
 ## Codegen investigation: why the generic x86-64 build loses
 
 The MD5 regression is not specific to Rust. It is the difference between GCC and
@@ -326,6 +408,42 @@ block on baseline x86-64. It is not implemented here: it changes shared codegen
 for every x86 target, and this fork does not carry `llvm/test`, so there is no
 CodeGen suite to check it against.
 
+### Follow-up: the immediate-into-LEA fold
+
+The proposal above was implemented and measured. On rustc 1.102.0-nightly,
+`-C target-cpu=generic` reproduces the reported shape exactly: `body_raw`
+contains 29 `lea`, 232 `add` and 64 `rol`. All 29 LEAs are immediately followed
+by `add $imm, <same register>`:
+
+    leal (%r8,%rdi), %r11d
+    addl $-176418897, %r11d
+
+The fold lives in `X86FixupLEAs` behind a hidden, default-off option
+(`-x86-fold-add-into-lea`), so it cannot change default codegen. It rewrites
+the pair into one `leal imm(%r8,%rdi), %r11d` when:
+
+* the ADD is `ADD32ri{,8}` or `ADD64ri{32,8}` with a physical two-address
+  destination, and the preceding non-debug instruction is a width-matched LEA
+  that defines the same register;
+* the LEA has a base or index, and displacement plus immediate is representable
+  (`int32` for 64-bit LEAs, wrapping for 32-bit LEAs);
+* the flags written by the ADD are dead: no instruction reads EFLAGS before
+  one that redefines it, and reaching the end of the block counts as live.
+
+The expected saving is 29 instructions out of 671 in `body_raw`, about 4%, not
+the 64 implied by the earlier estimate. It does not close the ~10% gap to GCC,
+because most GCC LEAs are not folds of an existing LEA: GCC forms LEA directly
+from add trees, while LLVM only forms LEA for addressing modes. Closing that
+gap needs a DAG combine that selects LEA for arithmetic add chains on targets
+where a three-operand LEA is cheap; that is a much larger change than this
+peephole.
+
+This fork has no CodeGen test suite, so the fold is validated by the
+`codegen-lea` CI job: it builds `llc`, emits the MD5 crate's IR, compiles it
+with and without the flag, and requires the ADD count to drop. It is opt-in
+because it changes shared x86 codegen and because the Rust ports no longer need
+it to win: the default SHA-NI path is 1.8-4.1x faster than the C++ baseline.
+
 ## Risks and mitigations
 
 | Risk | Mitigation |
@@ -347,14 +465,18 @@ keeps every step of the migration reversible.
 
 ## Next steps
 
-1. Decide whether host-tuned Rust builds (`LLVM_RUST_FLAGS=-Ctarget-cpu=native`)
-   are acceptable for release builds; the generic codegen path still loses
-   about 9% on SipHash 4 KiB inputs because of the generic scheduling model.
-2. Port `SHA1.cpp` and `SHA256.cpp` next; MD5 is done and serves as the
-   control case for generic-codegen regressions. Both will hit the same
-   `generic`-codegen gap documented above, so land the x86 LEA fusion first if
-   the goal is for the default build to win.
-3. Add a CI leg that builds `LLVMSupport` with `LLVM_ENABLE_RUST_SIPHASH=ON`,
-   `LLVM_ENABLE_RUST_CRC=ON` and `LLVM_ENABLE_RUST_MD5=ON` and runs
-   `check-llvm-rust-*` plus the three golden tests.
+1. Keep the SHA-NI dispatch as the default for SHA-1 and SHA-256. Port
+   `Base64.cpp` and `ConvertUTF.cpp` next; both are byte-buffer in/out and fit
+   the existing crate conventions.
+2. Decide whether `-x86-fold-add-into-lea` should become default on targets
+   where a three-operand LEA is cheap. That requires a CodeGen test suite and
+   wider benchmarking; the peephole is opt-in until then.
+3. If the generic-codegen gap matters for non-SHA components, implement LEA
+   formation for arithmetic add chains in the DAG combiner rather than
+   extending the peephole.
 4. Extend `AddRustLibrary.cmake` with a `--target` mapping for cross builds.
+   Runtime dispatch inside the crates already keeps the produced archives
+   usable across x86-64 feature levels.
+5. Keep `rust-toolchain.toml` on nightly and the CI legs in
+   `.github/workflows/rust-support.yml` (lint, C++/Rust golden tests,
+   differential checks, and the `codegen-lea` llc job).

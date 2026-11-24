@@ -15,6 +15,7 @@
 #include "X86.h"
 #include "X86InstrInfo.h"
 #include "X86Subtarget.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/CodeGen/LazyMachineBlockFrequencyInfo.h"
@@ -23,7 +24,9 @@
 #include "llvm/CodeGen/MachineSizeOpts.h"
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/TargetSchedule.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace llvm;
 
@@ -33,6 +36,14 @@ using namespace llvm;
 #define DEBUG_TYPE FIXUPLEA_NAME
 
 STATISTIC(NumLEAs, "Number of LEA instructions created");
+STATISTIC(NumFoldedAddImmediates,
+          "Number of ADD immediates folded into an LEA displacement");
+
+static cl::opt<bool> FoldAddIntoLEA(
+    "x86-fold-add-into-lea", cl::Hidden,
+    cl::desc("Fold an immediate add into the displacement of the LEA that "
+             "produced its input (experimental)"),
+    cl::init(false));
 
 namespace {
 class FixupLEAsImpl {
@@ -119,6 +130,15 @@ class FixupLEAsImpl {
   /// and return a pointer to it. Otherwise, return zero.
   MachineInstr *postRAConvertToLEA(MachineBasicBlock &MBB,
                                    MachineBasicBlock::iterator &MBBI) const;
+
+  /// Fold `add reg, imm` into the displacement of the immediately preceding
+  /// LEA that defines `reg`, when the add's flags are dead.
+  bool foldAddImmediateIntoLEA(MachineBasicBlock &MBB) const;
+
+  /// Return true if the flags defined by the instruction at \p I are read
+  /// before the next definition. The end of the block is treated
+  /// conservatively as live.
+  bool flagsLiveAfter(MachineBasicBlock::iterator I) const;
 
 public:
   FixupLEAsImpl(ProfileSummaryInfo *PSI, MachineBlockFrequencyInfo *MBFI)
@@ -266,11 +286,112 @@ bool FixupLEAsImpl::runOnMachineFunction(MachineFunction &MF) {
       for (MachineBasicBlock::iterator I = MBB.begin(); I != MBB.end(); ++I)
         processInstruction(I, MBB);
     }
+
+    // Third pass: fold an immediate ADD into the displacement of the LEA that
+    // produced its input. This runs last so the earlier passes do not undo it.
+    if (FoldAddIntoLEA && !IsSlowLEA && !IsSlow3OpsLEA)
+      foldAddImmediateIntoLEA(MBB);
   }
 
   LLVM_DEBUG(dbgs() << "End X86FixupLEAs\n";);
 
   return true;
+}
+
+static bool isAddImmediate(unsigned Opcode) {
+  switch (Opcode) {
+  case X86::ADD32ri:
+  case X86::ADD32ri8:
+  case X86::ADD64ri32:
+  case X86::ADD64ri8:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool FixupLEAsImpl::flagsLiveAfter(MachineBasicBlock::iterator I) const {
+  MachineBasicBlock *MBB = I->getParent();
+  for (auto E = MBB->end(), J = std::next(I); J != E; ++J) {
+    if (J->isDebugInstr())
+      continue;
+    if (J->readsRegister(X86::EFLAGS, TRI))
+      return true;
+    if (J->modifiesRegister(X86::EFLAGS, TRI))
+      return false;
+  }
+  return true;
+}
+
+bool FixupLEAsImpl::foldAddImmediateIntoLEA(MachineBasicBlock &MBB) const {
+  SmallVector<std::pair<MachineInstr *, int64_t>, 8> LEAUpdates;
+  SmallVector<MachineInstr *, 8> AddToErase;
+
+  for (auto I = MBB.begin(), E = MBB.end(); I != E; ++I) {
+    MachineInstr &Add = *I;
+    if (!isAddImmediate(Add.getOpcode()) || Add.getNumExplicitOperands() < 3 ||
+        !Add.getOperand(2).isImm())
+      continue;
+    if (Add.getFlag(MachineInstr::FrameSetup) ||
+        Add.getFlag(MachineInstr::FrameDestroy))
+      continue;
+
+    Register Dst = Add.getOperand(0).getReg();
+    if (!Dst.isPhysical() || Add.getOperand(1).getReg() != Dst)
+      continue;
+
+    auto Prev = I;
+    do {
+      if (Prev == MBB.begin())
+        break;
+      --Prev;
+    } while (Prev->isDebugInstr());
+
+    MachineInstr &LEA = *Prev;
+    if (!isLEA(LEA.getOpcode()))
+      continue;
+
+    bool Is64 = Add.getOpcode() == X86::ADD64ri32 ||
+                Add.getOpcode() == X86::ADD64ri8;
+    bool WidthMatches =
+        Is64 ? LEA.getOpcode() == X86::LEA64r
+             : (LEA.getOpcode() == X86::LEA32r ||
+                LEA.getOpcode() == X86::LEA64_32r);
+    if (!WidthMatches || LEA.getOperand(0).getReg() != Dst)
+      continue;
+    if (!LEA.getOperand(4).isImm())
+      continue;
+    // A LEA without base and index is just a constant and cannot absorb an
+    // add in a useful way.
+    if (LEA.getOperand(1).getReg() == 0 && LEA.getOperand(3).getReg() == 0)
+      continue;
+
+    int64_t Disp = LEA.getOperand(4).getImm();
+    int64_t Imm = Add.getOperand(2).getImm();
+    int64_t NewDisp;
+    if (Is64) {
+      NewDisp = Disp + Imm;
+      if (!isInt<32>(NewDisp))
+        continue;
+    } else {
+      NewDisp = static_cast<int32_t>(static_cast<uint32_t>(Disp) +
+                                     static_cast<uint32_t>(Imm));
+    }
+
+    if (flagsLiveAfter(I))
+      continue;
+
+    LEAUpdates.push_back({&LEA, NewDisp});
+    AddToErase.push_back(&Add);
+  }
+
+  for (auto &Update : LEAUpdates)
+    Update.first->getOperand(4).setImm(Update.second);
+  for (MachineInstr *Add : AddToErase)
+    Add->eraseFromParent();
+
+  NumFoldedAddImmediates += AddToErase.size();
+  return !AddToErase.empty();
 }
 
 FixupLEAsImpl::RegUsageState

@@ -9,10 +9,14 @@ on:
       - 'llvm/lib/Support/rust/**'
       - 'llvm/lib/Support/CRC.cpp'
       - 'llvm/lib/Support/MD5.cpp'
+      - 'llvm/lib/Support/SHA1.cpp'
+      - 'llvm/lib/Support/SHA256.cpp'
       - 'llvm/lib/Support/SipHash.cpp'
       - 'llvm/lib/Support/CMakeLists.txt'
       - 'llvm/CMakeLists.txt'
       - 'llvm/cmake/modules/AddRustLibrary.cmake'
+      - 'llvm/lib/Target/X86/X86FixupLEAs.cpp'
+      - 'rust-toolchain.toml'
       - '.github/workflows/rust-support.yml'
 
 permissions:
@@ -28,14 +32,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Install Rust
+      - name: Install Rust nightly
         run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
+          rustup toolchain install nightly --profile minimal --component clippy,rustfmt
+          rustup default nightly
           rustc --version
       - name: fmt, clippy and unit tests
         run: |
-          for crate in siphash crc md5; do
+          for crate in siphash crc md5 sha1 sha256; do
             echo "::group::$crate"
             (cd "llvm/lib/Support/rust/$crate" \
               && cargo fmt --check \
@@ -57,17 +61,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build g++ zlib1g-dev
-      - name: Install Rust
+      - name: Install Rust nightly
         if: matrix.backend == 'rust'
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
           rustc --version
       - name: Configure
         run: |
           RUST_FLAGS=""
           if [ "${{ matrix.backend }}" = "rust" ]; then
-            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON"
+            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON"
           fi
           cmake -G Ninja -S llvm -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -83,11 +87,63 @@ jobs:
         run: ninja -C build LLVMSupport
       - name: Golden tests
         run: |
-          ninja -C build llvm-siphash-stable-hash llvm-crc-stable llvm-md5-stable
+          ninja -C build llvm-siphash-stable-hash llvm-crc-stable llvm-md5-stable \
+            llvm-sha1-stable llvm-sha256-stable
           ./build/bin/llvm-siphash-stable-hash
           ./build/bin/llvm-crc-stable
           ./build/bin/llvm-md5-stable
+          ./build/bin/llvm-sha1-stable
+          ./build/bin/llvm-sha256-stable
       - name: Differential checks
         if: matrix.backend == 'rust'
         run: |
-          ninja -C build check-llvm-rust-siphash check-llvm-rust-crc check-llvm-rust-md5
+          ninja -C build check-llvm-rust-siphash check-llvm-rust-crc \
+            check-llvm-rust-md5 check-llvm-rust-sha1 check-llvm-rust-sha256
+
+  codegen-lea:
+    name: LEA fold (llc)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ zlib1g-dev
+      - name: Install Rust nightly
+        run: |
+          rustup toolchain install nightly --profile minimal
+          rustup default nightly
+          rustc --version
+      - name: Configure
+        run: |
+          cmake -G Ninja -S llvm -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF
+      - name: Build llc
+        run: ninja -C build llc
+      - name: Emit MD5 IR
+        run: |
+          set -euo pipefail
+          cd llvm/lib/Support/rust/md5
+          RUSTFLAGS="-C lto=no -C target-cpu=generic" \
+            cargo rustc --release -- --emit=llvm-ir
+          IR="$(find target -name '*.ll' | head -n 1)"
+          test -n "$IR"
+          echo "IR=$PWD/$IR" >> "$GITHUB_ENV"
+      - name: Compare instruction counts
+        run: |
+          set -euo pipefail
+          build/bin/llc -O3 -mcpu=x86-64 "$IR" -o /tmp/base.s
+          build/bin/llc -O3 -mcpu=x86-64 -x86-fold-add-into-lea "$IR" \
+            -o /tmp/fold.s
+          base=$(grep -cE '^[[:space:]]+add' /tmp/base.s || true)
+          fold=$(grep -cE '^[[:space:]]+add' /tmp/fold.s || true)
+          echo "add instructions: base=$base folded=$fold"
+          test "$fold" -lt "$base"

@@ -23,6 +23,13 @@
 
 using namespace llvm;
 
+#if defined(LLVM_RUST_SHA1)
+extern "C" void llvm_sha1_block(uint32_t *State, const uint32_t *Block);
+extern "C" void llvm_sha1_blocks(uint32_t *State, const uint8_t *Data,
+                               size_t NumBlocks);
+#endif
+
+
 static inline uint32_t rol(uint32_t Number, int Bits) {
   return (Number << Bits) | (Number >> (32 - Bits));
 }
@@ -89,6 +96,9 @@ void SHA1::init() {
 }
 
 void SHA1::hashBlock() {
+#if defined(LLVM_RUST_SHA1)
+  llvm_sha1_block(InternalState.State, InternalState.Buffer.L);
+#else
   uint32_t A = InternalState.State[0];
   uint32_t B = InternalState.State[1];
   uint32_t C = InternalState.State[2];
@@ -185,6 +195,7 @@ void SHA1::hashBlock() {
   InternalState.State[2] += C;
   InternalState.State[3] += D;
   InternalState.State[4] += E;
+#endif
 }
 
 void SHA1::addUncounted(uint8_t Data) {
@@ -218,6 +229,11 @@ void SHA1::update(ArrayRef<uint8_t> Data) {
   }
 
   // Fast buffer filling for large inputs.
+#if defined(LLVM_RUST_SHA1)
+  const size_t NumBlocks = Data.size() / BLOCK_LENGTH;
+  llvm_sha1_blocks(InternalState.State, Data.data(), NumBlocks);
+  Data = Data.drop_front(NumBlocks * BLOCK_LENGTH);
+#else
   while (Data.size() >= BLOCK_LENGTH) {
     assert(InternalState.BufferOffset == 0);
     static_assert(BLOCK_LENGTH % 4 == 0);
@@ -227,6 +243,7 @@ void SHA1::update(ArrayRef<uint8_t> Data) {
     hashBlock();
     Data = Data.drop_front(BLOCK_LENGTH);
   }
+#endif
 
   // Finish the remainder.
   for (uint8_t C : Data)

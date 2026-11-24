@@ -398,6 +398,44 @@ endif()
 add_executable(llvm-md5-stable EXCLUDE_FROM_ALL rust/md5/test/stable.cpp)
 target_link_libraries(llvm-md5-stable PRIVATE LLVMSupport)
 
+if(LLVM_ENABLE_RUST_SHA1)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_sha1
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/sha1/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_SHA1)
+  target_link_libraries(LLVMSupport PRIVATE llvm_sha1)
+
+  add_executable(llvm-rust-sha1-differential EXCLUDE_FROM_ALL
+    rust/sha1/test/differential.cpp)
+  target_link_libraries(llvm-rust-sha1-differential PRIVATE llvm_sha1)
+  add_custom_target(check-llvm-rust-sha1
+    COMMAND llvm-rust-sha1-differential
+    DEPENDS llvm-rust-sha1-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-sha1-stable EXCLUDE_FROM_ALL rust/sha1/test/stable.cpp)
+target_link_libraries(llvm-sha1-stable PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_SHA256)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_sha256
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/sha256/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_SHA256)
+  target_link_libraries(LLVMSupport PRIVATE llvm_sha256)
+
+  add_executable(llvm-rust-sha256-differential EXCLUDE_FROM_ALL
+    rust/sha256/test/differential.cpp)
+  target_link_libraries(llvm-rust-sha256-differential PRIVATE llvm_sha256)
+  add_custom_target(check-llvm-rust-sha256
+    COMMAND llvm-rust-sha256-differential
+    DEPENDS llvm-rust-sha256-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-sha256-stable EXCLUDE_FROM_ALL rust/sha256/test/stable.cpp)
+target_link_libraries(llvm-sha256-stable PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport
