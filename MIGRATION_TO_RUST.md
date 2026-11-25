@@ -105,14 +105,14 @@ maximum decoded length and keeps the same partial output as the C++ loop. The
 separately exported validating entry point used by the differential test
 reproduces the C++ `=` placement rules and the same partial output. On this
 Zen 4 host at `-O3` versus `-C opt-level=3`, encoding is at parity to 1.1x
-faster at 12 bytes and 1.5x to 6.0x faster from 48 bytes to 1 MiB. The
-differential also checks the public decoder path (validate, then decode)
-against the reference for every valid and invalid input, and its throughput
-table times that path; it is 3.1x to 4.0x faster across the same range, and the
-reported decode speedup uses it.
+faster at 12 bytes and 1.5x to 6.0x faster from 48 bytes to 1 MiB. The CMake
+differential target links `LLVMSupport` and calls the real
+`llvm::decodeBase64`, so its correctness sweep covers the public wrapper; the
+standalone `g++` build uses a local copy of the same algorithm so it can run
+without an LLVM build. The throughput table times the public path, which is
+3.0x to 4.0x faster across the same range.
 `llvm/lib/Support/rust/base64/test/differential.cpp` carries the reference
-implementations and both the single-pass and public-path throughput rows, so it
-builds with plain `g++` and the crate's archive without an LLVM build.
+implementations and both the single-pass and public-path throughput rows.
 
 Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`, both on the
 generic x86-64 target unless noted:
@@ -123,7 +123,7 @@ generic x86-64 target unless noted:
 | SHA-1           | 1.9x (SHA-NI path)                            |
 | SHA-256         | 4.1x (SHA-NI path)                            |
 | Base64 encode   | 1.0x-1.1x at 12 B, 1.5x at 48 B, 6.0x at 1 MiB |
-| Base64 decode   | 3.1x at 12 B, 3.9x at 1 MiB                   |
+| Base64 decode   | 3.0x at 12 B, 3.8x at 1 MiB                   |
 | MD5             | 1.03x to 1.13x (LEA asm + BMI1/BMI2 path)     |
 | ConvertUTF      | 4.5x UTF-8 ASCII, 1.2-1.5x mixed; 1.6x UTF-32->UTF-16 ASCII; 12x `isLegalUTF8String` |
 

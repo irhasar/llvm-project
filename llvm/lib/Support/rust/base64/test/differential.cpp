@@ -16,9 +16,14 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
+
+#ifdef LLVM_RUST_BASE64_PUBLIC_API
+#include "llvm/Support/Base64.h"
+#endif
 
 extern "C" size_t llvm_base64_encode_rust(const uint8_t *Src, size_t Len,
                                      char *Dst);
@@ -191,10 +196,32 @@ DecodeResult RustDecode(const char *Input, size_t InputLength) {
   return R;
 }
 
-// Benchmark-only path that matches decodeBase64: validate the whole input,
-// then decode it. The correctness tests use RustDecode, which keeps the
-// partial output the C++ loop leaves behind.
+// The public path. The CMake target defines LLVM_RUST_BASE64_PUBLIC_API and
+// calls the real llvm::decodeBase64; the standalone g++ build uses the same
+// algorithm against the FFI so it can run without an LLVM build.
 DecodeResult RustDecodePublic(const char *Input, size_t InputLength) {
+#ifdef LLVM_RUST_BASE64_PUBLIC_API
+  DecodeResult R;
+  std::vector<char> Out;
+  llvm::Error E =
+      llvm::decodeBase64(llvm::StringRef(Input, InputLength), Out);
+  R.Output = std::move(Out);
+  if (!E) {
+    R.S = Ok;
+    return R;
+  }
+  std::string Msg = llvm::toString(std::move(E));
+  if (Msg.find("multiple of 4") != std::string::npos) {
+    R.S = LengthError;
+    return R;
+  }
+  R.S = BadChar;
+  size_t Pos = Msg.rfind("index ");
+  if (Pos != std::string::npos)
+    R.BadIndex = static_cast<size_t>(
+        std::strtoull(Msg.c_str() + Pos + 6, nullptr, 10));
+  return R;
+#else
   DecodeResult R;
   if (InputLength == 0) {
     R.S = Ok;
@@ -240,6 +267,7 @@ DecodeResult RustDecodePublic(const char *Input, size_t InputLength) {
   }
   R.S = Ok;
   return R;
+#endif
 }
 
 //===----------------------------------------------------------------------===//

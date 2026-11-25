@@ -445,7 +445,10 @@ if(LLVM_ENABLE_RUST_BASE64)
 
   add_executable(llvm-rust-base64-differential EXCLUDE_FROM_ALL
     rust/base64/test/differential.cpp)
-  target_link_libraries(llvm-rust-base64-differential PRIVATE llvm_base64)
+  target_compile_definitions(llvm-rust-base64-differential PRIVATE
+    LLVM_RUST_BASE64_PUBLIC_API)
+  target_link_libraries(llvm-rust-base64-differential PRIVATE LLVMSupport
+    llvm_base64)
   add_custom_target(check-llvm-rust-base64
     COMMAND llvm-rust-base64-differential
     DEPENDS llvm-rust-base64-differential

@@ -110,6 +110,9 @@ To prove a backend-neutral result, configure the option `OFF`, rebuild
   (add `-march=native` only when comparing native codegen on both sides).
   Base64 follows the same shape:
   `cd llvm/lib/Support/rust/base64 && cargo build --release --locked && g++ -O3 -std=c++17 test/differential.cpp -Ltarget/release -lllvm_base64 -o /tmp/base64-diff && /tmp/base64-diff`.
+  That standalone command uses a local copy of the public decoder. The CMake
+  target defines `LLVM_RUST_BASE64_PUBLIC_API`, links `LLVMSupport`, and calls
+  the real `llvm::decodeBase64`, so the sweep covers the public wrapper.
   ConvertUTF compiles the C++ reference as a second translation unit:
   `cd llvm/lib/Support/rust/convertutf && cargo build --release --locked && g++ -O3 -std=c++17 -I ../../../../include -I <build>/include test/differential.cpp ../../ConvertUTF.cpp -Ltarget/release -lllvm_convertutf -o /tmp/convertutf-diff && /tmp/convertutf-diff`.
   Add `-DLLVM_RUST_CONVERTUTF` to exercise the C++ shim instead of the
