@@ -115,22 +115,32 @@ justified with instruction counts and, ideally, wall-clock measurements.
 
 GitHub Actions is disabled for this repository (`Actions has been disabled for
 this repository`), so the Rust support workflow cannot be relied on. Reproduce
-its checks locally instead:
+its checks locally instead.
 
 ```sh
 ninja -C build llvm-rust-sha1-differential llvm-sha1-stable
 ./build/bin/llvm-rust-sha1-differential && ./build/bin/llvm-sha1-stable
 
-# LEA fold: instruction counts, runtime results and the flag scan
-IR=$(find llvm/lib/Support/rust/md5/target -name '*.ll' | head -1)
+# IR for the LEA fold experiments.
+(cd llvm/lib/Support/rust/md5 &&
+  RUSTFLAGS="-C lto=no -C target-cpu=generic" \
+  cargo rustc --release -- --emit=llvm-ir)
+IR=$(find "$PWD/llvm/lib/Support/rust/md5/target" -name '*.ll' | head -1)
 build/bin/llc -O3 -mcpu=x86-64 -filetype=obj "$IR" -o /tmp/base.o
 build/bin/llc -O3 -mcpu=x86-64 -filetype=obj -x86-fold-add-into-lea \
   "$IR" -o /tmp/fold.o
-build/bin/llc -run-pass=x86-fixup-leas -x86-fold-add-into-lea case.mir -o -
 
-# Downstream link through llvm-config
-gcc prog.cpp $(build/bin/llvm-config --cxxflags --ldflags --libs \
+# The MIR fixtures live in .github/workflows/rust-support.yml (step "MIR flag
+# regression"); save them as /tmp/fold.mir and /tmp/carry.mir, then:
+build/bin/llc -run-pass=x86-fixup-leas -x86-fold-add-into-lea /tmp/fold.mir -o -
+
+# Downstream link through llvm-config. Use g++, llvm-config does not add the
+# C++ runtime.
+g++ prog.cpp $(build/bin/llvm-config --cxxflags --ldflags --libs \
   --system-libs support)
+
+# A component install has to carry the Rust archives too.
+cmake --install build --prefix /tmp/llvminst --component LLVMSupport
 ```
 
 `llvm-config` without a component list fails in this fork because the `engine`

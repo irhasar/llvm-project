@@ -213,7 +213,7 @@ jobs:
             bb.0:
               liveins: $edi, $esi
 
-              $r11d = LEA32r $rdi, 1, $noreg, 0, $noreg
+              $r11d = LEA64_32r $rdi, 1, $noreg, 0, $noreg
               $r11d = ADD32ri $r11d, 5, implicit-def $eflags
               $esi = ADD32rr $esi, $esi, implicit-def dead $eflags
               $eax = COPY $r11d
@@ -235,7 +235,7 @@ jobs:
             bb.0:
               liveins: $edi, $esi
 
-              $r11d = LEA32r $rdi, 1, $noreg, 0, $noreg
+              $r11d = LEA64_32r $rdi, 1, $noreg, 0, $noreg
               $r11d = ADD32ri $r11d, 5, implicit-def $eflags
               $esi = INC32r $esi, implicit-def $eflags
               $r11d = ADC32rr $r11d, $esi, implicit-def $eflags, implicit $eflags
@@ -243,13 +243,40 @@ jobs:
               RET64 $eax
           ...
           EOF
-          build/bin/llc -run-pass=x86-fixup-leas -x86-fold-add-into-lea \
-            /tmp/fold.mir -o /tmp/fold.out.mir
-          build/bin/llc -run-pass=x86-fixup-leas -x86-fold-add-into-lea \
-            /tmp/carry.mir -o /tmp/carry.out.mir
-          grep -q 'LEA32r $rdi, 1, $noreg, 5, $noreg' /tmp/fold.out.mir
+          cat > /tmp/wide.mir <<'EOF'
+          --- |
+            define i64 @wide(i64 %x, i64 %y) {
+            entry:
+              ret i64 %x
+            }
+          ...
+          ---
+          name:            wide
+          alignment:       16
+          tracksRegLiveness: true
+          body:             |
+            bb.0:
+              liveins: $rdi, $rsi
+
+              $r11 = LEA64r $rdi, 1, $noreg, 0, $noreg
+              $r11 = ADD64ri32 $r11, 5, implicit-def $eflags
+              $rdi = ADD64rr $rdi, $rsi, implicit-def dead $eflags
+              $rax = COPY $r11
+              RET64 $rax
+          ...
+          EOF
+          for case in fold carry wide; do
+            build/bin/llc -run-pass=x86-fixup-leas -x86-fold-add-into-lea \
+              "/tmp/$case.mir" -o "/tmp/$case.out.mir"
+          done
+          grep -q 'LEA64_32r $rdi, 1, $noreg, 5, $noreg' /tmp/fold.out.mir
+          grep -q 'LEA64r $rdi, 1, $noreg, 5, $noreg' /tmp/wide.out.mir
           if grep -q ADD32ri /tmp/fold.out.mir; then
-            echo "the ADD was not folded into the LEA"
+            echo "the 32-bit ADD was not folded into the LEA"
+            exit 1
+          fi
+          if grep -q ADD64ri32 /tmp/wide.out.mir; then
+            echo "the 64-bit ADD was not folded into the LEA"
             exit 1
           fi
           grep -q ADD32ri /tmp/carry.out.mir

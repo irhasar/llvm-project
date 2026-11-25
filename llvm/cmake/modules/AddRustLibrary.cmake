@@ -93,5 +93,18 @@ function(add_llvm_rust_staticlib name manifest)
   add_library(${name} STATIC IMPORTED GLOBAL)
   set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${staged}")
   add_dependencies(${name} ${name}-rust)
-  install(FILES "${staged}" DESTINATION lib${LLVM_LIBDIR_SUFFIX})
+
+  # The archive belongs to the LLVMSupport install component so that
+  # `cmake --install --component LLVMSupport` yields a linkable package.
+  # Multi-config generators keep each configuration in its own directory;
+  # LLVM spells that as $(Configuration), which only MSBuild expands, so name
+  # the path with $<CONFIG> in the install rule.
+  if(CMAKE_CONFIGURATION_TYPES)
+    install(FILES
+              "${LLVM_BINARY_DIR}/$<CONFIG>/lib${LLVM_LIBDIR_SUFFIX}/${rust_lib_name}"
+            DESTINATION lib${LLVM_LIBDIR_SUFFIX} COMPONENT LLVMSupport)
+  else()
+    install(FILES "${staged}" DESTINATION lib${LLVM_LIBDIR_SUFFIX}
+            COMPONENT LLVMSupport)
+  endif()
 endfunction()
