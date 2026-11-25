@@ -684,6 +684,8 @@ option(LLVM_ENABLE_RUST_CONVERTEBCDIC
   "Use the Rust implementation of EBCDIC conversion in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_XXHASH
   "Use the Rust implementation of xxHash in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_DJB
+  "Use the Rust implementation of the DJB hash in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_RUSTDEMANGLE
   "Use the Rust implementation of the Rust v0 demangler in LLVMDemangle (experimental)" OFF)
 option(LLVM_ENABLE_RUST_DLANG

@@ -84,8 +84,9 @@ Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
 `SHA256.cpp` (`LLVM_ENABLE_RUST_SHA256`), `Base64.cpp`
 (`LLVM_ENABLE_RUST_BASE64`), `ConvertUTF.cpp`
 (`LLVM_ENABLE_RUST_CONVERTUTF`), `ConvertEBCDIC.cpp`
-(`LLVM_ENABLE_RUST_CONVERTEBCDIC`), and `xxhash.cpp`
-(`LLVM_ENABLE_RUST_XXHASH`). Selection criteria: small, deterministic,
+(`LLVM_ENABLE_RUST_CONVERTEBCDIC`), `xxhash.cpp`
+(`LLVM_ENABLE_RUST_XXHASH`), and `DJB.cpp` (`LLVM_ENABLE_RUST_DJB`).
+Selection criteria: small, deterministic,
 byte-buffer in / byte-buffer out, no LLVM types in the interface, existing unit
 tests.
 
@@ -815,6 +816,48 @@ The option is `LLVM_ENABLE_RUST_CONVERTEBCDIC` (default `OFF`). A local
 configure adds `llvm_convertebcdic` to `LLVM_SYSTEM_LIBS`; the standalone
 tests build without `LLVMSupport`, so no large LLVM target was rebuilt for the
 measurement.
+
+## Ninth port: DJB
+
+`DJB.cpp` exposes the inline `llvm::djbHash` and the out-of-line
+`llvm::caseFoldingDjbHash`. Only the latter is replaced; the public header and
+the inline hash stay unchanged. With `LLVM_ENABLE_RUST_DJB` on, the C++ entry
+point calls `llvm_djb_case_folding_hash(data, length, seed)` across the C ABI;
+the original body remains under `#else` and is the differential reference.
+
+The Rust ASCII path folds through a 256-byte table and uses the same
+`h * 33 + c` recurrence. The table version is what makes the common
+debug-info path fast: a branchy `is_ascii_uppercase` version was only 1.02x to
+1.07x, while the table is 1.60x to 1.67x. Non-ASCII input decodes one code
+point with the same lenient rules as `ConvertUTF`, applies the generated
+simple-case-fold table, re-encodes to UTF-8, and hashes the folded bytes.
+
+`test/differential.cpp` compares against the C++ translation unit without
+`LLVM_RUST_DJB` over all legal Unicode scalar values, all single-byte inputs,
+and 200,000 random valid UTF-8 names: 1,312,339 inputs, 0 mismatches.
+`test/stable.cpp` checks published and computed vectors with the option on and
+off, including embedded NULs. The CMake differential target builds only the
+Rust archive and the reference sources; it does not build `LLVMSupport`.
+
+Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`:
+
+| Case | Rust vs C++ |
+|------|-------------|
+| ASCII DWARF-style names | 1.60-1.67x |
+| Non-ASCII names | 1.38-1.65x |
+
+The linked stable test shrinks from 30,376 to 20,640 bytes; the `staticlib`
+archive itself is 5,076,648 bytes because it carries `compiler_builtins`
+bitcode, and linker GC removes it from the final binary. The C++ reference
+object is 3,528 bytes.
+
+One caveat is deliberate: C++ `chopOneUTF32` passes a one-element UTF-32
+output buffer to `ConvertUTF8toUTF32`, which writes a second replacement
+character past that buffer when a valid code point is followed by a truncated
+sequence. That malformed multi-byte input is undefined behaviour in the
+reference, so the differential harness does not use it as an oracle. The Rust
+port returns U+FFFD for each malformed sequence and never writes out of bounds.
+All valid UTF-8 and all single-byte inputs are bit-identical.
 
 ## Resource measurements for EBCDIC and D
 

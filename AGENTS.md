@@ -37,8 +37,8 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON \
   -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON \
   -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON \
-  -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON \
-  -DLLVM_ENABLE_RUST_DLANG=ON \
+  -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON \
+  -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
   -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_INCLUDE_TESTS=OFF \
@@ -47,9 +47,10 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_LIBEDIT=OFF
 
 ninja -C build LLVMSupport llvm-sha1-stable llvm-sha256-stable \
-  llvm-convertutf-stable llvm-convertebcdic-stable llvm-rustdemangle-stable \
-  llvm-dlang-stable \
-  llvm-rust-rustdemangle-differential llvm-rust-dlang-differential llc
+  llvm-convertutf-stable llvm-convertebcdic-stable llvm-djb-stable \
+  llvm-rustdemangle-stable llvm-dlang-stable \
+  llvm-rust-rustdemangle-differential llvm-rust-dlang-differential \
+  llvm-rust-djb-differential llc
 ```
 
 Full LLVM builds are large; prefer building `LLVMSupport` and the specific
@@ -148,6 +149,34 @@ To prove a backend-neutral result, configure the option `OFF`, rebuild
 `LLVMSupport` and the `*-stable` test, and confirm identical output. For
 `LLVM_ENABLE_RUST_RUSTDEMANGLE` or `LLVM_ENABLE_RUST_DLANG`, rebuild
 `LLVMDemangle` and the matching `*-stable` test instead.
+
+## DJB port
+
+`llvm/lib/Support/rust/djb` is gated by `LLVM_ENABLE_RUST_DJB` (default
+`OFF`). `DJB.cpp` keeps the original implementation under `#else`; with the
+option on, `llvm::caseFoldingDjbHash` is a C-ABI call to
+`llvm_djb_case_folding_hash`. The Rust ASCII path uses a 256-byte fold table
+and the same `h * 33 + c` recurrence as C++; the Unicode path reuses the
+lenient one-code-point UTF-8 behaviour of `ConvertUTF`.
+
+```sh
+(cd llvm/lib/Support/rust/djb &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build llvm-rust-djb-differential llvm-djb-stable
+./build/bin/llvm-djb-stable
+./build/bin/llvm-rust-djb-differential
+```
+
+The differential harness checks every legal Unicode scalar value, all
+single-byte inputs, and 200,000 random valid UTF-8 names, then benchmarks
+ASCII and Unicode. The C++ reference has an out-of-bounds write when a valid
+code point is followed by a truncated sequence, so malformed multi-byte input
+is not used as a differential oracle; the Rust port replaces it with U+FFFD.
+Measured here with `g++ -O3` and `-C opt-level=3`: 1.6x to 1.7x on ASCII
+debug-info names and 1.4x to 1.6x on non-ASCII names. The linked stable test
+shrinks from 30,376 to 20,640 bytes.
 
 ## Demangler port
 
