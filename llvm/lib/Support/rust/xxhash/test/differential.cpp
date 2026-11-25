@@ -6,10 +6,11 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Compares the Rust XXH3 64-bit and 128-bit entry points with the C++ reference
-// implementation in llvm/lib/Support/xxhash.cpp, then reports throughput for
-// both. The reference is compiled as a separate translation unit without
-// LLVM_RUST_XXHASH, so this test never compares Rust with itself.
+// Compares the Rust XXH3 64-bit and 128-bit entry points, and their explicit
+// scalar variants, with the C++ reference implementation in
+// llvm/lib/Support/xxhash.cpp, then reports throughput for both dispatched
+// entry points. The reference is compiled as a separate translation unit
+// without LLVM_RUST_XXHASH, so this test never compares Rust with itself.
 //
 //===----------------------------------------------------------------------===//
 
@@ -19,11 +20,16 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 extern "C" uint64_t llvm_xxhash_xxh3_64bits(const uint8_t *Data, size_t Len);
 extern "C" void llvm_xxhash_xxh3_128bits(const uint8_t *Data, size_t Len,
                                          uint64_t *Out);
+extern "C" uint64_t llvm_xxhash_xxh3_64bits_scalar(const uint8_t *Data,
+                                                   size_t Len);
+extern "C" void llvm_xxhash_xxh3_128bits_scalar(const uint8_t *Data, size_t Len,
+                                                uint64_t *Out);
 
 using Clock = std::chrono::steady_clock;
 
@@ -42,16 +48,29 @@ void Fail(const char *What, size_t Len) {
 bool Check(const uint8_t *Data, size_t Len) {
   uint64_t Cpp64 = llvm::xxh3_64bits(Data, Len);
   uint64_t Rust64 = llvm_xxhash_xxh3_64bits(Data, Len);
+  uint64_t Rust64Scalar = llvm_xxhash_xxh3_64bits_scalar(Data, Len);
   llvm::XXH128_hash_t Cpp128 = llvm::xxh3_128bits(Data, Len);
   uint64_t Rust128[2] = {0, 0};
+  uint64_t Rust128Scalar[2] = {0, 0};
   llvm_xxhash_xxh3_128bits(Data, Len, Rust128);
+  llvm_xxhash_xxh3_128bits_scalar(Data, Len, Rust128Scalar);
   bool Ok = true;
   if (Cpp64 != Rust64) {
     Fail("64-bit", Len);
     Ok = false;
   }
+  // The scalar entry point bypasses AVX2/NEON dispatch, so the fallback is
+  // covered on hosts where the vector path is selected.
+  if (Cpp64 != Rust64Scalar) {
+    Fail("64-bit scalar", Len);
+    Ok = false;
+  }
   if (Cpp128.low64 != Rust128[0] || Cpp128.high64 != Rust128[1]) {
     Fail("128-bit", Len);
+    Ok = false;
+  }
+  if (Cpp128.low64 != Rust128Scalar[0] || Cpp128.high64 != Rust128Scalar[1]) {
+    Fail("128-bit scalar", Len);
     Ok = false;
   }
   return Ok;
@@ -77,7 +96,7 @@ struct BenchCase {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
   std::vector<uint8_t> Data(1 << 20);
   uint64_t State = 0x243F6A8885A308D3ULL;
   auto Next = [&]() {
@@ -99,6 +118,10 @@ int main() {
   if (Failures) {
     std::fprintf(stderr, "%d mismatches\n", Failures);
     return 1;
+  }
+  if (argc > 1 && std::strcmp(argv[1], "--check-only") == 0) {
+    std::printf("OK: Rust xxHash is bit-identical to the C++ reference\n");
+    return 0;
   }
 
   const BenchCase Cases[] = {{12, 20000000}, {48, 10000000}, {192, 5000000},

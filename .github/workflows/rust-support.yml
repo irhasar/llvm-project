@@ -51,6 +51,11 @@ jobs:
               && cargo test)
             echo "::endgroup::"
           done
+      - name: Cross-check xxhash for AArch64
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          (cd llvm/lib/Support/rust/xxhash \
+            && cargo check --target aarch64-unknown-linux-gnu)
 
   build:
     name: Build (${{ matrix.backend }} backend)

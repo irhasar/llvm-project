@@ -599,11 +599,21 @@ costs microseconds in virtualized guests; the first version called it on every
 hash and lost badly at 768-4096 bytes. The crate now caches the result in a
 relaxed `AtomicU8`, so the check is paid once per process.
 
+On little-endian AArch64 the crate mirrors the C++ NEON loops with
+`uint64x2_t` accumulate and scramble functions; NEON is baseline on AArch64, so
+the path is selected without a runtime check. The crate cross-compiles for
+`aarch64-unknown-linux-gnu` and the `neon_matches_scalar` test checks it
+against the scalar path on AArch64. No ARM hardware was available here, so the
+throughput table below is x86-64 only; the NEON code is a direct translation
+of the already-tested C++ NEON loop rather than an unmeasured scalar fallback.
+
 `test/differential.cpp` compiles `xxhash.cpp` as a separate translation unit
 without `LLVM_RUST_XXHASH`, so the reference is always the C++ code. It checks
 every length from 0 to 2048, 20,000 random lengths, and 4 KiB, 64 KiB, and
-1 MiB inputs for both variants. `test/stable.cpp` checks published vectors and
-a deterministic 768/1024/4096-byte pattern through the public API, so it runs
+1 MiB inputs for both variants. It also calls the explicit `*_scalar` Rust
+entry points, so the scalar fallback is checked on hosts where AVX2 or NEON
+dispatch is active. `test/stable.cpp` checks published vectors and a
+deterministic 768/1024/4096-byte pattern through the public API, so it runs
 with the Rust option both on and off.
 
 Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`, generic
@@ -622,6 +632,14 @@ x86-64 target, AVX2 detected at runtime:
 The 12-byte 64-bit row is parity (0.99x); from 48 bytes upward Rust is faster,
 and the AVX2 long path is 3.5x faster at 1 MiB. The 128-bit long path uses the
 same AVX2 accumulate/scramble loops and gets the same win.
+
+A local configure with only `LLVM_ENABLE_RUST_XXHASH=ON` produced
+`LLVM_SYSTEM_LIBS = "-lrt -ldl -lm -lllvm_xxhash"`, so `llvm-config
+--system-libs` carries the companion archive. The
+`llvm-rust-xxhash-differential` CMake target built and ran, and the
+`llvm-xxhash-stable` object compiled; `LLVMSupport` itself was not built. The
+AArch64 differential was cross-compiled and run under `qemu-aarch64
+--check-only`, where it matched the C++ NEON path bit for bit.
 
 ## Risks and mitigations
 

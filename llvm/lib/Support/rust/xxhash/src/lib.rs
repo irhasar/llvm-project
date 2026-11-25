@@ -13,6 +13,45 @@
 //
 //===----------------------------------------------------------------------===//
 
+// This crate is a translation of xxHash, which is distributed under the
+// BSD 2-Clause License:
+//
+// xxHash - Extremely Fast Hash algorithm
+// Copyright (C) 2012-2023, Yann Collet
+//
+// BSD 2-Clause License (http://www.opensource.org/licenses/bsd-license.php)
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions are
+// met:
+//
+// * Redistributions of source code must retain the above copyright
+// notice, this list of conditions and the following disclaimer.
+// * Redistributions in binary form must reproduce the above
+// copyright notice, this list of conditions and the following disclaimer
+// in the documentation and/or other materials provided with the
+// distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+//
+// You can contact the author at :
+// - xxHash homepage: http://www.xxhash.com
+// - xxHash source repository : https://github.com/Cyan4973/xxHash
+//
+// The 64-bit paths follow xxHash commit d5891596637d21366b9b1dcf2c0007a3edb26a9e
+// (July 2023); the 128-bit paths follow commit
+// b0adcc54188c3130b1793e7b19c62eb1e669f7df (June 2024).
+
 #![cfg_attr(not(test), no_std)]
 #![allow(clippy::missing_safety_doc)]
 // The raw-pointer helpers are unsafe by contract; keep their bodies readable.
@@ -370,7 +409,7 @@ fn xxh3_hash_long_64b(input: *const u8, len: usize, secret: *const u8, secret_si
 }
 
 #[inline(always)]
-pub(crate) fn xxh3_64bits(input: *const u8, len: usize) -> u64 {
+fn xxh3_64bits_scalar(input: *const u8, len: usize) -> u64 {
     let secret = K_SECRET.as_ptr();
     if len <= 16 {
         return xxh3_len_0to16_64b(input, len, secret, 0);
@@ -381,10 +420,22 @@ pub(crate) fn xxh3_64bits(input: *const u8, len: usize) -> u64 {
     if len <= XXH3_MIDSIZE_MAX {
         return xxh3_len_129to240_64b(input, len, secret, 0);
     }
+    xxh3_hash_long_64b(input, len, secret, XXH_SECRET_DEFAULT_SIZE)
+}
+
+#[inline(always)]
+pub(crate) fn xxh3_64bits(input: *const u8, len: usize) -> u64 {
+    if len <= XXH3_MIDSIZE_MAX {
+        return xxh3_64bits_scalar(input, len);
+    }
+    let secret = K_SECRET.as_ptr();
     #[cfg(target_arch = "x86_64")]
     if has_avx2() {
         return unsafe { xxh3_hash_long_64b_avx2(input, len, secret, XXH_SECRET_DEFAULT_SIZE) };
     }
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    return unsafe { xxh3_hash_long_64b_neon(input, len, secret, XXH_SECRET_DEFAULT_SIZE) };
+    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
     xxh3_hash_long_64b(input, len, secret, XXH_SECRET_DEFAULT_SIZE)
 }
 
@@ -849,8 +900,198 @@ unsafe fn xxh3_hash_long_128b_avx2(
     Hash128 { low, high }
 }
 
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+#[inline]
+unsafe fn xxh3_accumulate_512_neon(acc: *mut u64, input: *const u8, secret: *const u8) {
+    use core::arch::aarch64::*;
+    let mut i = 0;
+    while i < XXH_ACC_NB / 2 {
+        let data_vec_1 = vreinterpretq_u64_u8(vld1q_u8(input.add(i * 16)));
+        let data_vec_2 = vreinterpretq_u64_u8(vld1q_u8(input.add((i + 1) * 16)));
+        let key_vec_1 = vreinterpretq_u64_u8(vld1q_u8(secret.add(i * 16)));
+        let key_vec_2 = vreinterpretq_u64_u8(vld1q_u8(secret.add((i + 1) * 16)));
+        let data_swap_1 = vcombine_u64(vget_high_u64(data_vec_1), vget_low_u64(data_vec_1));
+        let data_swap_2 = vcombine_u64(vget_high_u64(data_vec_2), vget_low_u64(data_vec_2));
+        let data_key_1 = veorq_u64(data_vec_1, key_vec_1);
+        let data_key_2 = veorq_u64(data_vec_2, key_vec_2);
+        let data_key_lo = vuzp1q_u32(
+            vreinterpretq_u32_u64(data_key_1),
+            vreinterpretq_u32_u64(data_key_2),
+        );
+        let data_key_hi = vuzp2q_u32(
+            vreinterpretq_u32_u64(data_key_1),
+            vreinterpretq_u32_u64(data_key_2),
+        );
+        let sum_1 = vmlal_u32(
+            data_swap_1,
+            vget_low_u32(data_key_lo),
+            vget_low_u32(data_key_hi),
+        );
+        let sum_2 = vmlal_u32(
+            data_swap_2,
+            vget_high_u32(data_key_lo),
+            vget_high_u32(data_key_hi),
+        );
+        let acc_1 = vld1q_u64(acc.add(2 * i) as *const u64);
+        let acc_2 = vld1q_u64(acc.add(2 * i + 2) as *const u64);
+        vst1q_u64(acc.add(2 * i), vaddq_u64(acc_1, sum_1));
+        vst1q_u64(acc.add(2 * i + 2), vaddq_u64(acc_2, sum_2));
+        i += 2;
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+#[inline]
+unsafe fn xxh3_scramble_acc_neon(acc: *mut u64, secret: *const u8) {
+    use core::arch::aarch64::*;
+    let prime_lo = vdup_n_u32(PRIME32_1 as u32);
+    let prime_hi = vreinterpretq_u32_u64(vdupq_n_u64((PRIME32_1 as u64) << 32));
+    let mut i = 0;
+    while i < XXH_ACC_NB / 2 {
+        let acc_vec = vld1q_u64(acc.add(2 * i) as *const u64);
+        let shifted = vshrq_n_u64::<47>(acc_vec);
+        let data_vec = veorq_u64(acc_vec, shifted);
+        let key_vec = vreinterpretq_u64_u8(vld1q_u8(secret.add(i * 16)));
+        let data_key = veorq_u64(data_vec, key_vec);
+        let prod_hi = vmulq_u32(vreinterpretq_u32_u64(data_key), prime_hi);
+        let data_key_lo = vmovn_u64(data_key);
+        let result = vmlal_u32(vreinterpretq_u64_u32(prod_hi), data_key_lo, prime_lo);
+        vst1q_u64(acc.add(2 * i), result);
+        i += 1;
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+unsafe fn xxh3_accumulate_neon(
+    acc: *mut u64,
+    input: *const u8,
+    secret: *const u8,
+    nb_stripes: usize,
+) {
+    for n in 0..nb_stripes {
+        xxh3_accumulate_512_neon(
+            acc,
+            input.add(n * XXH_STRIPE_LEN),
+            secret.add(n * XXH_SECRET_CONSUME_RATE),
+        );
+    }
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+unsafe fn xxh3_hash_long_64b_neon(
+    input: *const u8,
+    len: usize,
+    secret: *const u8,
+    secret_size: usize,
+) -> u64 {
+    let nb_stripes_per_block = (secret_size - XXH_STRIPE_LEN) / XXH_SECRET_CONSUME_RATE;
+    let block_len = XXH_STRIPE_LEN * nb_stripes_per_block;
+    let nb_blocks = (len - 1) / block_len;
+    let mut acc: [u64; XXH_ACC_NB] = [
+        PRIME32_3 as u64,
+        PRIME64_1,
+        PRIME64_2,
+        PRIME64_3,
+        PRIME64_4,
+        PRIME32_2 as u64,
+        PRIME64_5,
+        PRIME32_1 as u64,
+    ];
+
+    for n in 0..nb_blocks {
+        xxh3_accumulate_neon(
+            acc.as_mut_ptr(),
+            input.add(n * block_len),
+            secret,
+            nb_stripes_per_block,
+        );
+        xxh3_scramble_acc_neon(acc.as_mut_ptr(), secret.add(secret_size - XXH_STRIPE_LEN));
+    }
+
+    let nb_stripes = (len - 1 - block_len * nb_blocks) / XXH_STRIPE_LEN;
+    xxh3_accumulate_neon(
+        acc.as_mut_ptr(),
+        input.add(nb_blocks * block_len),
+        secret,
+        nb_stripes,
+    );
+    xxh3_accumulate_512_neon(
+        acc.as_mut_ptr(),
+        input.add(len - XXH_STRIPE_LEN),
+        secret.add(secret_size - XXH_STRIPE_LEN - 7),
+    );
+
+    xxh3_merge_accs(
+        acc.as_ptr(),
+        secret.add(11),
+        (len as u64).wrapping_mul(PRIME64_1),
+    )
+}
+
+#[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+#[target_feature(enable = "neon")]
+unsafe fn xxh3_hash_long_128b_neon(
+    input: *const u8,
+    len: usize,
+    secret: *const u8,
+    secret_size: usize,
+) -> Hash128 {
+    let nb_stripes_per_block = (secret_size - XXH_STRIPE_LEN) / XXH_SECRET_CONSUME_RATE;
+    let block_len = XXH_STRIPE_LEN * nb_stripes_per_block;
+    let nb_blocks = (len - 1) / block_len;
+    let mut acc: [u64; XXH_ACC_NB] = [
+        PRIME32_3 as u64,
+        PRIME64_1,
+        PRIME64_2,
+        PRIME64_3,
+        PRIME64_4,
+        PRIME32_2 as u64,
+        PRIME64_5,
+        PRIME32_1 as u64,
+    ];
+
+    for n in 0..nb_blocks {
+        xxh3_accumulate_neon(
+            acc.as_mut_ptr(),
+            input.add(n * block_len),
+            secret,
+            nb_stripes_per_block,
+        );
+        xxh3_scramble_acc_neon(acc.as_mut_ptr(), secret.add(secret_size - XXH_STRIPE_LEN));
+    }
+
+    let nb_stripes = (len - 1 - block_len * nb_blocks) / XXH_STRIPE_LEN;
+    xxh3_accumulate_neon(
+        acc.as_mut_ptr(),
+        input.add(nb_blocks * block_len),
+        secret,
+        nb_stripes,
+    );
+    xxh3_accumulate_512_neon(
+        acc.as_mut_ptr(),
+        input.add(len - XXH_STRIPE_LEN),
+        secret.add(secret_size - XXH_STRIPE_LEN - 7),
+    );
+
+    let low = xxh3_merge_accs(
+        acc.as_ptr(),
+        secret.add(11),
+        (len as u64).wrapping_mul(PRIME64_1),
+    );
+    let high = xxh3_merge_accs(
+        acc.as_ptr(),
+        secret.add(secret_size - XXH_STRIPE_LEN - 11),
+        !(len as u64).wrapping_mul(PRIME64_2),
+    );
+    Hash128 { low, high }
+}
+
 #[inline(always)]
-pub(crate) fn xxh3_128bits(input: *const u8, len: usize) -> Hash128 {
+fn xxh3_128bits_scalar(input: *const u8, len: usize) -> Hash128 {
     let secret = K_SECRET.as_ptr();
     if len <= 16 {
         return xxh3_len_0to16_128b(input, len, secret, 0);
@@ -861,10 +1102,22 @@ pub(crate) fn xxh3_128bits(input: *const u8, len: usize) -> Hash128 {
     if len <= XXH3_MIDSIZE_MAX {
         return xxh3_len_129to240_128b(input, len, secret, 0);
     }
+    xxh3_hash_long_128b(input, len, secret, XXH_SECRET_DEFAULT_SIZE)
+}
+
+#[inline(always)]
+pub(crate) fn xxh3_128bits(input: *const u8, len: usize) -> Hash128 {
+    if len <= XXH3_MIDSIZE_MAX {
+        return xxh3_128bits_scalar(input, len);
+    }
+    let secret = K_SECRET.as_ptr();
     #[cfg(target_arch = "x86_64")]
     if has_avx2() {
         return unsafe { xxh3_hash_long_128b_avx2(input, len, secret, XXH_SECRET_DEFAULT_SIZE) };
     }
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    return unsafe { xxh3_hash_long_128b_neon(input, len, secret, XXH_SECRET_DEFAULT_SIZE) };
+    #[cfg(not(all(target_arch = "aarch64", target_endian = "little")))]
     xxh3_hash_long_128b(input, len, secret, XXH_SECRET_DEFAULT_SIZE)
 }
 
@@ -876,6 +1129,22 @@ pub unsafe extern "C" fn llvm_xxhash_xxh3_64bits(data: *const u8, len: usize) ->
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_xxhash_xxh3_128bits(data: *const u8, len: usize, out: *mut u64) {
     let h = xxh3_128bits(data, len);
+    *out = h.low;
+    *out.add(1) = h.high;
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn llvm_xxhash_xxh3_64bits_scalar(data: *const u8, len: usize) -> u64 {
+    xxh3_64bits_scalar(data, len)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn llvm_xxhash_xxh3_128bits_scalar(
+    data: *const u8,
+    len: usize,
+    out: *mut u64,
+) {
+    let h = xxh3_128bits_scalar(data, len);
     *out = h.low;
     *out.add(1) = h.high;
 }
@@ -939,5 +1208,37 @@ mod tests {
             let _ = hash64(&data[..len]);
             let _ = hash128(&data[..len]);
         }
+    }
+
+    fn check_backend_matches_scalar() {
+        let data: Vec<u8> = (0..4096).map(|i| (i * 37 + 11) as u8).collect();
+        for &len in &[241usize, 242, 255, 256, 511, 512, 768, 1024, 2048, 4096] {
+            let scalar64 = xxh3_64bits_scalar(data.as_ptr(), len);
+            let dispatched64 = xxh3_64bits(data.as_ptr(), len);
+            assert_eq!(scalar64, dispatched64, "64-bit length {}", len);
+            let scalar128 = xxh3_128bits_scalar(data.as_ptr(), len);
+            let dispatched128 = xxh3_128bits(data.as_ptr(), len);
+            assert_eq!(
+                (scalar128.low, scalar128.high),
+                (dispatched128.low, dispatched128.high),
+                "128-bit length {}",
+                len
+            );
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn avx2_matches_scalar() {
+        if !has_avx2() {
+            return;
+        }
+        check_backend_matches_scalar();
+    }
+
+    #[cfg(all(target_arch = "aarch64", target_endian = "little"))]
+    #[test]
+    fn neon_matches_scalar() {
+        check_backend_matches_scalar();
     }
 }

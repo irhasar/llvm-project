@@ -84,6 +84,7 @@ Checks for a crate:
 cd llvm/lib/Support/rust/<component>
 cargo test
 cargo build --release --locked
+cargo check --target aarch64-unknown-linux-gnu   # xxhash: NEON path
 ```
 
 `cargo test` runs FIPS/RFC vectors, randomized length sweeps against a
