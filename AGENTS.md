@@ -38,7 +38,7 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON \
   -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON \
   -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON \
-  -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON \
+  -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON -DLLVM_ENABLE_RUST_OPTIONSTRCMP=ON \
   -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
@@ -49,9 +49,11 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 
 ninja -C build LLVMSupport llvm-sha1-stable llvm-sha256-stable \
   llvm-convertutf-stable llvm-convertebcdic-stable llvm-djb-stable \
-  llvm-versiontuple-stable llvm-rustdemangle-stable llvm-dlang-stable \
+  llvm-versiontuple-stable llvm-optionstrcmp-stable \
+  llvm-rustdemangle-stable llvm-dlang-stable \
   llvm-rust-rustdemangle-differential llvm-rust-dlang-differential \
-  llvm-rust-djb-differential llvm-rust-versiontuple-differential llc
+  llvm-rust-djb-differential llvm-rust-versiontuple-differential \
+  llvm-rust-optionstrcmp-differential llc
 ```
 
 Full LLVM builds are large; prefer building `LLVMSupport` and the specific
@@ -211,6 +213,38 @@ index-based digit loop and from writing the result once, instead of repeated
 `StringRef::substr`/`consume_front` calls. The parser uses wrapping `u32`
 arithmetic and masks minor/subminor to 31 bits so oversized components match
 the C++ bitfield truncation.
+
+## OptionStrCmp port
+
+`llvm/lib/Support/rust/optionstrcmp` is gated by
+`LLVM_ENABLE_RUST_OPTIONSTRCMP` (default `OFF`). `StrCmpOptionName` becomes a
+C-ABI call to `llvm_optionstrcmp_name`; `StrCmpOptionPrefixes` stays in C++
+and calls the wrapper for each pair, so the `ArrayRef` iteration and its
+layout remain on the C++ side.
+
+```sh
+(cd llvm/lib/Support/rust/optionstrcmp &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build llvm-rust-optionstrcmp-differential llvm-optionstrcmp-stable
+./build/bin/llvm-optionstrcmp-stable
+./build/bin/llvm-rust-optionstrcmp-differential
+```
+
+The differential target compiles the original `OptionStrCmp.cpp` and supplies
+the one `StringRef::compare_insensitive` entry point it needs, so it does not
+link `LLVMSupport`. Coverage includes every pair of single bytes, the option
+name corpus with both fallback settings, prefix arrays of different lengths,
+and 300,000 random pairs: 449,588 inputs, 0 mismatches. `test/stable.cpp`
+checks the public API with the option on and off.
+
+Measured here with `g++ -O3` and `-C opt-level=3`, alternating runs over 205
+option names: C++ 6.23 ns, public Rust wrapper 5.00 ns, or 1.25x faster. A
+direct call to `llvm_optionstrcmp_name` is 4.74 ns; the 0.26 ns difference is
+the C++ wrapper and C-ABI call. The Rust loop folds ASCII in one pass, reads
+both lengths before the loop, and avoids the two `StringRef::substr`
+temporaries and the out-of-line `compare_insensitive` call.
 
 ## Demangler port
 

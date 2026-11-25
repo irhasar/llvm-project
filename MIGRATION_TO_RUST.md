@@ -85,8 +85,9 @@ Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
 (`LLVM_ENABLE_RUST_BASE64`), `ConvertUTF.cpp`
 (`LLVM_ENABLE_RUST_CONVERTUTF`), `ConvertEBCDIC.cpp`
 (`LLVM_ENABLE_RUST_CONVERTEBCDIC`), `xxhash.cpp`
-(`LLVM_ENABLE_RUST_XXHASH`), `DJB.cpp` (`LLVM_ENABLE_RUST_DJB`), and
-`VersionTuple.cpp` (`LLVM_ENABLE_RUST_VERSIONTUPLE`).
+(`LLVM_ENABLE_RUST_XXHASH`), `DJB.cpp` (`LLVM_ENABLE_RUST_DJB`),
+`VersionTuple.cpp` (`LLVM_ENABLE_RUST_VERSIONTUPLE`), and
+`OptionStrCmp.cpp` (`LLVM_ENABLE_RUST_OPTIONSTRCMP`).
 Selection criteria: small, deterministic,
 byte-buffer in / byte-buffer out, no LLVM types in the interface, existing unit
 tests.
@@ -895,6 +896,36 @@ Rust is 1.20x faster. The gain comes from avoiding repeated
 `StringRef::substr`/`consume_front` calls and writing the parsed result once.
 The linked stable test and `LLVMSupport` were not rebuilt for this measurement;
 the CMake differential target and standalone stable binaries were built.
+
+## Eleventh port: OptionStrCmp
+
+`OptionStrCmp.cpp` is gated by `LLVM_ENABLE_RUST_OPTIONSTRCMP`. The public
+`StrCmpOptionName` becomes a call to `llvm_optionstrcmp_name`, which receives
+two `(pointer, length)` pairs and a fallback flag. `StrCmpOptionPrefixes`
+remains in C++ and calls the wrapper for each pair, so `ArrayRef` iteration and
+layout never cross the boundary.
+
+The Rust loop lowercases ASCII in place, compares unsigned bytes, handles the
+prefix case with the C++ rule that a shorter string sorts after its extension,
+and applies case-sensitive ordering only when the fallback flag is set. Every
+pair of single bytes is covered, including high bytes; the differential corpus
+also includes the option-name corpus under both fallback settings, prefix
+arrays of unequal length, and 300,000 random pairs. Result: 449,588 inputs, 0
+mismatches. `test/stable.cpp` checks the public API with the option on and off.
+
+Measured on this Zen 4 host with `g++ -O3` and `-C opt-level=3`, alternating
+runs over 205 option names:
+
+| Backend | ns/compare |
+|---------|------------|
+| C++ | 6.23 |
+| Rust public wrapper | 5.00 |
+| Rust direct C ABI | 4.74 |
+
+The public wrapper is 1.25x faster than C++. The C++ path creates two
+`StringRef::substr` temporaries and calls the out-of-line
+`StringRef::compare_insensitive`; the Rust path does one pass over the bytes
+and needs no intermediate string objects.
 
 ## Resource measurements for EBCDIC and D
 

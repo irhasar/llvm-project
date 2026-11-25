@@ -612,6 +612,33 @@ add_executable(llvm-versiontuple-stable EXCLUDE_FROM_ALL
   rust/versiontuple/test/stable.cpp)
 target_link_libraries(llvm-versiontuple-stable PRIVATE LLVMSupport)
 
+if(LLVM_ENABLE_RUST_OPTIONSTRCMP)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_optionstrcmp
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/optionstrcmp/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_OPTIONSTRCMP)
+  target_link_libraries(LLVMSupport PRIVATE llvm_optionstrcmp)
+
+  add_executable(llvm-rust-optionstrcmp-differential EXCLUDE_FROM_ALL
+    rust/optionstrcmp/test/differential.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/OptionStrCmp.cpp"
+    rust/optionstrcmp/test/reference_stringref.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/ABIBreak.cpp")
+  target_include_directories(llvm-rust-optionstrcmp-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-optionstrcmp-differential PRIVATE llvm_optionstrcmp)
+  add_custom_target(check-llvm-rust-optionstrcmp
+    COMMAND llvm-rust-optionstrcmp-differential
+    COMMAND llvm-optionstrcmp-stable
+    DEPENDS llvm-rust-optionstrcmp-differential llvm-optionstrcmp-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-optionstrcmp-stable EXCLUDE_FROM_ALL
+  rust/optionstrcmp/test/stable.cpp)
+target_link_libraries(llvm-optionstrcmp-stable PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport

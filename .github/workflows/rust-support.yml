@@ -20,6 +20,7 @@ on:
       - 'llvm/lib/Support/xxhash.cpp'
       - 'llvm/lib/Support/DJB.cpp'
       - 'llvm/lib/Support/VersionTuple.cpp'
+      - 'llvm/lib/Support/OptionStrCmp.cpp'
       - 'llvm/lib/Support/CMakeLists.txt'
       - 'llvm/lib/Demangle/**'
       - 'llvm/CMakeLists.txt'
@@ -47,7 +48,7 @@ jobs:
           rustc --version
       - name: fmt, clippy and unit tests
         run: |
-          for crate in siphash crc md5 sha1 sha256 base64 convertutf convertebcdic xxhash djb versiontuple; do
+          for crate in siphash crc md5 sha1 sha256 base64 convertutf convertebcdic xxhash djb versiontuple optionstrcmp; do
             echo "::group::$crate"
             (cd "llvm/lib/Support/rust/$crate" \
               && cargo fmt --check \
@@ -106,7 +107,7 @@ jobs:
         run: |
           RUST_FLAGS=""
           if [ "${{ matrix.backend }}" = "rust" ]; then
-            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON"
+            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON -DLLVM_ENABLE_RUST_OPTIONSTRCMP=ON -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON"
           fi
           cmake -G Ninja -S llvm -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -126,7 +127,7 @@ jobs:
             llvm-sha1-stable llvm-sha256-stable llvm-base64-stable \
             llvm-convertutf-stable llvm-convertebcdic-stable llvm-xxhash-stable \
             llvm-djb-stable llvm-versiontuple-stable \
-            llvm-rustdemangle-stable llvm-dlang-stable
+            llvm-optionstrcmp-stable llvm-rustdemangle-stable llvm-dlang-stable
           ./build/bin/llvm-siphash-stable-hash
           ./build/bin/llvm-crc-stable
           ./build/bin/llvm-md5-stable
@@ -138,6 +139,7 @@ jobs:
           ./build/bin/llvm-xxhash-stable
           ./build/bin/llvm-djb-stable
           ./build/bin/llvm-versiontuple-stable
+          ./build/bin/llvm-optionstrcmp-stable
           ./build/bin/llvm-rustdemangle-stable
           ./build/bin/llvm-dlang-stable
       - name: Differential checks
@@ -148,7 +150,8 @@ jobs:
             check-llvm-rust-base64 check-llvm-rust-convertutf \
             check-llvm-rust-convertebcdic check-llvm-rust-xxhash \
             check-llvm-rust-djb check-llvm-rust-versiontuple \
-            check-llvm-rust-rustdemangle check-llvm-rust-dlang
+            check-llvm-rust-optionstrcmp check-llvm-rust-rustdemangle \
+            check-llvm-rust-dlang
 
   codegen-lea:
     name: LEA fold (llc)

@@ -688,6 +688,8 @@ option(LLVM_ENABLE_RUST_DJB
   "Use the Rust implementation of the DJB hash in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_VERSIONTUPLE
   "Use the Rust implementation of VersionTuple parsing in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_OPTIONSTRCMP
+  "Use the Rust implementation of option string comparison in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_RUSTDEMANGLE
   "Use the Rust implementation of the Rust v0 demangler in LLVMDemangle (experimental)" OFF)
 option(LLVM_ENABLE_RUST_DLANG
