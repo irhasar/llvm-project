@@ -9,6 +9,73 @@
 #define INVALID_BASE64_BYTE 64
 #include "llvm/Support/Base64.h"
 
+#include "llvm/Config/config.h"
+
+using namespace llvm;
+
+#if defined(LLVM_RUST_BASE64)
+
+extern "C" int llvm_base64_decode(const uint8_t *Src, size_t Len, char *Dst,
+                                  size_t *OutLen, size_t *BadIndex);
+
+llvm::Error llvm::decodeBase64(llvm::StringRef Input,
+                               std::vector<char> &Output) {
+  Output.clear();
+  const uint64_t InputLength = Input.size();
+  if (InputLength == 0)
+    return Error::success();
+  if ((InputLength % 4) != 0)
+    return createStringError(std::errc::illegal_byte_sequence,
+                             "Base64 encoded strings must be a multiple of 4 "
+                             "bytes in length");
+  Output.resize(InputLength / 4 * 3);
+  size_t OutLen = 0;
+  size_t BadIndex = 0;
+  int Rc = llvm_base64_decode(reinterpret_cast<const uint8_t *>(Input.data()),
+                              InputLength, Output.data(), &OutLen, &BadIndex);
+  // The Rust decoder stops before the chunk holding the bad byte, so shrinking
+  // to OutLen leaves the same partial vector the C++ loop produces.
+  Output.resize(OutLen);
+  if (Rc != 0)
+    return createStringError(std::errc::illegal_byte_sequence,
+                             "Invalid Base64 character %#2.2x at index %" PRIu64,
+                             Input[BadIndex], static_cast<uint64_t>(BadIndex));
+  return Error::success();
+}
+
+#else
+
+// The header always calls this symbol, so a build without the Rust crate needs
+// a definition here. This is the body the encodeBase64 template used to carry.
+extern "C" size_t llvm_base64_encode(const void *Src, size_t Len, char *Dst) {
+  static const char Table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                              "abcdefghijklmnopqrstuvwxyz"
+                              "0123456789+/";
+  const auto *Bytes = static_cast<const unsigned char *>(Src);
+  size_t i = 0, j = 0;
+  for (size_t n = Len / 3 * 3; i < n; i += 3, j += 4) {
+    uint32_t x = (Bytes[i] << 16) | (Bytes[i + 1] << 8) | Bytes[i + 2];
+    Dst[j + 0] = Table[(x >> 18) & 63];
+    Dst[j + 1] = Table[(x >> 12) & 63];
+    Dst[j + 2] = Table[(x >> 6) & 63];
+    Dst[j + 3] = Table[x & 63];
+  }
+  if (i + 1 == Len) {
+    uint32_t x = Bytes[i] << 16;
+    Dst[j + 0] = Table[(x >> 18) & 63];
+    Dst[j + 1] = Table[(x >> 12) & 63];
+    Dst[j + 2] = '=';
+    Dst[j + 3] = '=';
+  } else if (i + 2 == Len) {
+    uint32_t x = (Bytes[i] << 16) | (Bytes[i + 1] << 8);
+    Dst[j + 0] = Table[(x >> 18) & 63];
+    Dst[j + 1] = Table[(x >> 12) & 63];
+    Dst[j + 2] = Table[(x >> 6) & 63];
+    Dst[j + 3] = '=';
+  }
+  return ((Len + 2) / 3) * 4;
+}
+
 static char decodeBase64Byte(uint8_t Ch) {
   constexpr char Inv = INVALID_BASE64_BYTE;
   static const char DecodeTable[] = {
@@ -90,3 +157,5 @@ llvm::Error llvm::decodeBase64(llvm::StringRef Input,
   }
   return Error::success();
 }
+
+#endif

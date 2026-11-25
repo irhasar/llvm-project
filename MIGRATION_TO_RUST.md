@@ -78,10 +78,49 @@ native configurations.
 ### Phase 1 - pure leaf functions in lib/Support (in progress)
 
 Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
-`MD5.cpp` (`LLVM_ENABLE_RUST_MD5`), `SHA1.cpp` (`LLVM_ENABLE_RUST_SHA1`) and
-`SHA256.cpp` (`LLVM_ENABLE_RUST_SHA256`). Remaining candidates: `Base64.cpp`
-and `ConvertUTF.cpp`. Selection criteria: small, deterministic, byte-buffer in /
-byte-buffer out, no LLVM types in the interface, existing unit tests.
+`MD5.cpp` (`LLVM_ENABLE_RUST_MD5`), `SHA1.cpp` (`LLVM_ENABLE_RUST_SHA1`),
+`SHA256.cpp` (`LLVM_ENABLE_RUST_SHA256`) and `Base64.cpp`
+(`LLVM_ENABLE_RUST_BASE64`). Remaining candidate: `ConvertUTF.cpp`. Selection
+criteria: small, deterministic, byte-buffer in / byte-buffer out, no LLVM types
+in the interface, existing unit tests.
+
+`Base64` needed one structural concession: `encodeBase64` is a template in the
+public header, so its body cannot be swapped per translation unit without the
+option's define leaking into every consumer. The template now resizes the
+result string and calls the exported `llvm_base64_encode` symbol; `Base64.cpp`
+defines that symbol with the original scalar loop when the Rust crate is off and
+the Rust archive provides it when the crate is on. The public API and the
+output are unchanged. The cost when the option is off is one out-of-line call
+per `encodeBase64` invocation instead of an inlined loop.
+
+The Rust encoder uses an SSSE3 path (runtime-detected through CPUID, with the
+scalar path as the fallback) that turns 12 bytes into 16 characters per
+iteration. The decoder validates four characters at a time and writes into the
+caller's buffer, reproducing the C++ `=` placement rules and the partial output
+that the C++ loop leaves behind on error. On this Zen 4 host at `-O3` versus
+`-C opt-level=3`, encoding is at parity at 12 bytes and 1.6x to 6.4x faster
+from 48 bytes to 1 MiB; decoding is 3.5x to 5x faster across the same range.
+`llvm/lib/Support/rust/base64/test/differential.cpp` carries the reference
+implementations and the throughput table, so it builds with plain `g++` and the
+crate's archive without an LLVM build.
+
+Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`, both on the
+generic x86-64 target unless noted:
+
+| Component       | Rust vs C++                                   |
+|-----------------|-----------------------------------------------|
+| CRC-32          | 6.2x vs the byte loop, 1.3x vs slicing-by-8    |
+| SHA-1           | 1.9x (SHA-NI path)                            |
+| SHA-256         | 4.1x (SHA-NI path)                            |
+| Base64 encode   | 1.6x at 48 B, 6.2x at 1 MiB                   |
+| Base64 decode   | 3.5x at 12 B, 5.0x at 1 MiB                   |
+| MD5             | 0.83x generic, 1.09x with `-march=znver4` both |
+
+MD5 is the one port where generic LLVM codegen loses to GCC. GCC folds the
+`a + f + x + t` chains into LEA and LLVM leaves them as adds (651 against 586
+instructions in the 64-step body); at a matched `-march=znver4` the Rust body
+is 593 instructions and 1.09x faster. This is a codegen gap, not an algorithmic
+one, and it is what the fork's `-x86-fold-add-into-lea` experiment targets.
 
 The point of this phase is volume: prove that the plumbing works for many small
 crates, and settle conventions (error reporting via return codes, output buffer

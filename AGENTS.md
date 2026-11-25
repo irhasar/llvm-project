@@ -34,7 +34,8 @@ export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH
 cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON \
   -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON \
-  -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_TARGETS_TO_BUILD=X86 \
+  -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON \
+  -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
   -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_INCLUDE_TESTS=OFF \
   -DLLVM_INCLUDE_DOCS=OFF -DLLVM_INCLUDE_BENCHMARKS=OFF \
@@ -91,6 +92,8 @@ To prove a backend-neutral result, configure the option `OFF`, rebuild
   built without CMake:
   `g++ -O3 test/differential.cpp -Ltarget/release -lllvm_sha256 -o /tmp/diff`
   (add `-march=native` only when comparing native codegen on both sides).
+  Base64 follows the same shape:
+  `cd llvm/lib/Support/rust/base64 && cargo build --release --locked && g++ -O3 -std=c++17 test/differential.cpp -Ltarget/release -lllvm_base64 -o /tmp/base64-diff && /tmp/base64-diff`.
 - `-C target-cpu=native` is exposed through `LLVM_RUST_FLAGS`; it is not a
   safe default for redistributed binaries.
 

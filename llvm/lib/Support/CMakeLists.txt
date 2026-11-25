@@ -436,6 +436,25 @@ endif()
 add_executable(llvm-sha256-stable EXCLUDE_FROM_ALL rust/sha256/test/stable.cpp)
 target_link_libraries(llvm-sha256-stable PRIVATE LLVMSupport)
 
+if(LLVM_ENABLE_RUST_BASE64)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_base64
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/base64/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_BASE64)
+  target_link_libraries(LLVMSupport PRIVATE llvm_base64)
+
+  add_executable(llvm-rust-base64-differential EXCLUDE_FROM_ALL
+    rust/base64/test/differential.cpp)
+  target_link_libraries(llvm-rust-base64-differential PRIVATE llvm_base64)
+  add_custom_target(check-llvm-rust-base64
+    COMMAND llvm-rust-base64-differential
+    DEPENDS llvm-rust-base64-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-base64-stable EXCLUDE_FROM_ALL rust/base64/test/stable.cpp)
+target_link_libraries(llvm-base64-stable PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport
