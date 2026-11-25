@@ -18,21 +18,16 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <vector>
 
-#ifdef LLVM_RUST_BASE64_PUBLIC_API
 #include "llvm/Support/Base64.h"
-#endif
 
 extern "C" size_t llvm_base64_encode_rust(const uint8_t *Src, size_t Len,
                                      char *Dst);
 extern "C" int llvm_base64_decode_rust(const uint8_t *Src, size_t Len, char *Dst,
                                   size_t *OutLen, size_t *BadIndex);
-extern "C" int llvm_base64_validate_rust(const uint8_t *Src, size_t Len,
-                                         size_t *OutLen, size_t *BadIndex);
-extern "C" int llvm_base64_decode_valid_rust(const uint8_t *Src, size_t Len,
-                                             char *Dst, size_t *OutLen);
 
 namespace {
 
@@ -196,11 +191,11 @@ DecodeResult RustDecode(const char *Input, size_t InputLength) {
   return R;
 }
 
-// The public path. The CMake target defines LLVM_RUST_BASE64_PUBLIC_API and
-// calls the real llvm::decodeBase64; the standalone g++ build uses the same
-// algorithm against the FFI so it can run without an LLVM build.
+// The differential calls the public wrapper directly. A missing or nonnumeric
+// error index must not alias index zero, so use a sentinel that cannot match a
+// real index.
 DecodeResult RustDecodePublic(const char *Input, size_t InputLength) {
-#ifdef LLVM_RUST_BASE64_PUBLIC_API
+  constexpr size_t InvalidBadIndex = static_cast<size_t>(-1);
   DecodeResult R;
   std::vector<char> Out;
   llvm::Error E =
@@ -217,57 +212,17 @@ DecodeResult RustDecodePublic(const char *Input, size_t InputLength) {
   }
   R.S = BadChar;
   size_t Pos = Msg.rfind("index ");
-  if (Pos != std::string::npos)
-    R.BadIndex = static_cast<size_t>(
-        std::strtoull(Msg.c_str() + Pos + 6, nullptr, 10));
+  if (Pos == std::string::npos) {
+    R.BadIndex = InvalidBadIndex;
+    return R;
+  }
+  const char *Start = Msg.c_str() + Pos + 6;
+  char *End = nullptr;
+  unsigned long long Index = std::strtoull(Start, &End, 10);
+  R.BadIndex = (End == Start || Index > std::numeric_limits<size_t>::max())
+                   ? InvalidBadIndex
+                   : static_cast<size_t>(Index);
   return R;
-#else
-  DecodeResult R;
-  if (InputLength == 0) {
-    R.S = Ok;
-    return R;
-  }
-  if ((InputLength % 4) != 0) {
-    R.S = LengthError;
-    return R;
-  }
-  size_t DecodedLen = 0;
-  size_t BadIndex = 0;
-  int Rc = llvm_base64_validate_rust(
-      reinterpret_cast<const uint8_t *>(Input), InputLength, &DecodedLen,
-      &BadIndex);
-  R.BadIndex = BadIndex;
-  if (Rc != 0) {
-    R.S = Rc == 1 ? LengthError : BadChar;
-    if (Rc == 2) {
-      const size_t GoodBlocks = BadIndex / 4;
-      const size_t PartialLen = GoodBlocks * 3;
-      if (PartialLen != 0) {
-        R.Output.resize(PartialLen);
-        size_t OutLen = 0;
-        int DecodeRc = llvm_base64_decode_valid_rust(
-            reinterpret_cast<const uint8_t *>(Input), GoodBlocks * 4,
-            R.Output.data(), &OutLen);
-        if (DecodeRc != 0 || OutLen != PartialLen) {
-          R.Output.clear();
-          R.S = BadChar;
-        }
-      }
-    }
-    return R;
-  }
-  R.Output.resize(DecodedLen);
-  size_t OutLen = 0;
-  Rc = llvm_base64_decode_valid_rust(
-      reinterpret_cast<const uint8_t *>(Input), InputLength, R.Output.data(),
-      &OutLen);
-  if (Rc != 0 || OutLen != DecodedLen) {
-    R.S = BadChar;
-    return R;
-  }
-  R.S = Ok;
-  return R;
-#endif
 }
 
 //===----------------------------------------------------------------------===//

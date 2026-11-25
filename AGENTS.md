@@ -108,11 +108,9 @@ To prove a backend-neutral result, configure the option `OFF`, rebuild
   built without CMake:
   `g++ -O3 test/differential.cpp -Ltarget/release -lllvm_sha256 -o /tmp/diff`
   (add `-march=native` only when comparing native codegen on both sides).
-  Base64 follows the same shape:
-  `cd llvm/lib/Support/rust/base64 && cargo build --release --locked && g++ -O3 -std=c++17 test/differential.cpp -Ltarget/release -lllvm_base64 -o /tmp/base64-diff && /tmp/base64-diff`.
-  That standalone command uses a local copy of the public decoder. The CMake
-  target defines `LLVM_RUST_BASE64_PUBLIC_API`, links `LLVMSupport`, and calls
-  the real `llvm::decodeBase64`, so the sweep covers the public wrapper.
+  Base64 is the exception: its differential calls `llvm::decodeBase64`, so it
+  needs `LLVMSupport` and is built by CMake:
+  `ninja -C build llvm-rust-base64-differential && ./build/bin/llvm-rust-base64-differential`.
   ConvertUTF compiles the C++ reference as a second translation unit:
   `cd llvm/lib/Support/rust/convertutf && cargo build --release --locked && g++ -O3 -std=c++17 -I ../../../../include -I <build>/include test/differential.cpp ../../ConvertUTF.cpp -Ltarget/release -lllvm_convertutf -o /tmp/convertutf-diff && /tmp/convertutf-diff`.
   Add `-DLLVM_RUST_CONVERTUTF` to exercise the C++ shim instead of the

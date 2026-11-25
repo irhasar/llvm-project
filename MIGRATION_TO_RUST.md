@@ -101,16 +101,13 @@ The Rust encoder uses an SSSE3 path (runtime-detected through CPUID, with the
 scalar path as the fallback) that turns 12 bytes into 16 characters per
 iteration. The decoder validates four characters at a time. The public wrapper
 validates before sizing the output, so invalid input never allocates the
-maximum decoded length and keeps the same partial output as the C++ loop. The
-separately exported validating entry point used by the differential test
-reproduces the C++ `=` placement rules and the same partial output. On this
-Zen 4 host at `-O3` versus `-C opt-level=3`, encoding is at parity to 1.1x
-faster at 12 bytes and 1.5x to 6.0x faster from 48 bytes to 1 MiB. The CMake
-differential target links `LLVMSupport` and calls the real
-`llvm::decodeBase64`, so its correctness sweep covers the public wrapper; the
-standalone `g++` build uses a local copy of the same algorithm so it can run
-without an LLVM build. The throughput table times the public path, which is
-3.0x to 4.0x faster across the same range.
+maximum decoded length and keeps the same partial output as the C++ loop. It
+reproduces the C++ `=` placement rules and the same partial output on error.
+On this Zen 4 host at `-O3` versus `-C opt-level=3`, encoding is at parity to
+1.1x faster at 12 bytes and 1.5x to 6.0x faster from 48 bytes to 1 MiB. The
+differential target links `LLVMSupport` and calls the real `llvm::decodeBase64`,
+so its correctness sweep covers the public wrapper. The throughput table times
+the public path, which is 3.0x to 4.0x faster across the same range.
 `llvm/lib/Support/rust/base64/test/differential.cpp` carries the reference
 implementations and both the single-pass and public-path throughput rows.
 
