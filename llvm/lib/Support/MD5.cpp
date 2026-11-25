@@ -73,6 +73,21 @@
 
 using namespace llvm;
 
+#if defined(LLVM_RUST_MD5)
+
+extern "C" void llvm_md5_body(uint32_t *State, const uint8_t *Data,
+                              size_t NumBlocks);
+
+/// This processes one or more 64-byte data blocks, but does NOT update
+///the bit counters.  There are no alignment requirements.
+const uint8_t *MD5::body(ArrayRef<uint8_t> Data) {
+  size_t NumBlocks = Data.size() / 64;
+  llvm_md5_body(&InternalState.a, Data.data(), NumBlocks);
+  return Data.data() + NumBlocks * 64;
+}
+
+#else
+
 /// This processes one or more 64-byte data blocks, but does NOT update
 ///the bit counters.  There are no alignment requirements.
 const uint8_t *MD5::body(ArrayRef<uint8_t> Data) {
@@ -181,6 +196,8 @@ const uint8_t *MD5::body(ArrayRef<uint8_t> Data) {
 
   return ptr;
 }
+
+#endif
 
 MD5::MD5() = default;
 

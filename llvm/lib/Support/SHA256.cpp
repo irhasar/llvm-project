@@ -28,6 +28,12 @@
 
 namespace llvm {
 
+#if defined(LLVM_RUST_SHA256)
+extern "C" void llvm_sha256_block(uint32_t *State, const uint32_t *Block);
+extern "C" void llvm_sha256_blocks(uint32_t *State, const uint8_t *Data,
+                                   size_t NumBlocks);
+#endif
+
 #define SHR(x, c) ((x) >> (c))
 #define ROTR(x, n) (((x) >> n) | ((x) << (32 - (n))))
 
@@ -62,6 +68,9 @@ void SHA256::init() {
 }
 
 void SHA256::hashBlock() {
+#if defined(LLVM_RUST_SHA256)
+  llvm_sha256_block(InternalState.State, InternalState.Buffer.L);
+#else
   uint32_t A = InternalState.State[0];
   uint32_t B = InternalState.State[1];
   uint32_t C = InternalState.State[2];
@@ -164,6 +173,7 @@ void SHA256::hashBlock() {
   InternalState.State[5] += F;
   InternalState.State[6] += G;
   InternalState.State[7] += H;
+#endif
 }
 
 void SHA256::addUncounted(uint8_t Data) {
@@ -197,6 +207,11 @@ void SHA256::update(ArrayRef<uint8_t> Data) {
   }
 
   // Fast buffer filling for large inputs.
+#if defined(LLVM_RUST_SHA256)
+  const size_t NumBlocks = Data.size() / BLOCK_LENGTH;
+  llvm_sha256_blocks(InternalState.State, Data.data(), NumBlocks);
+  Data = Data.drop_front(NumBlocks * BLOCK_LENGTH);
+#else
   while (Data.size() >= BLOCK_LENGTH) {
     assert(InternalState.BufferOffset == 0);
     static_assert(BLOCK_LENGTH % 4 == 0);
@@ -206,6 +221,7 @@ void SHA256::update(ArrayRef<uint8_t> Data) {
     hashBlock();
     Data = Data.drop_front(BLOCK_LENGTH);
   }
+#endif
 
   // Finish the remainder.
   for (uint8_t C : Data)

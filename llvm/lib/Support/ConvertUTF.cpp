@@ -97,6 +97,33 @@ ConvertUTF_DISABLE_WARNINGS
 
 namespace llvm {
 
+#ifdef LLVM_RUST_CONVERTUTF
+extern "C" {
+unsigned llvm_convertutf_utf32_to_utf16(const UTF32 **, const UTF32 *,
+                                        UTF16 **, UTF16 *, unsigned);
+unsigned llvm_convertutf_utf16_to_utf32(const UTF16 **, const UTF16 *,
+                                        UTF32 **, UTF32 *, unsigned);
+unsigned llvm_convertutf_utf16_to_utf8(const UTF16 **, const UTF16 *,
+                                       UTF8 **, UTF8 *, unsigned);
+unsigned llvm_convertutf_utf32_to_utf8(const UTF32 **, const UTF32 *,
+                                       UTF8 **, UTF8 *, unsigned);
+unsigned char llvm_convertutf_is_legal_utf8_sequence(const UTF8 *,
+                                                     const UTF8 *);
+unsigned llvm_convertutf_get_utf8_sequence_size(const UTF8 *, const UTF8 *);
+unsigned llvm_convertutf_find_maximal_subpart(const UTF8 *, const UTF8 *);
+unsigned llvm_convertutf_get_num_bytes_for_utf8(UTF8);
+unsigned char llvm_convertutf_is_legal_utf8_string(const UTF8 **,
+                                                   const UTF8 *);
+unsigned llvm_convertutf_utf8_to_utf16(const UTF8 **, const UTF8 *,
+                                       UTF16 **, UTF16 *, unsigned);
+unsigned llvm_convertutf_utf8_to_utf32_partial(const UTF8 **, const UTF8 *,
+                                               UTF32 **, UTF32 *, unsigned);
+unsigned llvm_convertutf_utf8_to_utf32(const UTF8 **, const UTF8 *,
+                                       UTF32 **, UTF32 *, unsigned);
+}
+#endif
+
+#ifndef LLVM_RUST_CONVERTUTF
 static const int halfShift  = 10; /* used for shifting by 10 bits */
 
 static const UTF32 halfBase = 0x0010000UL;
@@ -143,6 +170,8 @@ static const UTF32 offsetsFromUTF8[6] = { 0x00000000UL, 0x00003080UL, 0x000E2080
  * for *legal* UTF-8 will be 4 or fewer bytes total.
  */
 static const UTF8 firstByteMark[7] = { 0x00, 0x00, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC };
+#endif
+
 
 /* --------------------------------------------------------------------- */
 
@@ -160,6 +189,10 @@ static const UTF8 firstByteMark[7] = { 0x00, 0x00, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC 
 ConversionResult ConvertUTF32toUTF16 (
         const UTF32** sourceStart, const UTF32* sourceEnd,
         UTF16** targetStart, UTF16* targetEnd, ConversionFlags flags) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return (ConversionResult)llvm_convertutf_utf32_to_utf16(
+        sourceStart, sourceEnd, targetStart, targetEnd, (unsigned)flags);
+#else
     ConversionResult result = conversionOK;
     const UTF32* source = *sourceStart;
     UTF16* target = *targetStart;
@@ -202,6 +235,7 @@ ConversionResult ConvertUTF32toUTF16 (
     *sourceStart = source;
     *targetStart = target;
     return result;
+#endif
 }
 
 /* --------------------------------------------------------------------- */
@@ -209,6 +243,10 @@ ConversionResult ConvertUTF32toUTF16 (
 ConversionResult ConvertUTF16toUTF32 (
         const UTF16** sourceStart, const UTF16* sourceEnd,
         UTF32** targetStart, UTF32* targetEnd, ConversionFlags flags) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return (ConversionResult)llvm_convertutf_utf16_to_utf32(
+        sourceStart, sourceEnd, targetStart, targetEnd, (unsigned)flags);
+#else
     ConversionResult result = conversionOK;
     const UTF16* source = *sourceStart;
     UTF32* target = *targetStart;
@@ -259,10 +297,15 @@ if (result == sourceIllegal) {
 }
 #endif
     return result;
+#endif
 }
 ConversionResult ConvertUTF16toUTF8 (
         const UTF16** sourceStart, const UTF16* sourceEnd,
         UTF8** targetStart, UTF8* targetEnd, ConversionFlags flags) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return (ConversionResult)llvm_convertutf_utf16_to_utf8(
+        sourceStart, sourceEnd, targetStart, targetEnd, (unsigned)flags);
+#else
     ConversionResult result = conversionOK;
     const UTF16* source = *sourceStart;
     UTF8* target = *targetStart;
@@ -326,6 +369,7 @@ ConversionResult ConvertUTF16toUTF8 (
     *sourceStart = source;
     *targetStart = target;
     return result;
+#endif
 }
 
 /* --------------------------------------------------------------------- */
@@ -333,6 +377,10 @@ ConversionResult ConvertUTF16toUTF8 (
 ConversionResult ConvertUTF32toUTF8 (
         const UTF32** sourceStart, const UTF32* sourceEnd,
         UTF8** targetStart, UTF8* targetEnd, ConversionFlags flags) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return (ConversionResult)llvm_convertutf_utf32_to_utf8(
+        sourceStart, sourceEnd, targetStart, targetEnd, (unsigned)flags);
+#else
     ConversionResult result = conversionOK;
     const UTF32* source = *sourceStart;
     UTF8* target = *targetStart;
@@ -379,6 +427,7 @@ ConversionResult ConvertUTF32toUTF8 (
     *sourceStart = source;
     *targetStart = target;
     return result;
+#endif
 }
 
 /* --------------------------------------------------------------------- */
@@ -394,6 +443,7 @@ ConversionResult ConvertUTF32toUTF8 (
  * definition of UTF-8 goes up to 4-byte sequences.
  */
 
+#ifndef LLVM_RUST_CONVERTUTF
 static Boolean isLegalUTF8(const UTF8 *source, int length) {
     UTF8 a;
     const UTF8 *srcptr = source+length;
@@ -418,6 +468,8 @@ static Boolean isLegalUTF8(const UTF8 *source, int length) {
     if (*source > 0xF4) return false;
     return true;
 }
+#endif
+
 
 /* --------------------------------------------------------------------- */
 
@@ -426,11 +478,16 @@ static Boolean isLegalUTF8(const UTF8 *source, int length) {
  * This is not used here; it's just exported.
  */
 Boolean isLegalUTF8Sequence(const UTF8 *source, const UTF8 *sourceEnd) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return (Boolean)llvm_convertutf_is_legal_utf8_sequence(source,
+                                                           sourceEnd);
+#else
     int length = trailingBytesForUTF8[*source]+1;
     if (length > sourceEnd - source) {
         return false;
     }
     return isLegalUTF8(source, length);
+#endif
 }
 
 /*
@@ -438,15 +495,22 @@ Boolean isLegalUTF8Sequence(const UTF8 *source, const UTF8 *sourceEnd) {
  * Or 0 if the sequence is not valid;
  */
 unsigned getUTF8SequenceSize(const UTF8 *source, const UTF8 *sourceEnd) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return llvm_convertutf_get_utf8_sequence_size(source, sourceEnd);
+#else
   int length = trailingBytesForUTF8[*source] + 1;
   return (length <= sourceEnd - source && isLegalUTF8(source, length)) ? length
                                                                        : 0;
+#endif
 }
 
 /* --------------------------------------------------------------------- */
 
 unsigned findMaximalSubpartOfIllFormedUTF8Sequence(const UTF8 *source,
                                                    const UTF8 *sourceEnd) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return llvm_convertutf_find_maximal_subpart(source, sourceEnd);
+#else
   UTF8 b1, b2, b3;
 
   assert(!isLegalUTF8Sequence(source, sourceEnd));
@@ -533,6 +597,7 @@ unsigned findMaximalSubpartOfIllFormedUTF8Sequence(const UTF8 *source,
    * is defined to have length 1 in these cases.
    */
   return 1;
+#endif
 }
 
 /* --------------------------------------------------------------------- */
@@ -542,7 +607,11 @@ unsigned findMaximalSubpartOfIllFormedUTF8Sequence(const UTF8 *source,
  * represented in UTF-8, given the value of the first byte.
  */
 unsigned getNumBytesForUTF8(UTF8 first) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return llvm_convertutf_get_num_bytes_for_utf8(first);
+#else
   return trailingBytesForUTF8[first] + 1;
+#endif
 }
 
 /* --------------------------------------------------------------------- */
@@ -552,6 +621,9 @@ unsigned getNumBytesForUTF8(UTF8 first) {
  * This is not used here; it's just exported.
  */
 Boolean isLegalUTF8String(const UTF8 **source, const UTF8 *sourceEnd) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return (Boolean)llvm_convertutf_is_legal_utf8_string(source, sourceEnd);
+#else
     while (*source != sourceEnd) {
         int length = trailingBytesForUTF8[**source] + 1;
         if (length > sourceEnd - *source || !isLegalUTF8(*source, length))
@@ -559,6 +631,7 @@ Boolean isLegalUTF8String(const UTF8 **source, const UTF8 *sourceEnd) {
         *source += length;
     }
     return true;
+#endif
 }
 
 /* --------------------------------------------------------------------- */
@@ -566,6 +639,10 @@ Boolean isLegalUTF8String(const UTF8 **source, const UTF8 *sourceEnd) {
 ConversionResult ConvertUTF8toUTF16 (
         const UTF8** sourceStart, const UTF8* sourceEnd,
         UTF16** targetStart, UTF16* targetEnd, ConversionFlags flags) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return (ConversionResult)llvm_convertutf_utf8_to_utf16(
+        sourceStart, sourceEnd, targetStart, targetEnd, (unsigned)flags);
+#else
     ConversionResult result = conversionOK;
     const UTF8* source = *sourceStart;
     UTF16* target = *targetStart;
@@ -632,10 +709,12 @@ ConversionResult ConvertUTF8toUTF16 (
     *sourceStart = source;
     *targetStart = target;
     return result;
+#endif
 }
 
 /* --------------------------------------------------------------------- */
 
+#ifndef LLVM_RUST_CONVERTUTF
 static ConversionResult ConvertUTF8toUTF32Impl(
         const UTF8** sourceStart, const UTF8* sourceEnd,
         UTF32** targetStart, UTF32* targetEnd, ConversionFlags flags,
@@ -722,21 +801,33 @@ static ConversionResult ConvertUTF8toUTF32Impl(
     *targetStart = target;
     return result;
 }
+#endif
+
 
 ConversionResult ConvertUTF8toUTF32Partial(const UTF8 **sourceStart,
                                            const UTF8 *sourceEnd,
                                            UTF32 **targetStart,
                                            UTF32 *targetEnd,
                                            ConversionFlags flags) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return (ConversionResult)llvm_convertutf_utf8_to_utf32_partial(
+        sourceStart, sourceEnd, targetStart, targetEnd, (unsigned)flags);
+#else
   return ConvertUTF8toUTF32Impl(sourceStart, sourceEnd, targetStart, targetEnd,
                                 flags, /*InputIsPartial=*/true);
+#endif
 }
 
 ConversionResult ConvertUTF8toUTF32(const UTF8 **sourceStart,
                                     const UTF8 *sourceEnd, UTF32 **targetStart,
                                     UTF32 *targetEnd, ConversionFlags flags) {
+#ifdef LLVM_RUST_CONVERTUTF
+    return (ConversionResult)llvm_convertutf_utf8_to_utf32(
+        sourceStart, sourceEnd, targetStart, targetEnd, (unsigned)flags);
+#else
   return ConvertUTF8toUTF32Impl(sourceStart, sourceEnd, targetStart, targetEnd,
                                 flags, /*InputIsPartial=*/false);
+#endif
 }
 
 /* ---------------------------------------------------------------------

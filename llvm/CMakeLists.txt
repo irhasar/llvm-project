@@ -666,6 +666,23 @@ if (MINGW)
 endif()
 option(LLVM_WINDOWS_PREFER_FORWARD_SLASH "Prefer path names with forward slashes on Windows." ${WINDOWS_PREFER_FORWARD_SLASH_DEFAULT})
 
+option(LLVM_ENABLE_RUST_SIPHASH
+  "Use the Rust implementation of SipHash in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_CRC
+  "Use the Rust implementation of CRC-32 in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_MD5
+  "Use the Rust implementation of MD5 in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_SHA1
+  "Use the Rust implementation of SHA-1 in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_SHA256
+  "Use the Rust implementation of SHA-256 in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_BASE64
+  "Use the Rust implementation of Base64 in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_CONVERTUTF
+  "Use the Rust implementation of ConvertUTF in LLVM Support (experimental)" OFF)
+set(LLVM_RUST_FLAGS "" CACHE STRING
+  "Extra flags passed to rustc via RUSTFLAGS when building Rust components")
+
 option(LLVM_ENABLE_FFI "Use libffi to call external functions from the interpreter" OFF)
 set(FFI_LIBRARY_DIR "" CACHE PATH "Additional directory, where CMake should search for libffi.so")
 set(FFI_INCLUDE_DIR "" CACHE PATH "Additional directory, where CMake should search for ffi.h or ffi/ffi.h")

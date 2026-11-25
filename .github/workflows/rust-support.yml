@@ -1,0 +1,321 @@
+name: Rust Support Ports
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - rakit-0.1.0-rc1
+  pull_request:
+    paths:
+      - 'llvm/lib/Support/rust/**'
+      - 'llvm/lib/Support/CRC.cpp'
+      - 'llvm/lib/Support/MD5.cpp'
+      - 'llvm/lib/Support/SHA1.cpp'
+      - 'llvm/lib/Support/SHA256.cpp'
+      - 'llvm/lib/Support/SipHash.cpp'
+      - 'llvm/lib/Support/Base64.cpp'
+      - 'llvm/lib/Support/ConvertUTF.cpp'
+      - 'llvm/lib/Support/ConvertUTFWrapper.cpp'
+      - 'llvm/lib/Support/CMakeLists.txt'
+      - 'llvm/CMakeLists.txt'
+      - 'llvm/cmake/modules/AddRustLibrary.cmake'
+      - 'llvm/lib/Target/X86/X86FixupLEAs.cpp'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/rust-support.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint crates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install Rust
+        run: |
+          rustup toolchain install --profile minimal
+          rustc --version
+      - name: fmt, clippy and unit tests
+        run: |
+          for crate in siphash crc md5 sha1 sha256 base64 convertutf; do
+            echo "::group::$crate"
+            (cd "llvm/lib/Support/rust/$crate" \
+              && cargo fmt --check \
+              && cargo clippy --all-targets -- -D warnings \
+              && cargo test)
+            echo "::endgroup::"
+          done
+
+  build:
+    name: Build (${{ matrix.backend }} backend)
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [cpp, rust]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ zlib1g-dev
+      - name: Install Rust
+        if: matrix.backend == 'rust'
+        run: |
+          rustup toolchain install --profile minimal
+          rustc --version
+      - name: Configure
+        run: |
+          RUST_FLAGS=""
+          if [ "${{ matrix.backend }}" = "rust" ]; then
+            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON -DLLVM_ENABLE_RUST_CONVERTUTF=ON"
+          fi
+          cmake -G Ninja -S llvm -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_TARGETS_TO_BUILD=host \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            $RUST_FLAGS
+      - name: Build LLVMSupport
+        run: ninja -C build LLVMSupport
+      - name: Golden tests
+        run: |
+          ninja -C build llvm-siphash-stable-hash llvm-crc-stable llvm-md5-stable \
+            llvm-sha1-stable llvm-sha256-stable llvm-base64-stable \
+            llvm-convertutf-stable
+          ./build/bin/llvm-siphash-stable-hash
+          ./build/bin/llvm-crc-stable
+          ./build/bin/llvm-md5-stable
+          ./build/bin/llvm-sha1-stable
+          ./build/bin/llvm-sha256-stable
+          ./build/bin/llvm-base64-stable
+          ./build/bin/llvm-convertutf-stable
+      - name: Differential checks
+        if: matrix.backend == 'rust'
+        run: |
+          ninja -C build check-llvm-rust-siphash check-llvm-rust-crc \
+            check-llvm-rust-md5 check-llvm-rust-sha1 check-llvm-rust-sha256 \
+            check-llvm-rust-base64 check-llvm-rust-convertutf
+
+  codegen-lea:
+    name: LEA fold (llc)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CCACHE_DIR: /home/runner/.ccache
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: llvm-ccache-${{ github.sha }}
+          restore-keys: llvm-ccache-
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ zlib1g-dev ccache
+      - name: Install Rust
+        run: |
+          rustup toolchain install --profile minimal
+          rustc --version
+      - name: Configure
+        run: |
+          cmake -G Ninja -S llvm -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_TARGETS_TO_BUILD=X86 \
+            -DLLVM_INCLUDE_TESTS=OFF \
+            -DLLVM_INCLUDE_DOCS=OFF \
+            -DLLVM_INCLUDE_EXAMPLES=OFF \
+            -DLLVM_INCLUDE_BENCHMARKS=OFF \
+            -DLLVM_ENABLE_ZSTD=OFF \
+            -DLLVM_ENABLE_ZLIB=OFF \
+            -DLLVM_CCACHE_BUILD=ON
+      - name: Build llc
+        run: ninja -C build llc
+      - name: Emit MD5 IR
+        run: |
+          set -euo pipefail
+          cd llvm/lib/Support/rust/md5
+          RUSTFLAGS="-C lto=no -C target-cpu=generic" \
+            cargo rustc --release -- --emit=llvm-ir
+          IR="$(find target -name '*.ll' | head -n 1)"
+          test -n "$IR"
+          echo "IR=$PWD/$IR" >> "$GITHUB_ENV"
+      # The Rust MD5 step now emits the LEA explicitly, so the crate IR no
+      # longer contains the ADDri-after-LEA pattern. The fold itself is
+      # covered by the MIR fixtures below; this step only checks that the flag
+      # does not change MD5 results.
+      - name: Fold preserves results
+        run: |
+          set -euo pipefail
+          build/bin/llc -O3 -mcpu=x86-64 "$IR" -o /tmp/base.s
+          build/bin/llc -O3 -mcpu=x86-64 -x86-fold-add-into-lea "$IR" \
+            -o /tmp/fold.s
+          build/bin/llc -O3 -mcpu=x86-64 -filetype=obj "$IR" -o /tmp/base.o
+          build/bin/llc -O3 -mcpu=x86-64 -filetype=obj \
+            -x86-fold-add-into-lea "$IR" -o /tmp/fold.o
+          cat > /tmp/md5_harness.c <<'EOF'
+          #include <stdio.h>
+          #include <string.h>
+
+          extern void llvm_md5_hash(const unsigned char *data, size_t len,
+                                    unsigned char *out);
+
+          int main(void) {
+            const char *cases[] = {"", "a", "abc", "message digest",
+                                   "The quick brown fox jumps over the lazy dog"};
+            for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+              unsigned char out[16];
+              llvm_md5_hash((const unsigned char *)cases[i], strlen(cases[i]),
+                            out);
+              for (unsigned j = 0; j < 16; ++j)
+                printf("%02x", out[j]);
+              printf("\n");
+            }
+            return 0;
+          }
+          EOF
+          gcc -O2 -c /tmp/md5_harness.c -o /tmp/harness.o
+          gcc /tmp/harness.o /tmp/base.o -o /tmp/md5_base
+          gcc /tmp/harness.o /tmp/fold.o -o /tmp/md5_fold
+          /tmp/md5_base > /tmp/base.txt
+          /tmp/md5_fold > /tmp/fold.txt
+          diff /tmp/base.txt /tmp/fold.txt
+          grep -q 900150983cd24fb0d6963f7d28e17f72 /tmp/base.txt
+      - name: MIR flag regression
+        run: |
+          set -euo pipefail
+          cat > /tmp/fold.mir <<'EOF'
+          --- |
+            define i32 @fold(i32 %x, i32 %y) {
+            entry:
+              ret i32 %x
+            }
+          ...
+          ---
+          name:            fold
+          alignment:       16
+          tracksRegLiveness: true
+          body:             |
+            bb.0:
+              liveins: $edi, $esi
+
+              $r11d = LEA64_32r $rdi, 1, $noreg, 0, $noreg
+              $r11d = ADD32ri $r11d, 5, implicit-def $eflags
+              $esi = ADD32rr $esi, $esi, implicit-def dead $eflags
+              $eax = COPY $r11d
+              RET64 $eax
+          ...
+          EOF
+          cat > /tmp/carry.mir <<'EOF'
+          --- |
+            define i32 @carry(i32 %x, i32 %y) {
+            entry:
+              ret i32 %x
+            }
+          ...
+          ---
+          name:            carry
+          alignment:       16
+          tracksRegLiveness: true
+          body:             |
+            bb.0:
+              liveins: $edi, $esi
+
+              $r11d = LEA64_32r $rdi, 1, $noreg, 0, $noreg
+              $r11d = ADD32ri $r11d, 5, implicit-def $eflags
+              $esi = INC32r $esi, implicit-def $eflags
+              $r11d = ADC32rr $r11d, $esi, implicit-def $eflags, implicit $eflags
+              $eax = COPY $r11d
+              RET64 $eax
+          ...
+          EOF
+          cat > /tmp/wide.mir <<'EOF'
+          --- |
+            define i64 @wide(i64 %x, i64 %y) {
+            entry:
+              ret i64 %x
+            }
+          ...
+          ---
+          name:            wide
+          alignment:       16
+          tracksRegLiveness: true
+          body:             |
+            bb.0:
+              liveins: $rdi, $rsi
+
+              $r11 = LEA64r $rdi, 1, $noreg, 0, $noreg
+              $r11 = ADD64ri32 $r11, 5, implicit-def $eflags
+              $rdi = ADD64rr $rdi, $rsi, implicit-def dead $eflags
+              $rax = COPY $r11
+              RET64 $rax
+          ...
+          EOF
+          cat > /tmp/dbg.mir <<'EOF'
+          --- |
+            define i32 @dbg(i32 %x, i32 %y) {
+            entry:
+              ret i32 %x
+            }
+          ...
+          ---
+          name:            dbg
+          alignment:       16
+          tracksRegLiveness: true
+          body:             |
+            bb.0:
+              liveins: $edi, $esi
+
+              $r11d = LEA64_32r $rdi, 1, $noreg, 0, $noreg, debug-instr-number 1
+              $r11d = ADD32ri $r11d, 5, implicit-def $eflags, debug-instr-number 2
+              $esi = ADD32rr $esi, $esi, implicit-def dead $eflags
+              $eax = COPY $r11d
+              RET64 $eax
+          ...
+          EOF
+          for case in fold carry wide dbg; do
+            build/bin/llc -run-pass=x86-fixup-leas -x86-fold-add-into-lea \
+              "/tmp/$case.mir" -o "/tmp/$case.out.mir"
+          done
+          grep -q 'LEA64_32r $rdi, 1, $noreg, 5, $noreg' /tmp/fold.out.mir
+          grep -q 'LEA64r $rdi, 1, $noreg, 5, $noreg' /tmp/wide.out.mir
+          if grep -q ADD32ri /tmp/fold.out.mir; then
+            echo "the 32-bit ADD was not folded into the LEA"
+            exit 1
+          fi
+          if grep -q ADD64ri32 /tmp/wide.out.mir; then
+            echo "the 64-bit ADD was not folded into the LEA"
+            exit 1
+          fi
+          grep -q ADD32ri /tmp/carry.out.mir
+          # The deleted ADD's data def must be substituted with the replacement
+          # LEA, but its implicit EFLAGS def must not be remapped onto an
+          # unrelated LEA operand, and the old LEA's value must be invalidated.
+          grep -q 'srcinst: 2, srcop: 0' /tmp/dbg.out.mir
+          if grep -q 'srcinst: 2, srcop: 3' /tmp/dbg.out.mir; then
+            echo "the ADD's EFLAGS def was remapped onto the LEA"
+            exit 1
+          fi
+          if grep -q 'srcinst: 1,' /tmp/dbg.out.mir; then
+            echo "the old LEA's debug value was not invalidated"
+            exit 1
+          fi
+      - name: Upload asm
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lea-asm
+          path: |
+            /tmp/base.s
+            /tmp/fold.s

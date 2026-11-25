@@ -25,6 +25,24 @@ using namespace support;
 
 #define DEBUG_TYPE "llvm-siphash"
 
+#if defined(LLVM_RUST_SIPHASH)
+extern "C" {
+void llvm_siphash_2_4_64(const uint8_t *Data, size_t Len, const uint8_t *Key,
+                         uint8_t *Out);
+void llvm_siphash_2_4_128(const uint8_t *Data, size_t Len, const uint8_t *Key,
+                          uint8_t *Out);
+}
+
+void llvm::getSipHash_2_4_64(ArrayRef<uint8_t> In, const uint8_t (&K)[16],
+                             uint8_t (&Out)[8]) {
+  llvm_siphash_2_4_64(In.data(), In.size(), K, Out);
+}
+
+void llvm::getSipHash_2_4_128(ArrayRef<uint8_t> In, const uint8_t (&K)[16],
+                              uint8_t (&Out)[16]) {
+  llvm_siphash_2_4_128(In.data(), In.size(), K, Out);
+}
+#else
 void llvm::getSipHash_2_4_64(ArrayRef<uint8_t> In, const uint8_t (&K)[16],
                              uint8_t (&Out)[8]) {
   siphash<2, 4>(In.data(), In.size(), K, Out);
@@ -34,6 +52,7 @@ void llvm::getSipHash_2_4_128(ArrayRef<uint8_t> In, const uint8_t (&K)[16],
                               uint8_t (&Out)[16]) {
   siphash<2, 4>(In.data(), In.size(), K, Out);
 }
+#endif
 
 /// Compute an ABI-stable 64-bit hash of the given string.
 uint64_t llvm::getStableSipHash(StringRef Str) {

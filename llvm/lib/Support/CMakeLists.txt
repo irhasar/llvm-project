@@ -338,6 +338,150 @@ add_llvm_component_library(LLVMSupport
   Demangle
   )
 
+if(LLVM_ENABLE_RUST_SIPHASH)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_siphash
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/siphash/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_SIPHASH)
+  target_link_libraries(LLVMSupport PRIVATE llvm_siphash)
+
+  add_executable(llvm-rust-siphash-differential EXCLUDE_FROM_ALL
+    rust/siphash/test/differential.cpp)
+  target_include_directories(llvm-rust-siphash-differential PRIVATE
+    ${LLVM_THIRD_PARTY_DIR}/siphash/include)
+  target_link_libraries(llvm-rust-siphash-differential PRIVATE llvm_siphash)
+  add_custom_target(check-llvm-rust-siphash
+    COMMAND llvm-rust-siphash-differential
+    DEPENDS llvm-rust-siphash-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-siphash-stable-hash EXCLUDE_FROM_ALL
+  rust/siphash/test/stable-hash.cpp)
+target_link_libraries(llvm-siphash-stable-hash PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_CRC)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_crc
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/crc/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_CRC)
+  target_link_libraries(LLVMSupport PRIVATE llvm_crc)
+
+  add_executable(llvm-rust-crc-differential EXCLUDE_FROM_ALL
+    rust/crc/test/differential.cpp)
+  target_link_libraries(llvm-rust-crc-differential PRIVATE llvm_crc)
+  add_custom_target(check-llvm-rust-crc
+    COMMAND llvm-rust-crc-differential
+    DEPENDS llvm-rust-crc-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-crc-stable EXCLUDE_FROM_ALL rust/crc/test/stable.cpp)
+target_link_libraries(llvm-crc-stable PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_MD5)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_md5
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/md5/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_MD5)
+  target_link_libraries(LLVMSupport PRIVATE llvm_md5)
+
+  add_executable(llvm-rust-md5-differential EXCLUDE_FROM_ALL
+    rust/md5/test/differential.cpp)
+  target_link_libraries(llvm-rust-md5-differential PRIVATE llvm_md5)
+  add_custom_target(check-llvm-rust-md5
+    COMMAND llvm-rust-md5-differential
+    DEPENDS llvm-rust-md5-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-md5-stable EXCLUDE_FROM_ALL rust/md5/test/stable.cpp)
+target_link_libraries(llvm-md5-stable PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_SHA1)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_sha1
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/sha1/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_SHA1)
+  target_link_libraries(LLVMSupport PRIVATE llvm_sha1)
+
+  add_executable(llvm-rust-sha1-differential EXCLUDE_FROM_ALL
+    rust/sha1/test/differential.cpp)
+  target_link_libraries(llvm-rust-sha1-differential PRIVATE llvm_sha1)
+  add_custom_target(check-llvm-rust-sha1
+    COMMAND llvm-rust-sha1-differential
+    DEPENDS llvm-rust-sha1-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-sha1-stable EXCLUDE_FROM_ALL rust/sha1/test/stable.cpp)
+target_link_libraries(llvm-sha1-stable PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_SHA256)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_sha256
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/sha256/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_SHA256)
+  target_link_libraries(LLVMSupport PRIVATE llvm_sha256)
+
+  add_executable(llvm-rust-sha256-differential EXCLUDE_FROM_ALL
+    rust/sha256/test/differential.cpp)
+  target_link_libraries(llvm-rust-sha256-differential PRIVATE llvm_sha256)
+  add_custom_target(check-llvm-rust-sha256
+    COMMAND llvm-rust-sha256-differential
+    DEPENDS llvm-rust-sha256-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-sha256-stable EXCLUDE_FROM_ALL rust/sha256/test/stable.cpp)
+target_link_libraries(llvm-sha256-stable PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_BASE64)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_base64
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/base64/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_BASE64)
+  target_link_libraries(LLVMSupport PRIVATE llvm_base64)
+
+  add_executable(llvm-rust-base64-differential EXCLUDE_FROM_ALL
+    rust/base64/test/differential.cpp)
+  target_link_libraries(llvm-rust-base64-differential PRIVATE LLVMSupport
+    llvm_base64)
+  add_custom_target(check-llvm-rust-base64
+    COMMAND llvm-rust-base64-differential
+    DEPENDS llvm-rust-base64-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-base64-stable EXCLUDE_FROM_ALL rust/base64/test/stable.cpp)
+target_link_libraries(llvm-base64-stable PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_CONVERTUTF)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_convertutf
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/convertutf/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_CONVERTUTF)
+  target_link_libraries(LLVMSupport PRIVATE llvm_convertutf)
+
+  add_executable(llvm-rust-convertutf-differential EXCLUDE_FROM_ALL
+    rust/convertutf/test/differential.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/ConvertUTF.cpp")
+  target_include_directories(llvm-rust-convertutf-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-convertutf-differential PRIVATE
+    llvm_convertutf)
+  add_custom_target(check-llvm-rust-convertutf
+    COMMAND llvm-rust-convertutf-differential
+    COMMAND llvm-convertutf-stable
+    DEPENDS llvm-rust-convertutf-differential llvm-convertutf-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-convertutf-stable EXCLUDE_FROM_ALL
+  rust/convertutf/test/stable.cpp)
+target_link_libraries(llvm-convertutf-stable PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport
@@ -381,6 +525,16 @@ if(LLVM_ENABLE_ZSTD)
 endif()
 
 set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${llvm_system_libs}")
+
+# The Rust ports are static archives installed next to the other LLVM
+# libraries, so downstream links need them in llvm-config --system-libs.
+foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF)
+  if(LLVM_ENABLE_RUST_${rust_port})
+    string(TOLOWER ${rust_port} rust_port_lower)
+    set_property(TARGET LLVMSupport APPEND PROPERTY LLVM_SYSTEM_LIBS
+                 "llvm_${rust_port_lower}")
+  endif()
+endforeach()
 
 
 if(LLVM_INTEGRATED_CRT_ALLOC)
