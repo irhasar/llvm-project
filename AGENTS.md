@@ -110,3 +110,29 @@ build/bin/llc -O3 -mcpu=x86-64 in.ll -o new.s
 
 There is no CodeGen test suite in this fork, so any backend change must be
 justified with instruction counts and, ideally, wall-clock measurements.
+
+## CI
+
+GitHub Actions is disabled for this repository (`Actions has been disabled for
+this repository`), so the Rust support workflow cannot be relied on. Reproduce
+its checks locally instead:
+
+```sh
+ninja -C build llvm-rust-sha1-differential llvm-sha1-stable
+./build/bin/llvm-rust-sha1-differential && ./build/bin/llvm-sha1-stable
+
+# LEA fold: instruction counts, runtime results and the flag scan
+IR=$(find llvm/lib/Support/rust/md5/target -name '*.ll' | head -1)
+build/bin/llc -O3 -mcpu=x86-64 -filetype=obj "$IR" -o /tmp/base.o
+build/bin/llc -O3 -mcpu=x86-64 -filetype=obj -x86-fold-add-into-lea \
+  "$IR" -o /tmp/fold.o
+build/bin/llc -run-pass=x86-fixup-leas -x86-fold-add-into-lea case.mir -o -
+
+# Downstream link through llvm-config
+gcc prog.cpp $(build/bin/llvm-config --cxxflags --ldflags --libs \
+  --system-libs support)
+```
+
+`llvm-config` without a component list fails in this fork because the `engine`
+group still lists the removed `interpreter` component; pass `support`
+explicitly.
