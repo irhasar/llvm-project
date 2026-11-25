@@ -8,7 +8,8 @@ The migration itself is described in `MIGRATION_TO_RUST.md`; read that first.
 - Shallow clone on branch `rust-migration-phase1` (`git rev-parse
   --is-shallow-repository` returns `true`). History before the tip is absent.
 - The Rust migration of `lib/Support` components lives under
-  `llvm/lib/Support/rust/<component>/`.
+  `llvm/lib/Support/rust/<component>/`; the demangler port lives under
+  `llvm/lib/Demangle/rust/rustdemangle/`.
 - `llvm/test` and `llvm/docs` are **not** present. LLVM regression tests
   (`ninja check-llvm`, `llvm-lit`) cannot be run. Do not claim they passed.
   Each Rust port therefore ships its own differential and golden tests.
@@ -36,6 +37,7 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON \
   -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON \
   -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_XXHASH=ON \
+  -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
   -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_INCLUDE_TESTS=OFF \
@@ -44,7 +46,8 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_LIBEDIT=OFF
 
 ninja -C build LLVMSupport llvm-sha1-stable llvm-sha256-stable \
-  llvm-convertutf-stable llc
+  llvm-convertutf-stable llvm-rustdemangle-stable \
+  llvm-rust-rustdemangle-differential llc
 ```
 
 Full LLVM builds are large; prefer building `LLVMSupport` and the specific
@@ -52,12 +55,14 @@ tool you need. Long builds must be started in the background and polled.
 
 ## Rust crate conventions
 
-Every crate under `llvm/lib/Support/rust/` follows the same rules:
+Every crate under `llvm/lib/*/rust/` follows the same rules:
 
 - `#![cfg_attr(not(test), no_std)]`, `panic = "abort"`, aborting
   `#[panic_handler]`, no dependencies, no crates.io at build time.
 - Only `extern "C"` functions cross the boundary. Data is `(pointer, length)`
-  or fixed-size buffers; the C++ caller owns all memory.
+  or fixed-size buffers; the C++ caller owns all memory. `RustDemangle` is the
+  deliberate exception: it returns a `realloc`-allocated buffer that C++ frees
+  with `std::free`, matching `llvm::rustDemangle`'s `char *` contract.
 - Symbols are prefixed `llvm_<component>_<function>`.
 - The C++ class layout and public headers do not change. Only the compression
   function/body is replaced; buffering and padding stay in C++.
@@ -99,7 +104,52 @@ ninja -C build llvm-rust-sha256-differential llvm-sha256-stable
 ```
 
 To prove a backend-neutral result, configure the option `OFF`, rebuild
-`LLVMSupport` and the `*-stable` test, and confirm identical output.
+`LLVMSupport` and the `*-stable` test, and confirm identical output. For
+`LLVM_ENABLE_RUST_RUSTDEMANGLE`, rebuild `LLVMDemangle` and
+`llvm-rustdemangle-stable` instead.
+
+## Demangler port
+
+`llvm/lib/Demangle/rust/rustdemangle` is the Phase 2 port of
+`RustDemangle.cpp`, gated by `LLVM_ENABLE_RUST_RUSTDEMANGLE` (default `OFF`).
+`RustDemangle.cpp` keeps the original implementation under `#else`; with the
+option on, its `llvm::rustDemangle` is a thin wrapper around
+`llvm_rustdemangle_demangle`. The Rust side grows its own output with
+`realloc`, reserves room for the NUL terminator, and returns the length; the C++
+wrapper writes the terminator and returns the pointer for the caller to free
+with `std::free`.
+
+```sh
+(cd llvm/lib/Demangle/rust/rustdemangle &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build llvm-rust-rustdemangle-differential llvm-rustdemangle-stable
+./build/bin/llvm-rustdemangle-stable
+./build/bin/llvm-rust-rustdemangle-differential
+```
+
+`test/differential.cpp` compares the Rust archive against `RustDemangle.cpp`
+on 205 real `libstd` symbols from the toolchain's `libstd-*.rlib`, 50,000
+random byte strings, and 50,000 mutated symbols. It also prints the full
+string-path and pointer-API throughput. `test/stable.cpp` runs the same golden
+vectors with the option on and off. `test/corpus.txt` is the real-symbol
+corpus; regenerate it from `nm -A libstd-*.rlib` if the toolchain changes.
+
+The CMake targets build only `LLVMDemangle` and the Rust archive, not
+`LLVMSupport`. With the option on, `llvm-config --system-libs` gains
+`-lllvm_rustdemangle`, and `cmake --install --component LLVMDemangle` installs
+`libLLVMDemangle.a` plus `libllvm_rustdemangle.a`.
+
+Measured on this host (`g++ -O3` vs `-C opt-level=3`, generic x86-64, best of
+five alternating rounds, with the Rust column calling the public wrapper):
+1.08x to 1.14x on the full string path and 1.07x to 1.17x on the pointer API
+over the 205-symbol corpus. The 50 longest symbols are 1.11x to 1.14x on the
+full path and 1.09x to 1.13x on the pointer API. The 50 shortest symbols are
+1.03x to 1.10x on the full path and 1.03x to 1.09x on the pointer API. The
+character-class, base62, and hex lookup tables, the eight-byte suffix-dot scan,
+and the 32-byte initial buffer for short inputs are what moved the parser ahead;
+keep them when touching identifier, number, or suffix parsing.
 
 ## Benchmarks
 
@@ -151,6 +201,10 @@ ninja -C build llvm-rust-sha1-differential llvm-sha1-stable
 ninja -C build llvm-rust-xxhash-differential llvm-xxhash-stable
 ./build/bin/llvm-rust-xxhash-differential && ./build/bin/llvm-xxhash-stable
 
+ninja -C build llvm-rust-rustdemangle-differential llvm-rustdemangle-stable
+./build/bin/llvm-rust-rustdemangle-differential
+./build/bin/llvm-rustdemangle-stable
+
 # The AArch64 NEON job runs the crate tests under qemu. Use a subshell so the
 # later checks stay at the repository root.
 (
@@ -187,6 +241,7 @@ g++ prog.cpp $(build/bin/llvm-config --cxxflags --ldflags --libs \
 
 # A component install has to carry the Rust archives too.
 cmake --install build --prefix /tmp/llvminst --component LLVMSupport
+cmake --install build --prefix /tmp/llvminst --component LLVMDemangle
 ```
 
 `llvm-config` without a component list fails in this fork because the `engine`

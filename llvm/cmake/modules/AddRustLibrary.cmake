@@ -18,6 +18,11 @@ find_program(LLVM_RUST_CARGO_EXECUTABLE
 mark_as_advanced(LLVM_RUST_CARGO_EXECUTABLE)
 
 function(add_llvm_rust_staticlib name manifest)
+  cmake_parse_arguments(ARG "" "INSTALL_COMPONENT" "" ${ARGN})
+  if(NOT ARG_INSTALL_COMPONENT)
+    set(ARG_INSTALL_COMPONENT LLVMSupport)
+  endif()
+
   if(NOT LLVM_RUST_CARGO_EXECUTABLE)
     message(FATAL_ERROR
       "Rust support was requested but cargo was not found. Install a Rust "
@@ -63,6 +68,7 @@ function(add_llvm_rust_staticlib name manifest)
     set(rust_lib_name "lib${name}.a")
   endif()
   set(archive "${target_dir}/release/${rust_lib_name}")
+  set_property(GLOBAL PROPERTY LLVM_RUST_${name}_LIBRARY_NAME "${rust_lib_name}")
   # Stage the archive next to the other LLVM libraries so that llvm-config's
   # -l<name> resolves in the build tree and the install rule can pick it up.
   set(staged "${LLVM_LIBRARY_OUTPUT_INTDIR}/${rust_lib_name}")
@@ -102,9 +108,10 @@ function(add_llvm_rust_staticlib name manifest)
   if(CMAKE_CONFIGURATION_TYPES)
     install(FILES
               "${LLVM_BINARY_DIR}/$<CONFIG>/lib${LLVM_LIBDIR_SUFFIX}/${rust_lib_name}"
-            DESTINATION lib${LLVM_LIBDIR_SUFFIX} COMPONENT LLVMSupport)
+            DESTINATION lib${LLVM_LIBDIR_SUFFIX}
+            COMPONENT ${ARG_INSTALL_COMPONENT})
   else()
     install(FILES "${staged}" DESTINATION lib${LLVM_LIBDIR_SUFFIX}
-            COMPONENT LLVMSupport)
+            COMPONENT ${ARG_INSTALL_COMPONENT})
   endif()
 endfunction()

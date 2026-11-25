@@ -22,6 +22,16 @@
 #include <limits>
 #include <string_view>
 
+#if defined(LLVM_RUST_RUSTDEMANGLE)
+
+#include "RustDemangleFFI.h"
+
+char *llvm::rustDemangle(std::string_view MangledName) {
+  return llvm::detail::rustDemangleViaFFI(MangledName);
+}
+
+#else
+
 using namespace llvm;
 
 using llvm::itanium_demangle::OutputBuffer;
@@ -1257,3 +1267,5 @@ bool Demangler::mulAssign(uint64_t &A, uint64_t B) {
   A *= B;
   return true;
 }
+
+#endif
