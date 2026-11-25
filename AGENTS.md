@@ -151,6 +151,12 @@ ninja -C build llvm-rust-sha1-differential llvm-sha1-stable
 ninja -C build llvm-rust-xxhash-differential llvm-xxhash-stable
 ./build/bin/llvm-rust-xxhash-differential && ./build/bin/llvm-xxhash-stable
 
+# The AArch64 NEON job runs the crate tests under qemu:
+cd llvm/lib/Support/rust/xxhash
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu" \
+cargo test --target aarch64-unknown-linux-gnu
+
 # IR for the LEA fold experiments.
 (cd llvm/lib/Support/rust/md5 &&
   RUSTFLAGS="-C lto=no -C target-cpu=generic" \

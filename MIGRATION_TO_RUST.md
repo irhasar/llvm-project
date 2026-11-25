@@ -639,7 +639,9 @@ A local configure with only `LLVM_ENABLE_RUST_XXHASH=ON` produced
 `llvm-rust-xxhash-differential` CMake target built and ran, and the
 `llvm-xxhash-stable` object compiled; `LLVMSupport` itself was not built. The
 AArch64 differential was cross-compiled and run under `qemu-aarch64
---check-only`, where it matched the C++ NEON path bit for bit.
+--check-only`, where it matched the C++ NEON path bit for bit. The CI
+`aarch64` job runs the crate tests, including `neon_matches_scalar`, under
+`qemu-aarch64`.
 
 ## Risks and mitigations
 
