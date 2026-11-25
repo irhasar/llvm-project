@@ -482,6 +482,31 @@ add_executable(llvm-convertutf-stable EXCLUDE_FROM_ALL
   rust/convertutf/test/stable.cpp)
 target_link_libraries(llvm-convertutf-stable PRIVATE LLVMSupport)
 
+if(LLVM_ENABLE_RUST_XXHASH)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_xxhash
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/xxhash/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_XXHASH)
+  target_link_libraries(LLVMSupport PRIVATE llvm_xxhash)
+
+  add_executable(llvm-rust-xxhash-differential EXCLUDE_FROM_ALL
+    rust/xxhash/test/differential.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/xxhash.cpp")
+  target_include_directories(llvm-rust-xxhash-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-xxhash-differential PRIVATE llvm_xxhash)
+  add_custom_target(check-llvm-rust-xxhash
+    COMMAND llvm-rust-xxhash-differential
+    COMMAND llvm-xxhash-stable
+    DEPENDS llvm-rust-xxhash-differential llvm-xxhash-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-xxhash-stable EXCLUDE_FROM_ALL
+  rust/xxhash/test/stable.cpp)
+target_link_libraries(llvm-xxhash-stable PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport
@@ -528,7 +553,7 @@ set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${llvm_system_libs}")
 
 # The Rust ports are static archives installed next to the other LLVM
 # libraries, so downstream links need them in llvm-config --system-libs.
-foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF)
+foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF XXHASH)
   if(LLVM_ENABLE_RUST_${rust_port})
     string(TOLOWER ${rust_port} rust_port_lower)
     set_property(TARGET LLVMSupport APPEND PROPERTY LLVM_SYSTEM_LIBS
