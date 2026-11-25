@@ -224,18 +224,21 @@ The second Phase 2 port is `llvm/lib/Demangle/DLangDemangle.cpp`, gated by
 `LLVM_ENABLE_RUST_DLANG` (default `OFF`). The crate lives in
 `llvm/lib/Demangle/rust/dlangdemangle` and exports
 `llvm_dlangdemangle_demangle(input, input_len, uint8_t **output) -> isize`; it
-uses the same `realloc`-owned output and NUL-terminator contract as the Rust demangler.
+uses the same `realloc`-owned output and NUL-terminator contract as the Rust
+demangler.
 `DLangDemangle.cpp` keeps the original implementation under `#else`, which the
 differential harness compiles as `llvm::dlangDemangleCpp`.
 
-The differential test generates 443 valid symbols, 100,000 random byte strings,
+The differential test generates 446 valid symbols, 100,000 random byte strings,
 100,000 mutations of the generated corpus, and 100,000 targeted back-reference
 inputs. It reports 0 mismatches on all 300,000 fuzz inputs and on the corpus.
 `llvm-dlang-stable` runs the golden vectors with the option on and off. Measured
 on the same Zen 4 host with `g++ -O3` and `-C opt-level=3` on generic x86-64,
-best of five rounds, the public wrapper is 1.10x to 1.13x faster on both the
-full string path (including the caller's std::string copy) and the pointer API
-over the 443-symbol corpus.
+best of five rounds, the public wrapper is 1.12x to 1.17x faster on the full
+string path (including the caller's std::string copy), 1.14x to 1.21x faster on
+the pointer API, and 1.15x to 1.19x faster on long qualified names with repeated
+back references. The first NUL is found once with `memchr` and cached lazily, so
+NUL-free names do not rescan for back references.
 
 The CMake targets build only `LLVMDemangle` and the Rust archive. With the
 option on, `llvm-config --system-libs` gains `-lllvm_dlangdemangle`, and

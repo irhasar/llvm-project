@@ -137,6 +137,20 @@ static std::vector<std::string> makeCorpus() {
   return Corpus;
 }
 
+static std::vector<std::string> makeLongCorpus() {
+  // Long qualified names whose repeated back references share one target.
+  std::vector<std::string> Corpus;
+  for (size_t Len : {size_t{64}, size_t{256}, size_t{1024}}) {
+    std::string Symbol = "_D" + std::to_string(Len) + std::string(Len, 'a') +
+                         "3bar";
+    for (const char *Ref : {"Qe", "Qg", "Qi", "Qk", "Qm", "Qo", "Qq", "Qs"})
+      Symbol += Ref;
+    Symbol += "Z";
+    Corpus.push_back(Symbol);
+  }
+  return Corpus;
+}
+
 static bool checkFuzz() {
   uint32_t State = 0x12345678;
   auto Next = [&]() {
@@ -255,6 +269,8 @@ static double measureApiRound(bool Rust,
 
 int main() {
   std::vector<std::string> Corpus = makeCorpus();
+  std::vector<std::string> LongCorpus = makeLongCorpus();
+  Corpus.insert(Corpus.end(), LongCorpus.begin(), LongCorpus.end());
   unsigned Failures = 0;
   for (const std::string &Symbol : Corpus) {
     if (!check(Symbol))
@@ -270,11 +286,15 @@ int main() {
   double Rust = 1e100;
   double CppApi = 1e100;
   double RustApi = 1e100;
+  double CppLong = 1e100;
+  double RustLong = 1e100;
   for (unsigned Round = 0; Round != 5; ++Round) {
     Cpp = std::min(Cpp, measureRound(false, Corpus));
     Rust = std::min(Rust, measureRound(true, Corpus));
     CppApi = std::min(CppApi, measureApiRound(false, Corpus));
     RustApi = std::min(RustApi, measureApiRound(true, Corpus));
+    CppLong = std::min(CppLong, measureRound(false, LongCorpus));
+    RustLong = std::min(RustLong, measureRound(true, LongCorpus));
   }
   std::printf("corpus: %zu symbols, %u mismatches\n", Corpus.size(), Failures);
   std::printf("fuzz: 300000 inputs, 0 mismatches\n");
@@ -283,6 +303,9 @@ int main() {
               Cpp, Rust, Cpp / Rust);
   std::printf("api: c++ %.1f ns/symbol, rust %.1f ns/symbol, speedup %.2fx\n",
               CppApi, RustApi, CppApi / RustApi);
+  std::printf("long qualified: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
+              "speedup %.2fx\n",
+              CppLong, RustLong, CppLong / RustLong);
 
   if (Failures != 0) {
     std::fprintf(stderr, "%u mismatches\n", Failures);

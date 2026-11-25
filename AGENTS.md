@@ -170,14 +170,16 @@ ninja -C build llvm-rust-dlang-differential llvm-dlang-stable
 ./build/bin/llvm-rust-dlang-differential
 ```
 
-The differential harness generates 443 valid symbols, 100,000 random byte
+The differential harness generates 446 valid symbols, 100,000 random byte
 strings, 100,000 mutations of the corpus, and 100,000 targeted back-reference
 inputs. It reports 0 mismatches and benchmarks the public wrapper against the
 C++ reference. Measured here with `g++ -O3` and `-C opt-level=3` on generic
-x86-64, best of five rounds: 1.10x to 1.13x on both the full string path
-(including the caller's std::string copy) and the pointer API. With the
-option on, `llvm-config --system-libs` gains `-lllvm_dlangdemangle`;
-`cmake --install --component LLVMDemangle`
+x86-64, best of five rounds: 1.12x to 1.17x on the full string path (including
+the caller's std::string copy), 1.14x to 1.21x on the pointer API, and 1.15x to
+1.19x on long qualified names with repeated back references. The first NUL is
+found once with `memchr` and cached lazily, so NUL-free names do not rescan for
+back references. With the option on, `llvm-config --system-libs` gains
+`-lllvm_dlangdemangle`; `cmake --install --component LLVMDemangle`
 installs `libllvm_dlangdemangle.a` alongside `libLLVMDemangle.a`. An
 install-only consumer links and runs without the build tree; the fork's partial
 install still needs placeholder files for the other uninstalled LLVM libraries.

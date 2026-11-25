@@ -28,6 +28,19 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
 unsafe extern "C" {
     fn realloc(ptr: *mut core::ffi::c_void, size: usize) -> *mut core::ffi::c_void;
     fn free(ptr: *mut core::ffi::c_void);
+    fn memchr(ptr: *const core::ffi::c_void, value: i32, size: usize) -> *mut core::ffi::c_void;
+}
+
+fn find_nul(data: &[u8]) -> Option<usize> {
+    if data.is_empty() {
+        return None;
+    }
+    let ptr = unsafe { memchr(data.as_ptr().cast(), 0, data.len()) };
+    if ptr.is_null() {
+        None
+    } else {
+        Some(ptr as usize - data.as_ptr() as usize)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -57,10 +70,7 @@ impl<'a> View<'a> {
     /// A view that ends at the first NUL, matching the C++ backend's
     /// std::string_view construction from a referenced identifier pointer.
     fn at_until_nul(data: &'a [u8], pos: usize) -> Self {
-        let end = data[pos..]
-            .iter()
-            .position(|&byte| byte == 0)
-            .map_or(data.len(), |offset| pos + offset);
+        let end = find_nul(&data[pos..]).map_or(data.len(), |offset| pos + offset);
         Self {
             data: &data[..end],
             pos,
@@ -339,6 +349,8 @@ fn decode_backref_pos(mangled: &mut View<'_>, ret: &mut usize) -> bool {
 struct Demangler<'a> {
     input: &'a [u8],
     last_backref: usize,
+    // None until a back reference needs it; Some(None) means the input has no NUL.
+    first_nul: Option<Option<usize>>,
 }
 
 impl<'a> Demangler<'a> {
@@ -346,10 +358,22 @@ impl<'a> Demangler<'a> {
         Self {
             input,
             last_backref: input.len(),
+            first_nul: None,
         }
     }
 
-    fn decode_backref(&self, mangled: &mut View<'a>, ret: &mut View<'a>) -> bool {
+    fn first_nul(&mut self) -> Option<usize> {
+        match self.first_nul {
+            Some(nul) => nul,
+            None => {
+                let nul = find_nul(self.input);
+                self.first_nul = Some(nul);
+                nul
+            }
+        }
+    }
+
+    fn decode_backref(&mut self, mangled: &mut View<'a>, ret: &mut View<'a>) -> bool {
         debug_assert!(!mangled.is_empty() && mangled.front() == b'Q');
         let qpos = mangled.absolute();
         mangled.remove_prefix(1);
@@ -365,7 +389,12 @@ impl<'a> Demangler<'a> {
             return false;
         }
 
-        *ret = View::at_until_nul(self.input, qpos - refpos);
+        let start = qpos - refpos;
+        *ret = match self.first_nul() {
+            Some(nul) if start <= nul => View::at(&self.input[..nul], start),
+            Some(_) => View::at_until_nul(self.input, start),
+            None => View::at(self.input, start),
+        };
         true
     }
 
@@ -749,7 +778,12 @@ pub unsafe extern "C" fn llvm_dlangdemangle_demangle(
         return -1;
     }
 
-    let mut out = Out::new(64);
+    let initial_cap = if input.len() > 64 {
+        input.len().saturating_add(64)
+    } else {
+        64
+    };
+    let mut out = Out::new(initial_cap);
     if input == b"_Dmain" {
         out.push(b"D main");
     } else {
