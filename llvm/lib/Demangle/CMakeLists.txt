@@ -21,9 +21,11 @@ if(LLVM_ENABLE_RUST_RUSTDEMANGLE)
 
   add_executable(llvm-rust-rustdemangle-differential EXCLUDE_FROM_ALL
     rust/rustdemangle/test/differential.cpp
+    rust/rustdemangle/test/RustDemangleCpp.cpp
     RustDemangle.cpp
     ItaniumDemangle.cpp)
   target_compile_definitions(llvm-rust-rustdemangle-differential PRIVATE
+    LLVM_RUST_RUSTDEMANGLE
     RUSTDEMANGLE_CORPUS="${CMAKE_CURRENT_SOURCE_DIR}/rust/rustdemangle/test/corpus.txt")
   target_include_directories(llvm-rust-rustdemangle-differential PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

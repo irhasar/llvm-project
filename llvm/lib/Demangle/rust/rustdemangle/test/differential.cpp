@@ -18,8 +18,12 @@
 #include <string_view>
 #include <vector>
 
+namespace llvm {
+char *rustDemangleCpp(std::string_view MangledName);
+}
+
 static bool rustDemangle(std::string_view Mangled, std::string &Result) {
-  char *Text = llvm::detail::rustDemangleViaFFI(Mangled);
+  char *Text = llvm::rustDemangle(Mangled);
   if (!Text)
     return false;
   Result.assign(Text);
@@ -28,7 +32,7 @@ static bool rustDemangle(std::string_view Mangled, std::string &Result) {
 }
 
 static bool referenceDemangle(std::string_view Mangled, std::string &Result) {
-  char *Demangled = llvm::rustDemangle(Mangled);
+  char *Demangled = llvm::rustDemangleCpp(Mangled);
   if (!Demangled)
     return false;
   Result = Demangled;
@@ -160,7 +164,7 @@ static double measureApi(bool Rust, const std::vector<std::string> &Corpus,
   for (unsigned I = 0; I != Iterations; ++I) {
     for (const std::string &Symbol : Corpus) {
       if (Rust) {
-        char *Demangled = llvm::detail::rustDemangleViaFFI(Symbol);
+        char *Demangled = llvm::rustDemangle(Symbol);
         if (Demangled) {
           // Match the C++ branch: both measure the public pointer API,
           // including the length scan a C string caller needs.
@@ -168,7 +172,7 @@ static double measureApi(bool Rust, const std::vector<std::string> &Corpus,
           std::free(Demangled);
         }
       } else {
-        char *Demangled = llvm::rustDemangle(Symbol);
+        char *Demangled = llvm::rustDemangleCpp(Symbol);
         if (Demangled) {
           Sink += std::strlen(Demangled);
           std::free(Demangled);

@@ -200,17 +200,17 @@ x86-64 on both sides:
 
 | Corpus                         | Full string path | Pointer API |
 |--------------------------------|------------------|-------------|
-| 205 real `libstd` symbols      | 1.07x - 1.10x    | 1.08x - 1.10x |
-| 50 shortest symbols            | 1.05x - 1.11x    | 1.05x - 1.11x |
-| 50 longest symbols             | 1.07x - 1.10x    | 1.07x - 1.10x |
+| 205 real `libstd` symbols      | 1.08x - 1.14x    | 1.07x - 1.17x |
+| 50 shortest symbols            | 1.03x - 1.10x    | 1.03x - 1.09x |
+| 50 longest symbols             | 1.11x - 1.14x    | 1.09x - 1.13x |
 
 Each row is the best of five rounds, alternating the two backends, to keep CPU
-frequency drift out of the comparison. The pointer-API column times
-`llvm::rustDemangle` without constructing a `std::string`, through the same
-prefix check and terminator write as the public wrapper, with `strlen` applied
-to both backends so both do the same pointer-API work; the full path times the
-same call plus the caller's string copy. Every row is faster, including the
-short-symbol pointer API.
+frequency drift out of the comparison. The harness compiles the C++ backend
+under `llvm::rustDemangleCpp`, so the Rust column calls the actual public
+`llvm::rustDemangle` wrapper, including its prefix check and terminator write.
+The pointer-API column applies `strlen` to both backends so both do the same
+work; the full path times the same call plus the caller's string copy. Every
+row is faster, including the short-symbol pointer API.
 
 A local configure with only `LLVM_ENABLE_RUST_RUSTDEMANGLE=ON` produced
 `LLVM_SYSTEM_LIBS = "-lrt -ldl -lm -lllvm_rustdemangle"`. The
