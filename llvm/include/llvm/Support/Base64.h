@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 /// Encodes \p Len bytes from \p Src into \p Dst, which must have room for
@@ -32,8 +33,19 @@ namespace llvm {
 template <class InputBytes> std::string encodeBase64(InputBytes const &Bytes) {
   std::string Buffer;
   Buffer.resize(((Bytes.size() + 2) / 3) * 4);
-  if (!Buffer.empty())
+  if (Buffer.empty())
+    return Buffer;
+  using Element =
+      std::remove_cv_t<std::remove_reference_t<decltype(*Bytes.begin())>>;
+  if constexpr (sizeof(Element) == 1) {
     llvm_base64_encode(Bytes.data(), Bytes.size(), Buffer.data());
+  } else {
+    std::vector<unsigned char> Narrowed;
+    Narrowed.reserve(Bytes.size());
+    for (auto const &Byte : Bytes)
+      Narrowed.push_back(static_cast<unsigned char>(Byte));
+    llvm_base64_encode(Narrowed.data(), Narrowed.size(), Buffer.data());
+  }
   return Buffer;
 }
 

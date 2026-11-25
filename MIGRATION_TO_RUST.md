@@ -35,9 +35,10 @@ Non-goals (for now):
    across an FFI frame is never allowed.
 4. No global mutable state, no thread-local storage, and no allocation unless
    the C++ side already allocated. This keeps the port compatible with LLVM's
-   existing threading and allocator assumptions. The one exception is a
-   write-once, relaxed atomic cache of the CPU feature check used to pick the
-   SHA-NI path; it is idempotent and thread-safe.
+   existing threading and allocator assumptions. The exceptions are write-once,
+   relaxed atomic caches of the CPU feature checks used to pick
+   runtime-dispatched paths (SSSE3, SHA-NI, BMI1/BMI2); they are idempotent and
+   thread-safe.
 5. Symbol names are prefixed with the component: `llvm_<component>_<function>`.
 6. Every crate carries the LLVM license header and
    `license = "Apache-2.0 WITH LLVM-exception"` in `Cargo.toml`.
@@ -88,19 +89,24 @@ tests.
 `Base64` needed one structural concession: `encodeBase64` is a template in the
 public header, so its body cannot be swapped per translation unit without the
 option's define leaking into every consumer. The template now resizes the
-result string and calls the exported `llvm_base64_encode` symbol; `Base64.cpp`
-defines that symbol with the original scalar loop when the Rust crate is off and
-the Rust archive provides it when the crate is on. The public API and the
-output are unchanged. The cost when the option is off is one out-of-line call
-per `encodeBase64` invocation instead of an inlined loop.
+result string and calls the exported `llvm_base64_encode` symbol. `Base64.cpp`
+always defines that symbol, using the original scalar loop when the Rust crate
+is off and forwarding to the separately named `llvm_base64_encode_rust` when it
+is on. Keeping the `LLVM_ABI`-annotated definition in C++ also keeps the symbol
+exported from Windows DLL builds. The public API and the output are unchanged.
+The cost when the option is off is one out-of-line call per `encodeBase64`
+invocation instead of an inlined loop.
 
 The Rust encoder uses an SSSE3 path (runtime-detected through CPUID, with the
 scalar path as the fallback) that turns 12 bytes into 16 characters per
-iteration. The decoder validates four characters at a time and writes into the
-caller's buffer, reproducing the C++ `=` placement rules and the partial output
-that the C++ loop leaves behind on error. On this Zen 4 host at `-O3` versus
-`-C opt-level=3`, encoding is at parity at 12 bytes and 1.6x to 6.4x faster
-from 48 bytes to 1 MiB; decoding is 3.5x to 5x faster across the same range.
+iteration. The decoder validates four characters at a time. The public wrapper
+validates before allocating, so invalid input does not resize the output
+vector; the separately exported validating entry point used by the
+differential test still reproduces the C++ `=` placement rules and the partial
+output the C++ loop leaves behind on error. On this Zen 4 host at `-O3` versus
+`-C opt-level=3`, encoding is at parity to 1.1x faster at 12 bytes and 1.5x to
+6.4x faster from
+48 bytes to 1 MiB; decoding is 3.4x to 5x faster across the same range.
 `llvm/lib/Support/rust/base64/test/differential.cpp` carries the reference
 implementations and the throughput table, so it builds with plain `g++` and the
 crate's archive without an LLVM build.
@@ -113,7 +119,7 @@ generic x86-64 target unless noted:
 | CRC-32          | 6.2x vs the byte loop, 1.3x vs slicing-by-8    |
 | SHA-1           | 1.9x (SHA-NI path)                            |
 | SHA-256         | 4.1x (SHA-NI path)                            |
-| Base64 encode   | 1.6x at 48 B, 6.2x at 1 MiB                   |
+| Base64 encode   | 1.0x-1.1x at 12 B, 1.5x at 48 B, 6.0x at 1 MiB |
 | Base64 decode   | 3.5x at 12 B, 5.0x at 1 MiB                   |
 | MD5             | 1.03x to 1.13x (LEA asm + BMI1/BMI2 path)     |
 | ConvertUTF      | 4.5x UTF-8 ASCII, 1.2-1.5x mixed; 1.6x UTF-32->UTF-16 ASCII; 12x `isLegalUTF8String` |
@@ -131,10 +137,11 @@ x86-64 only; other targets use the pure-Rust grouping. The crate tests
 compare the generic and BMI bodies bit for bit.
 
 The only sub-1.0 rows are SHA-1's scalar fallback on long inputs
-(0.96x-0.97x, within the 5% gate) and UTF-16 -> UTF-8 mixed at 16 units
-(0.99x, measurement noise); the default SHA-NI path is 1.8x faster, so the
-shipped configuration still wins. SipHash is at parity under generic codegen
-(1.00x-1.01x) and 5-9% faster with `-C target-cpu=native`.
+(0.96x-0.97x, within the 5% gate), UTF-16 -> UTF-8 mixed at 16 units (0.99x),
+and the exact-size UTF-32 -> UTF-16 path at 16-64 units (0.94x-0.98x); the
+last two are small-input overhead. The default SHA-NI path is 1.8x faster, so
+the shipped configuration still wins. SipHash is at parity under generic
+codegen (0.99x-1.03x) and 5-9% faster with `-C target-cpu=native`.
 
 The point of this phase is volume: prove that the plumbing works for many small
 crates, and settle conventions (error reporting via return codes, output buffer
@@ -562,11 +569,14 @@ the per-code-point target checks when the caller provided two UTF-16 slots per
 input code point, an out-of-line ASCII block that writes four UTF-16 units per
 64-bit store, and a single 32-bit store for each surrogate pair. ASCII input is
 1.45x-1.61x faster than C++; mixed BMP/supplementary input is at parity
-(1.00-1.01x) from 256 units upward. The only sub-1.0 row is UTF-16 -> UTF-8
-mixed at 16 units (0.99x), which is measurement noise; every other mixed row
-is at or above parity. The helper functions are bit-identical to the C++
-implementation; the exhaustive check covers the `findMaximalSubpart` table
-directly.
+(1.00-1.01x) from 256 units upward. The mixed column above gives two UTF-16
+slots per code point. A second benchmark with an exact-size target (5 slots
+per 4 code points) exercises the checked path: it is 0.94x-0.98x at 16-64
+units and 0.99x-1.00x from 256 units upward. The only other sub-1.0 row is
+UTF-16 -> UTF-8 mixed at 16 units (0.99x); these are small-input overhead, and
+every large-input row is at or above parity. The helper functions are
+bit-identical to the C++ implementation; the exhaustive check covers the
+`findMaximalSubpart` table directly.
 
 ## Risks and mitigations
 
@@ -580,7 +590,7 @@ directly.
 | Performance regressions | Per-component benchmark gate with a 5% threshold |
 | Maintainer burden | Only accept ports of components that are stable and well tested |
 | Cross-compilation | Not supported yet; must be solved before phase 3 |
-| Downstream static linking | In-tree tools link; installed `LLVMSupport` still needs the Rust archives added |
+| Downstream static linking | Rust archives are in `LLVM_SYSTEM_LIBS`; `llvm-config --system-libs` emits them |
 
 ## Rollback
 

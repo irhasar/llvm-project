@@ -13,6 +13,9 @@ on:
       - 'llvm/lib/Support/SHA1.cpp'
       - 'llvm/lib/Support/SHA256.cpp'
       - 'llvm/lib/Support/SipHash.cpp'
+      - 'llvm/lib/Support/Base64.cpp'
+      - 'llvm/lib/Support/ConvertUTF.cpp'
+      - 'llvm/lib/Support/ConvertUTFWrapper.cpp'
       - 'llvm/lib/Support/CMakeLists.txt'
       - 'llvm/CMakeLists.txt'
       - 'llvm/cmake/modules/AddRustLibrary.cmake'
@@ -39,7 +42,7 @@ jobs:
           rustc --version
       - name: fmt, clippy and unit tests
         run: |
-          for crate in siphash crc md5 sha1 sha256; do
+          for crate in siphash crc md5 sha1 sha256 base64 convertutf; do
             echo "::group::$crate"
             (cd "llvm/lib/Support/rust/$crate" \
               && cargo fmt --check \
@@ -70,7 +73,7 @@ jobs:
         run: |
           RUST_FLAGS=""
           if [ "${{ matrix.backend }}" = "rust" ]; then
-            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON"
+            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON -DLLVM_ENABLE_RUST_CONVERTUTF=ON"
           fi
           cmake -G Ninja -S llvm -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -87,17 +90,21 @@ jobs:
       - name: Golden tests
         run: |
           ninja -C build llvm-siphash-stable-hash llvm-crc-stable llvm-md5-stable \
-            llvm-sha1-stable llvm-sha256-stable
+            llvm-sha1-stable llvm-sha256-stable llvm-base64-stable \
+            llvm-convertutf-stable
           ./build/bin/llvm-siphash-stable-hash
           ./build/bin/llvm-crc-stable
           ./build/bin/llvm-md5-stable
           ./build/bin/llvm-sha1-stable
           ./build/bin/llvm-sha256-stable
+          ./build/bin/llvm-base64-stable
+          ./build/bin/llvm-convertutf-stable
       - name: Differential checks
         if: matrix.backend == 'rust'
         run: |
           ninja -C build check-llvm-rust-siphash check-llvm-rust-crc \
-            check-llvm-rust-md5 check-llvm-rust-sha1 check-llvm-rust-sha256
+            check-llvm-rust-md5 check-llvm-rust-sha1 check-llvm-rust-sha256 \
+            check-llvm-rust-base64 check-llvm-rust-convertutf
 
   codegen-lea:
     name: LEA fold (llc)
@@ -144,23 +151,10 @@ jobs:
           IR="$(find target -name '*.ll' | head -n 1)"
           test -n "$IR"
           echo "IR=$PWD/$IR" >> "$GITHUB_ENV"
-      - name: Compare instruction counts
-        run: |
-          set -euo pipefail
-          build/bin/llc -O3 -mcpu=x86-64 "$IR" -o /tmp/base.s
-          build/bin/llc -O3 -mcpu=x86-64 -x86-fold-add-into-lea "$IR" \
-            -o /tmp/fold.s
-          base=$(grep -cE '^[[:space:]]+add' /tmp/base.s || true)
-          fold=$(grep -cE '^[[:space:]]+add' /tmp/fold.s || true)
-          lea_base=$(grep -cE '^[[:space:]]+lea' /tmp/base.s || true)
-          lea_fold=$(grep -cE '^[[:space:]]+lea' /tmp/fold.s || true)
-          echo "add: base=$base folded=$fold"
-          echo "lea: base=$lea_base folded=$lea_fold"
-          if ! test "$fold" -lt "$base"; then
-            echo "no fold applied; first lea/add lines of the baseline:"
-            grep -nE '^[[:space:]]+(lea|add)' /tmp/base.s | head -n 40
-            exit 1
-          fi
+      # The Rust MD5 step now emits the LEA explicitly, so the crate IR no
+      # longer contains the ADDri-after-LEA pattern. The fold itself is
+      # covered by the MIR fixtures below; this step only checks that the flag
+      # does not change MD5 results.
       - name: Fold preserves results
         run: |
           set -euo pipefail
@@ -302,9 +296,18 @@ jobs:
             exit 1
           fi
           grep -q ADD32ri /tmp/carry.out.mir
-          # The deleted ADD's instruction number must be substituted with the
-          # replacement LEA, not silently dropped.
+          # The deleted ADD's data def must be substituted with the replacement
+          # LEA, but its implicit EFLAGS def must not be remapped onto an
+          # unrelated LEA operand, and the old LEA's value must be invalidated.
           grep -q 'srcinst: 2, srcop: 0' /tmp/dbg.out.mir
+          if grep -q 'srcinst: 2, srcop: 3' /tmp/dbg.out.mir; then
+            echo "the ADD's EFLAGS def was remapped onto the LEA"
+            exit 1
+          fi
+          if grep -q 'srcinst: 1,' /tmp/dbg.out.mir; then
+            echo "the old LEA's debug value was not invalidated"
+            exit 1
+          fi
       - name: Upload asm
         if: always()
         uses: actions/upload-artifact@v4

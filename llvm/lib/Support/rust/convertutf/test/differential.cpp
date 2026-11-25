@@ -152,9 +152,19 @@ void compareUTF8toUTF32(const std::vector<UTF8> &Src, size_t Case) {
       unsigned RB = llvm_convertutf_utf8_to_utf32(
           &SB, Src.data() + Src.size(), &TB, B.data() + Cap, Flags);
       size_t PA = size_t(TA - A.data()), PB = size_t(TB - B.data());
-      if (unsigned(RA) != RB || size_t(SA - Src.data()) != size_t(SB - Src.data()) ||
-          PA != PB || !same(A, B, std::min(Cap, PA)))
+      if (PA > Cap) {
+        // The C++ reference writes the replacement for a lenient truncated
+        // sequence even when the target is full (a latent overrun). The Rust
+        // backend must stay bounded and report targetExhausted instead.
+        if (RA != sourceIllegal || RB != unsigned(targetExhausted) ||
+            PB > Cap || size_t(SB - Src.data()) > Src.size() ||
+            !same(A, B, PB))
+          fail("utf8->utf32 bounded", Case, Cap, Flags);
+      } else if (unsigned(RA) != RB ||
+                 size_t(SA - Src.data()) != size_t(SB - Src.data()) ||
+                 PA != PB || !same(A, B, std::min(Cap, PA))) {
         fail("utf8->utf32", Case, Cap, Flags);
+      }
 
       SA = Src.data();
       SB = Src.data();
@@ -237,6 +247,16 @@ void compareUTF32(const std::vector<UTF32> &Src, size_t Case) {
         fail("utf32->utf16", Case, Cap, Flags);
     }
   }
+}
+
+void checkBoundedUTF8toUTF32() {
+  const UTF8 Src[] = {'a', 0xE2, 0x82};
+  UTF32 Dst[1] = {0};
+  const UTF8 *S = Src;
+  UTF32 *D = Dst;
+  unsigned R = llvm_convertutf_utf8_to_utf32(&S, Src + 3, &D, Dst + 1, 1);
+  if (R != unsigned(targetExhausted) || S != Src + 1 || D != Dst + 1)
+    fail("bounded utf8->utf32", 0, 1, 1);
 }
 
 void compareOneSequence(const UTF8 *P, const UTF8 *E, size_t Tag) {
@@ -535,6 +555,16 @@ void benchmark() {
       [](const UTF32 **S, const UTF32 *SE, UTF16 **T, UTF16 *TE) {
         llvm_convertutf_utf32_to_utf16(S, SE, T, TE, 0);
       });
+    // Mixed input has 5 UTF-16 units per 4 code points; give the converter
+    // exactly that much room so it cannot take the guaranteed-capacity path.
+    const size_t Tight16 = (M32.size() / 4) * 5;
+    benchOne<UTF32, UTF16>("u32->u16 mixed tight", M32, Tight16,
+      [](const UTF32 **S, const UTF32 *SE, UTF16 **T, UTF16 *TE) {
+        ConvertUTF32toUTF16(S, SE, T, TE, strictConversion);
+      },
+      [](const UTF32 **S, const UTF32 *SE, UTF16 **T, UTF16 *TE) {
+        llvm_convertutf_utf32_to_utf16(S, SE, T, TE, 0);
+      });
 
     const UTF8 *SA = A8.data();
     const UTF8 *MA = M8.data();
@@ -588,6 +618,7 @@ void benchmark() {
 
 int main() {
   exhaustiveHelpers();
+  checkBoundedUTF8toUTF32();
   std::mt19937 Rng(0xC0FFEE);
   size_t Case = 0;
 
@@ -632,6 +663,13 @@ int main() {
       else
         C = 0xD800 + Rng() % 0x800;
     }
+    compareUTF32(V, Case++);
+  }
+  // Values above U+10FFFF are not valid UTF-32. Both backends must report
+  // sourceIllegal and emit the same replacement.
+  for (int I = 0; I < 20; ++I) {
+    std::vector<UTF32> V = {0x10FFFF, UTF32(0x110000 + Rng() % 0x1000),
+                            0x7FFFFFFF, 0xFFFFFFFF};
     compareUTF32(V, Case++);
   }
 

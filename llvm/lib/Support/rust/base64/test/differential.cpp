@@ -20,9 +20,9 @@
 #include <string>
 #include <vector>
 
-extern "C" size_t llvm_base64_encode(const uint8_t *Src, size_t Len,
+extern "C" size_t llvm_base64_encode_rust(const uint8_t *Src, size_t Len,
                                      char *Dst);
-extern "C" int llvm_base64_decode(const uint8_t *Src, size_t Len, char *Dst,
+extern "C" int llvm_base64_decode_rust(const uint8_t *Src, size_t Len, char *Dst,
                                   size_t *OutLen, size_t *BadIndex);
 
 namespace {
@@ -162,7 +162,7 @@ std::string RustEncode(const uint8_t *Bytes, size_t Size) {
   std::string Buffer;
   Buffer.resize(((Size + 2) / 3) * 4);
   if (!Buffer.empty())
-    llvm_base64_encode(Bytes, Size, Buffer.data());
+    llvm_base64_encode_rust(Bytes, Size, Buffer.data());
   return Buffer;
 }
 
@@ -179,7 +179,7 @@ DecodeResult RustDecode(const char *Input, size_t InputLength) {
   R.Output.resize(InputLength / 4 * 3);
   size_t OutLen = 0;
   size_t BadIndex = 0;
-  int Rc = llvm_base64_decode(reinterpret_cast<const uint8_t *>(Input),
+  int Rc = llvm_base64_decode_rust(reinterpret_cast<const uint8_t *>(Input),
                               InputLength, R.Output.data(), &OutLen, &BadIndex);
   R.Output.resize(OutLen);
   R.BadIndex = BadIndex;
@@ -303,7 +303,8 @@ int main() {
     if (!SameResult(RefDec, RustDec, EncLen))
       continue;
     if (RustDec.Output.size() != PlainLen ||
-        std::memcmp(RustDec.Output.data(), V.Plain, PlainLen) != 0)
+        (PlainLen != 0 &&
+         std::memcmp(RustDec.Output.data(), V.Plain, PlainLen) != 0))
       Fail("rfc4648 decode", PlainLen);
   }
 
@@ -328,7 +329,8 @@ int main() {
     if (!SameResult(Ref, Rust, Len))
       continue;
     if (Rust.Output.size() != Len ||
-        std::memcmp(Rust.Output.data(), Data.data(), Len) != 0)
+        (Len != 0 &&
+         std::memcmp(Rust.Output.data(), Data.data(), Len) != 0))
       Fail("decode roundtrip", Len);
   }
 

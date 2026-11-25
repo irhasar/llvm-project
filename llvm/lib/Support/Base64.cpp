@@ -10,44 +10,29 @@
 #include "llvm/Support/Base64.h"
 
 #include "llvm/Config/config.h"
+#include <cassert>
+#include <cinttypes>
 
 using namespace llvm;
 
+
 #if defined(LLVM_RUST_BASE64)
+extern "C" size_t llvm_base64_encode_rust(const void *Src, size_t Len,
+                                          char *Dst);
+extern "C" int llvm_base64_validate_rust(const uint8_t *Src, size_t Len,
+                                         size_t *OutLen, size_t *BadIndex);
+extern "C" int llvm_base64_decode_valid_rust(const uint8_t *Src, size_t Len,
+                                             char *Dst, size_t *OutLen);
+#endif
 
-extern "C" int llvm_base64_decode(const uint8_t *Src, size_t Len, char *Dst,
-                                  size_t *OutLen, size_t *BadIndex);
-
-llvm::Error llvm::decodeBase64(llvm::StringRef Input,
-                               std::vector<char> &Output) {
-  Output.clear();
-  const uint64_t InputLength = Input.size();
-  if (InputLength == 0)
-    return Error::success();
-  if ((InputLength % 4) != 0)
-    return createStringError(std::errc::illegal_byte_sequence,
-                             "Base64 encoded strings must be a multiple of 4 "
-                             "bytes in length");
-  Output.resize(InputLength / 4 * 3);
-  size_t OutLen = 0;
-  size_t BadIndex = 0;
-  int Rc = llvm_base64_decode(reinterpret_cast<const uint8_t *>(Input.data()),
-                              InputLength, Output.data(), &OutLen, &BadIndex);
-  // The Rust decoder stops before the chunk holding the bad byte, so shrinking
-  // to OutLen leaves the same partial vector the C++ loop produces.
-  Output.resize(OutLen);
-  if (Rc != 0)
-    return createStringError(std::errc::illegal_byte_sequence,
-                             "Invalid Base64 character %#2.2x at index %" PRIu64,
-                             Input[BadIndex], static_cast<uint64_t>(BadIndex));
-  return Error::success();
-}
-
+// Keep the LLVM_ABI definition in C++ in both configurations so a Windows DLL
+// exports the symbol. The Rust archive supplies a separately named
+// implementation and is never the public definition.
+extern "C" LLVM_ABI size_t llvm_base64_encode(const void *Src, size_t Len,
+                                              char *Dst) {
+#if defined(LLVM_RUST_BASE64)
+  return llvm_base64_encode_rust(Src, Len, Dst);
 #else
-
-// The header always calls this symbol, so a build without the Rust crate needs
-// a definition here. This is the body the encodeBase64 template used to carry.
-extern "C" size_t llvm_base64_encode(const void *Src, size_t Len, char *Dst) {
   static const char Table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
                               "abcdefghijklmnopqrstuvwxyz"
                               "0123456789+/";
@@ -74,7 +59,47 @@ extern "C" size_t llvm_base64_encode(const void *Src, size_t Len, char *Dst) {
     Dst[j + 3] = '=';
   }
   return ((Len + 2) / 3) * 4;
+#endif
 }
+
+#if defined(LLVM_RUST_BASE64)
+
+llvm::Error llvm::decodeBase64(llvm::StringRef Input,
+                               std::vector<char> &Output) {
+  Output.clear();
+  const uint64_t InputLength = Input.size();
+  if (InputLength == 0)
+    return Error::success();
+  if ((InputLength % 4) != 0)
+    return createStringError(std::errc::illegal_byte_sequence,
+                             "Base64 encoded strings must be a multiple of 4 "
+                             "bytes in length");
+
+  size_t DecodedLen = 0;
+  size_t BadIndex = 0;
+  int Rc = llvm_base64_validate_rust(
+      reinterpret_cast<const uint8_t *>(Input.data()), InputLength, &DecodedLen,
+      &BadIndex);
+  if (Rc != 0) {
+    if (Rc == 1)
+      return createStringError(std::errc::illegal_byte_sequence,
+                               "Base64 encoded strings must be a multiple of 4 "
+                               "bytes in length");
+    return createStringError(std::errc::illegal_byte_sequence,
+                             "Invalid Base64 character %#2.2x at index %" PRIu64,
+                             Input[BadIndex], static_cast<uint64_t>(BadIndex));
+  }
+
+  Output.resize(DecodedLen);
+  size_t OutLen = 0;
+  Rc = llvm_base64_decode_valid_rust(
+      reinterpret_cast<const uint8_t *>(Input.data()), InputLength,
+      Output.data(), &OutLen);
+  assert(Rc == 0 && OutLen == DecodedLen && "validated Base64 must decode");
+  return Error::success();
+}
+
+#else
 
 static char decodeBase64Byte(uint8_t Ch) {
   constexpr char Inv = INVALID_BASE64_BYTE;

@@ -24,6 +24,9 @@
 //===----------------------------------------------------------------------===//
 
 #![cfg_attr(not(test), no_std)]
+// The extern "C" entry points document their pointer contracts in the C
+// headers; repeating them as Rust `# Safety` sections would be redundant.
+#![allow(clippy::missing_safety_doc)]
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -34,8 +37,7 @@ fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     unsafe { abort() }
 }
 
-const ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /// `=` maps to 0, which is what the C++ decoder's table does. Values outside
 /// the alphabet are `0xFF`, a value no 6-bit digit can produce.
@@ -75,6 +77,7 @@ unsafe fn write3(dst: *mut u8, a: u8, b: u8, c: u8, d: u8) {
 }
 
 /// Scalar encoder: 3 bytes into 4 characters, identical to the C++ template.
+#[inline(always)]
 unsafe fn encode_scalar(src: *const u8, len: usize, dst: *mut u8) {
     unsafe {
         let full = len / 3 * 3;
@@ -172,7 +175,7 @@ mod ssse3 {
 /// Encodes `len` bytes from `src` into `dst`. `dst` must have room for
 /// `(len + 2) / 3 * 4` bytes. Returns the number of bytes written.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn llvm_base64_encode(
+pub unsafe extern "C" fn llvm_base64_encode_rust(
     src: *const u8,
     len: usize,
     dst: *mut u8,
@@ -182,14 +185,13 @@ pub unsafe extern "C" fn llvm_base64_encode(
     }
     #[cfg(target_arch = "x86_64")]
     {
-        if ssse3::available() {
-            // The vector load reads 16 bytes, so only start a block when the
-            // 4 bytes past it still belong to the input.
-            let vec_len = if len >= 4 { (len - 4) / 12 * 12 } else { 0 };
+        // The SSSE3 loop needs at least 16 readable bytes and 12 input bytes
+        // to make a full vector; short inputs stay scalar and skip the CPUID
+        // cache check.
+        if len >= 16 && ssse3::available() {
+            let vec_len = (len - 4) / 12 * 12;
             unsafe {
-                if vec_len != 0 {
-                    ssse3::encode(src, dst, vec_len);
-                }
+                ssse3::encode(src, dst, vec_len);
                 encode_scalar(src.add(vec_len), len - vec_len, dst.add(vec_len / 3 * 4));
             }
             return len.div_ceil(3) * 4;
@@ -207,7 +209,7 @@ pub unsafe extern "C" fn llvm_base64_encode(
 /// written before the error and `*bad_index` identifies the offending byte,
 /// matching the partially filled vector the C++ decoder leaves behind.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn llvm_base64_decode(
+pub unsafe extern "C" fn llvm_base64_decode_rust(
     src: *const u8,
     len: usize,
     dst: *mut u8,
@@ -258,11 +260,7 @@ pub unsafe extern "C" fn llvm_base64_decode(
             let decoded = *DECODE.get_unchecked(byte as usize);
             let mut illegal = decoded == 0xFF;
             if !illegal && byte == b'=' {
-                if i + k < len - 2 {
-                    illegal = true;
-                } else if i + k == len - 2 && *src.add(i + k + 1) != b'=' {
-                    illegal = true;
-                }
+                illegal = i + k < len - 2 || (i + k == len - 2 && *src.add(i + k + 1) != b'=');
             }
             if illegal {
                 *bad_index = i + k;
@@ -285,13 +283,137 @@ pub unsafe extern "C" fn llvm_base64_decode(
     }
 }
 
+/// Validates a Base64 string without writing output. Returns 0 on success and
+/// stores the decoded length in `out_len`; returns 1 if `len` is not a
+/// multiple of 4, or 2 for an invalid character (stored in `bad_index`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn llvm_base64_validate_rust(
+    src: *const u8,
+    len: usize,
+    out_len: *mut usize,
+    bad_index: *mut usize,
+) -> i32 {
+    unsafe {
+        *out_len = 0;
+        if len == 0 {
+            return 0;
+        }
+        if len % 4 != 0 {
+            return 1;
+        }
+        let chunks = len / 4;
+        let mut written = 0;
+        let mut chunk = 0;
+        while chunk + 1 < chunks {
+            let i = chunk * 4;
+            let a = *DECODE_NO_PAD.get_unchecked(*src.add(i) as usize);
+            let b = *DECODE_NO_PAD.get_unchecked(*src.add(i + 1) as usize);
+            let c = *DECODE_NO_PAD.get_unchecked(*src.add(i + 2) as usize);
+            let d = *DECODE_NO_PAD.get_unchecked(*src.add(i + 3) as usize);
+            if (a | b | c | d) & 0x80 != 0 {
+                *bad_index = if a & 0x80 != 0 {
+                    i
+                } else if b & 0x80 != 0 {
+                    i + 1
+                } else if c & 0x80 != 0 {
+                    i + 2
+                } else {
+                    i + 3
+                };
+                return 2;
+            }
+            written += 3;
+            chunk += 1;
+        }
+
+        let i = (chunks - 1) * 4;
+        let mut k = 0;
+        while k < 4 {
+            let byte = *src.add(i + k);
+            let decoded = *DECODE.get_unchecked(byte as usize);
+            let mut illegal = decoded == 0xFF;
+            if !illegal && byte == b'=' {
+                illegal = i + k < len - 2 || (i + k == len - 2 && *src.add(i + k + 1) != b'=');
+            }
+            if illegal {
+                *bad_index = i + k;
+                return 2;
+            }
+            k += 1;
+        }
+        written += 3;
+        if *src.add(len - 1) == b'=' {
+            written -= 1;
+            if *src.add(len - 2) == b'=' {
+                written -= 1;
+            }
+        }
+        *out_len = written;
+        0
+    }
+}
+
+/// Decodes a Base64 string that `llvm_base64_validate_rust` has accepted.
+/// Writes exactly the decoded length, including the short final chunk.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn llvm_base64_decode_valid_rust(
+    src: *const u8,
+    len: usize,
+    dst: *mut u8,
+    out_len: *mut usize,
+) -> i32 {
+    unsafe {
+        *out_len = 0;
+        if len == 0 {
+            return 0;
+        }
+        let chunks = len / 4;
+        let mut written = 0;
+        let mut chunk = 0;
+        while chunk + 1 < chunks {
+            let i = chunk * 4;
+            let a = *DECODE_NO_PAD.get_unchecked(*src.add(i) as usize);
+            let b = *DECODE_NO_PAD.get_unchecked(*src.add(i + 1) as usize);
+            let c = *DECODE_NO_PAD.get_unchecked(*src.add(i + 2) as usize);
+            let d = *DECODE_NO_PAD.get_unchecked(*src.add(i + 3) as usize);
+            write3(dst.add(written), a, b, c, d);
+            written += 3;
+            chunk += 1;
+        }
+
+        let i = (chunks - 1) * 4;
+        let a = *DECODE.get_unchecked(*src.add(i) as usize);
+        let b = *DECODE.get_unchecked(*src.add(i + 1) as usize);
+        let c = *DECODE.get_unchecked(*src.add(i + 2) as usize);
+        let d = *DECODE.get_unchecked(*src.add(i + 3) as usize);
+        let pad = if *src.add(len - 1) == b'=' {
+            if *src.add(len - 2) == b'=' { 2 } else { 1 }
+        } else {
+            0
+        };
+        let out_bytes = 3 - pad;
+        if out_bytes > 0 {
+            *dst.add(written) = (a << 2) | (b >> 4);
+        }
+        if out_bytes > 1 {
+            *dst.add(written + 1) = (b << 4) | (c >> 2);
+        }
+        if out_bytes > 2 {
+            *dst.add(written + 2) = (c << 6) | d;
+        }
+        written += out_bytes;
+        *out_len = written;
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn encode(data: &[u8]) -> Vec<u8> {
         let mut out = vec![0u8; data.len().div_ceil(3) * 4];
-        let n = unsafe { llvm_base64_encode(data.as_ptr(), data.len(), out.as_mut_ptr()) };
+        let n = unsafe { llvm_base64_encode_rust(data.as_ptr(), data.len(), out.as_mut_ptr()) };
         out.truncate(n);
         out
     }
@@ -301,7 +423,7 @@ mod tests {
         let mut n = 0;
         let mut bad = 0;
         let rc = unsafe {
-            llvm_base64_decode(
+            llvm_base64_decode_rust(
                 data.as_ptr(),
                 data.len(),
                 out.as_mut_ptr(),
@@ -313,6 +435,52 @@ mod tests {
         match rc {
             0 => Ok(out),
             _ => Err(bad),
+        }
+    }
+
+    #[test]
+    fn validate_matches_decode() {
+        let cases: &[&[u8]] = &[
+            b"Zg==",
+            b"Zm8=",
+            b"Zm9v",
+            b"Zm9vYg==",
+            b"Zm9vYmE=",
+            b"Zm9vYmFy",
+            b"Zg=A",
+            b"Z===",
+            b"Zm9v!mFy",
+            b"Zm9vYmFyZA==",
+        ];
+        for &input in cases {
+            let mut len = 0;
+            let mut bad = 0;
+            let rc = unsafe {
+                llvm_base64_validate_rust(input.as_ptr(), input.len(), &mut len, &mut bad)
+            };
+            match decode(input) {
+                Ok(expected) => {
+                    assert_eq!(rc, 0, "input={input:?}");
+                    assert_eq!(len, expected.len(), "input={input:?}");
+                    let mut out = vec![0u8; len];
+                    let mut n = 0;
+                    let rc = unsafe {
+                        llvm_base64_decode_valid_rust(
+                            input.as_ptr(),
+                            input.len(),
+                            out.as_mut_ptr(),
+                            &mut n,
+                        )
+                    };
+                    assert_eq!(rc, 0, "input={input:?}");
+                    assert_eq!(n, len, "input={input:?}");
+                    assert_eq!(out, expected, "input={input:?}");
+                }
+                Err(expected_bad) => {
+                    assert_eq!(rc, 2, "input={input:?}");
+                    assert_eq!(bad, expected_bad, "input={input:?}");
+                }
+            }
         }
     }
 

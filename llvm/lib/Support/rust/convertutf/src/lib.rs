@@ -12,6 +12,12 @@
 //===----------------------------------------------------------------------===//
 
 #![cfg_attr(not(test), no_std)]
+// The extern "C" entry points document their pointer contracts in the C
+// headers; repeating them as Rust `# Safety` sections would be redundant.
+#![allow(clippy::missing_safety_doc)]
+// The range checks mirror the C++ source one-for-one; keeping the explicit
+// comparisons makes the translation easier to audit.
+#![allow(clippy::manual_range_contains)]
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -290,7 +296,11 @@ unsafe fn convert_ascii_run_utf16(
         let mut t = *target;
         #[cfg(target_endian = "little")]
         {
-            while s.add(3) < source_end && t.add(3) < target_end {
+            while !s.is_null()
+                && !t.is_null()
+                && source_end.offset_from(s) >= 4
+                && target_end.offset_from(t) >= 4
+            {
                 let c0 = *s;
                 let c1 = *s.add(1);
                 let c2 = *s.add(2);
@@ -328,7 +338,7 @@ pub unsafe extern "C" fn llvm_convertutf_utf32_to_utf16(
     let mut result = CONVERSION_OK;
 
     let mut ascii_run = false;
-    if unsafe { source.add(1) } < source_end {
+    if source < source_end && unsafe { source.add(1) } < source_end {
         let c0 = unsafe { *source };
         let c1 = unsafe { *source.add(1) };
         ascii_run = (c0 | c1) < 0x80;
@@ -342,8 +352,16 @@ pub unsafe extern "C" fn llvm_convertutf_utf32_to_utf16(
     }
     // With two output slots per input code point the worst case cannot
     // exhaust the target, so the hot loop can skip the capacity checks.
-    let src_len = unsafe { source_end.offset_from(source) } as usize;
-    let dst_len = unsafe { target_end.offset_from(target) } as usize;
+    let src_len = if source == source_end {
+        0
+    } else {
+        (unsafe { source_end.offset_from(source) }) as usize
+    };
+    let dst_len = if target == target_end {
+        0
+    } else {
+        (unsafe { target_end.offset_from(target) }) as usize
+    };
     if dst_len / 2 >= src_len {
         while source < source_end {
             let ch = unsafe { *source };
@@ -794,16 +812,15 @@ unsafe fn convert_utf8_to_utf32_impl(
                 result = SOURCE_EXHAUSTED;
                 break;
             }
+            if target >= target_end {
+                result = TARGET_EXHAUSTED;
+                break;
+            }
             result = SOURCE_ILLEGAL;
             let n = unsafe { find_maximal_subpart(source, source_end) } as usize;
             source = unsafe { source.add(n) };
-            // The C++ reference writes the replacement even when the target is
-            // full (a latent overrun). Keep the pointer advance but do not
-            // write past target_end.
-            if target < target_end {
-                unsafe { *target = UNI_REPLACEMENT_CHAR };
-            }
-            target = target.wrapping_add(1);
+            unsafe { *target = UNI_REPLACEMENT_CHAR };
+            target = unsafe { target.add(1) };
             continue;
         }
 

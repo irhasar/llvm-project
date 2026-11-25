@@ -8,6 +8,7 @@
 
 #include "llvm/Support/Base64.h"
 #include "llvm/Support/Error.h"
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -50,6 +51,9 @@ int main() {
     Expect(std::string(Dec.begin(), Dec.end()) == V.Plain, V.Encoded);
   }
 
+  std::vector<uint16_t> Wide = {'a', 'b', 'c'};
+  Expect(llvm::encodeBase64(Wide) == "YWJj", "wide elements narrow");
+
   std::vector<char> Out;
   Expect(!llvm::decodeBase64("AA==", Out) && Out.size() == 1, "AA==");
   Expect(!llvm::decodeBase64("AAA=", Out) && Out.size() == 2, "AAA=");
@@ -61,11 +65,24 @@ int main() {
     llvm::consumeError(std::move(E));
   }
 
+  {
+    // Invalid input must be rejected before the output is sized for the
+    // maximum decoded length. An invalid first character leaves the vector
+    // empty in both backends.
+    std::string Bad(1 << 20, 'A');
+    Bad[0] = '!';
+    std::vector<char> Dec(8, 'x');
+    llvm::Error E = llvm::decodeBase64(Bad, Dec);
+    Expect(static_cast<bool>(E), "large invalid input");
+    llvm::consumeError(std::move(E));
+    Expect(Dec.empty(), "invalid input does not resize output");
+  }
+
   if (Failures)
     return 1;
   std::printf("golden vectors: %zu RFC 4648 cases\n",
               sizeof(Vectors) / sizeof(Vectors[0]));
-  std::printf("error cases: 5\n");
+  std::printf("error cases: 6\n");
   std::printf("OK: Base64 encode/decode through the public API\n");
   return 0;
 }

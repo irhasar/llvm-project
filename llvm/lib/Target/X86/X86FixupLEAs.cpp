@@ -405,9 +405,9 @@ bool FixupLEAsImpl::foldAddImmediateIntoLEA(MachineBasicBlock &MBB) const {
   for (const Fold &F : Folds) {
     MachineInstr &LEA = *F.LEA;
     MachineInstr &Add = *F.Add;
-    // Build a fresh LEA instead of rewriting the old one so debug instruction
-    // references to either the LEA or the ADD become unavailable rather than
-    // silently describing a different value.
+    // Build a fresh LEA instead of rewriting the old one. The ADD's data def
+    // is remapped to the new LEA below; the old LEA's value is invalidated
+    // because it no longer exists.
     MachineInstrBuilder MIB =
         BuildMI(MBB, Add, LEA.getDebugLoc(), TII->get(LEA.getOpcode()));
     for (unsigned I = 0, E = LEA.getNumOperands(); I != E; ++I) {
@@ -416,7 +416,13 @@ bool FixupLEAsImpl::foldAddImmediateIntoLEA(MachineBasicBlock &MBB) const {
       else
         MIB.add(LEA.getOperand(I));
     }
-    MF->substituteDebugValuesForInst(Add, *MIB);
+    // The replacement LEA computes the folded value, so the ADD's data def
+    // moves to it. Limit the substitution to the first operand: the ADD also
+    // has an implicit EFLAGS def, and the LEA has no matching def at that
+    // index. Drop the old LEA's debug number because its value (without the
+    // folded immediate) no longer exists.
+    MF->substituteDebugValuesForInst(Add, *MIB, 1);
+    LEA.dropDebugNumber();
     Add.eraseFromParent();
     LEA.eraseFromParent();
   }

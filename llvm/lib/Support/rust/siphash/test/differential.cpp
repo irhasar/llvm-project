@@ -182,7 +182,9 @@ void Benchmark() {
   for (size_t Len : {size_t{8}, size_t{16}, size_t{32}, size_t{64}, size_t{256},
                      size_t{1024}, size_t{4096}, size_t{65536}}) {
     std::vector<uint8_t> Data(Len, 0x5a);
-    const size_t Iterations = Len >= 4096 ? 200000 : 2000000;
+    // Keep each row near a fixed time budget; the 64 KiB row used to take
+    // about 49 seconds across both backends.
+    const size_t Iterations = std::max<size_t>(1, 50000000 / Len);
     double Cpp = 1e30, Rust = 1e30;
     for (int Round = 0; Round < 5; ++Round) {
       if (Round & 1) {
