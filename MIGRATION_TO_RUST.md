@@ -137,7 +137,12 @@ backends with the same optimization level and corpus:
   explicit `llc` experiments. The comparison is cross-compiler, not same-LLVM
   codegen.
 
-`llvm/utils/rust-migration/bench_metrics.py` measures a command with `wait4`:
+`llvm/utils/rust-migration/bench_metrics.py` measures a command with `wait4`.
+On Linux it first builds `measure_exec.c`, a small launcher that forks a
+distinct benchmark child, so `ru_maxrss` does not include Python's pre-exec
+resident pages. The launcher is verified against `/proc/self/status`: the floor
+is about 1.3-1.8 MiB instead of Python's ~15 MiB. Use `--rss-backend=wait4`
+only when a compiler is unavailable, and report the resulting RSS floor.
 
 ```sh
 python3 llvm/utils/rust-migration/bench_metrics.py \
@@ -148,7 +153,7 @@ python3 llvm/utils/rust-migration/bench_metrics.py \
 
 The differential harnesses accept `--no-checks --bench-backend=cpp|rust` so
 process CPU and RSS can be compared without running the fuzz checks in the
-measured process.
+measured process. Artifact paths are resolved against `--cwd` when supplied.
 
 Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`, both on the
 generic x86-64 target unless noted:
@@ -850,9 +855,9 @@ Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`:
 | Non-ASCII names | 1.38-1.65x |
 
 The linked stable test shrinks from 30,376 to 20,640 bytes; the `staticlib`
-archive itself is 5,076,648 bytes because it carries `compiler_builtins`
+archive itself is 5,058,270 bytes because it carries `compiler_builtins`
 bitcode, and linker GC removes it from the final binary. The C++ reference
-object is 3,528 bytes.
+object is 3,224 bytes.
 
 One caveat is deliberate: C++ `chopOneUTF32` passes a one-element UTF-32
 output buffer to `ConvertUTF8toUTF32`, which writes a second replacement
@@ -886,17 +891,20 @@ strings: 300,086 inputs, 0 mismatches. `test/stable.cpp` checks every component
 presence flag and that a failed parse leaves the destination unchanged.
 
 Measured on this Zen 4 host with `g++ -O3` and `-C opt-level=3`, five-component
-versions:
+versions. The Rust row now includes the C++ wrapper's tuple construction, so it
+times the same public API shape as the C++ row:
 
 | Backend | ns/parse |
 |---------|----------|
-| C++ | 13.82 |
-| Rust | 11.56 |
+| C++ | 13.58 |
+| Rust public wrapper | 14.04 |
 
-Rust is 1.20x faster. The gain comes from avoiding repeated
-`StringRef::substr`/`consume_front` calls and writing the parsed result once.
-The linked stable test and `LLVMSupport` were not rebuilt for this measurement;
-the CMake differential target and standalone stable binaries were built.
+The raw C ABI parser alone is about 11.5 ns, but the public wrapper must still
+build the `VersionTuple`. Across five runs the public result ranges from 0.92x
+to 1.08x, with a median around 0.97x. That is parity, not a reliable speedup:
+this port does not clear the 1.05x runtime gate and remains opt-in. The linked
+stable test and `LLVMSupport` were not rebuilt for this measurement; the CMake
+differential target and standalone stable binaries were built.
 
 ## Eleventh port: OptionStrCmp
 
@@ -928,27 +936,40 @@ The public wrapper is 1.25x faster than C++. The C++ path creates two
 `StringRef::compare_insensitive`; the Rust path does one pass over the bytes
 and needs no intermediate string objects.
 
-## Resource measurements for EBCDIC and D
+## Resource measurements for EBCDIC, D, and DJB
 
 Compile rows are medians of five pinned runs (`taskset -c 0`), using the
 CMake Release compile command (`-O3`) and `cargo build --release --locked` with
 `-C opt-level=3`. Rust compile wall/CPU totals sum the crate build and the C++
 wrapper object; the C++ row is the original one-TU object. Object/archive bytes
-are before linking. Linked bytes are the `*-stable` test binaries.
+are before linking. Linked bytes are the `*-stable` test binaries. The DJB
+compile rows are a clean `cargo build` and a standalone `g++ -O3` object.
 
 | Port | Backend | Compile wall ms | Compile CPU ms | Peak RSS MiB | Object/archive bytes | Linked bytes |
 |------|---------|-----------------|----------------|--------------|----------------------|--------------|
 | EBCDIC | C++ | 405.15 | 403.24 | 92.70 | 4,192 | 17,960 |
-| EBCDIC | Rust | 561.23 | 560.76 | 117.57 | 5,069,406 | 18,056 |
+| EBCDIC | Rust | 561.23 | 560.76 | 117.57 | 5,048,012 | 18,048 |
 | D | C++ | 342.99 | 350.50 | 68.35 | 15,232 | 229,408 |
-| D | Rust | 501.56 | 498.34 | 128.20 | 5,085,446 | 27,168 |
+| D | Rust | 501.56 | 498.34 | 128.20 | 5,083,878 | 27,120 |
+| DJB | C++ | 409.44 | 411.84 | 100.45 | 3,224 | 30,376 |
+| DJB | Rust | 326.67 | 322.87 | 117.58 | 5,058,270 | 20,640 |
 
 The Rust archive is about 5 MiB because `staticlib` carries
 `compiler_builtins` bitcode; the linked D stable binary is nevertheless 8.4x
 smaller than the C++ one after linker GC. EBCDIC linked size is 0.5% larger.
 Compile wall time is 1.4x to 1.5x slower for the full Rust port, while runtime
-throughput is faster. These are trade-offs, not a claim that Rust wins every
-metric.
+throughput is faster.
+
+These rows do not clear the resource gate in `AGENTS.md`. The archive-size
+condition fails for every port. Peak RSS is also higher: EBCDIC +27%, D +88%,
+and DJB +17% against the 2% limit. Compile time fails for the full EBCDIC and D
+ports, while DJB compiles faster than its C++ object. The gate is not waived by
+a runtime win or by a smaller linked binary. VersionTuple is a separate runtime
+miss: its public-wrapper result is parity rather than a 1.05x win. None of
+these ports is claimed as a gate-clearing result; they stay behind their
+default-`OFF` options as opt-in experiments. Reducing the `compiler_builtins`
+payload and the crate build footprint is a prerequisite for changing that
+status.
 
 Runtime process rows use `--no-checks --bench-backend=cpp|rust`, five pinned
 runs, and include startup plus the five benchmark rounds. Throughput is the
@@ -956,10 +977,10 @@ separate in-process measurement.
 
 | Port | Backend | Wall ms | User ms | Sys ms | Peak RSS MiB | Throughput |
 |------|---------|---------|---------|--------|--------------|------------|
-| EBCDIC | C++ | 825.88 | 824.42 | 3.00 | 15.12 | 1.00x |
-| EBCDIC | Rust | 636.61 | 632.60 | 3.00 | 15.12 | 1.30x |
-| D | C++ | 68.62 | 66.00 | 2.00 | 15.12 | 1.00x |
-| D | Rust | 58.29 | 55.48 | 2.02 | 15.25 | 1.18x |
+| EBCDIC | C++ | 812.26 | 810.04 | 2.00 | 3.88 | 1.00x |
+| EBCDIC | Rust | 617.03 | 614.86 | 2.00 | 3.75 | 1.30x |
+| D | C++ | 68.78 | 67.16 | 1.01 | 3.88 | 1.00x |
+| D | Rust | 58.83 | 57.73 | 2.00 | 4.00 | 1.18x |
 
 ## Risks and mitigations
 
@@ -973,7 +994,7 @@ separate in-process measurement.
 | Performance regressions | Per-component benchmark gate with a 5% threshold |
 | Maintainer burden | Only accept ports of components that are stable and well tested |
 | Cross-compilation | Not supported yet; must be solved before phase 3 |
-| Downstream static linking | Rust archives are in `LLVM_SYSTEM_LIBS`; `llvm-config --system-libs` emits them |
+| Downstream static linking | Rust archives are imported targets in `LLVMConfig.cmake` and in `LLVM_SYSTEM_LIBS`; `llvm-config --system-libs` emits them |
 
 ## Rollback
 

@@ -17,9 +17,12 @@ extern "C" int32_t llvm_convertebcdic_to_ebcdic(const uint8_t *Source,
                                                 uint8_t *Result,
                                                 size_t ResultCap,
                                                 size_t *ResultLen);
+// On status 3 (output too small), resume at Source + *Consumed and
+// Result + *ResultLen with the remaining capacity.
 extern "C" int32_t llvm_convertebcdic_to_utf8(const uint8_t *Source,
                                               size_t SourceLen, uint8_t *Result,
                                               size_t ResultCap,
-                                              size_t *ResultLen);
+                                              size_t *ResultLen,
+                                              size_t *Consumed);
 
 #endif // LLVM_LIB_SUPPORT_CONVERTEBCDICFFI_H

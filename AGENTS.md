@@ -210,12 +210,14 @@ Coverage is the boundary corpus plus 300,000 random ASCII strings; the
 observed result is 300,086 inputs and 0 mismatches. `test/stable.cpp` checks
 component presence and that a failed parse leaves the destination unchanged.
 
-Measured here with `g++ -O3` and `-C opt-level=3` on five-component versions:
-C++ 13.82 ns, Rust 11.56 ns, or 1.20x faster. The win comes from a single
-index-based digit loop and from writing the result once, instead of repeated
-`StringRef::substr`/`consume_front` calls. The parser uses wrapping `u32`
-arithmetic and masks minor/subminor to 31 bits so oversized components match
-the C++ bitfield truncation.
+Measured here with `g++ -O3` and `-C opt-level=3` on five-component versions,
+including the C++ wrapper's tuple construction in the Rust row: C++ 13.58 ns,
+Rust public wrapper 14.04 ns. The raw C ABI parser is about 11.5 ns, but the
+public API must still build the `VersionTuple`; the median public result is
+around 0.97x across five runs. Treat this as parity, not a speedup: the port
+does not clear the runtime gate and stays opt-in. The parser uses wrapping
+`u32` arithmetic and masks minor/subminor to 31 bits so oversized components
+match the C++ bitfield truncation.
 
 ## OptionStrCmp port
 
@@ -352,7 +354,10 @@ Every C++/Rust comparison must measure both sides, not only throughput:
   with `--no-checks --bench-backend=cpp|rust` before comparing resources.
 - `llvm/utils/rust-migration/bench_metrics.py` measures wall time, user/system
   CPU, peak RSS, and artifact bytes for either a compile command or a runtime
-  benchmark:
+  benchmark. On Linux it compiles `measure_exec.c` and forks a distinct child,
+  so `ru_maxrss` excludes Python's pre-exec pages; `--rss-backend=wait4` is the
+  fallback and reports the higher floor. Artifact paths resolve against
+  `--cwd`:
 
 ```sh
 python3 llvm/utils/rust-migration/bench_metrics.py \
@@ -458,6 +463,10 @@ g++ prog.cpp $(build/bin/llvm-config --cxxflags --ldflags --libs \
 # A component install has to carry the Rust archives too.
 cmake --install build --prefix /tmp/llvminst --component LLVMSupport
 cmake --install build --prefix /tmp/llvminst --component LLVMDemangle
+
+# LLVMConfig.cmake must recreate every enabled Rust archive as an imported
+# target. Check it from a consumer without adding the prefix lib dir:
+#   get_target_property(loc llvm_convertebcdic IMPORTED_LOCATION)
 ```
 
 `llvm-config` without a component list fails in this fork because the `engine`

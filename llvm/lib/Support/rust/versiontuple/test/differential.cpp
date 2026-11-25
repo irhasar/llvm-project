@@ -109,6 +109,8 @@ void benchmark() {
       RustFields F{};
       Sink += llvm_versiontuple_try_parse(
           reinterpret_cast<const uint8_t *>(S.data()), S.size(), &F);
+      VersionTuple V = fromRust(F);
+      Sink += V.getMajor();
     }
   Start = std::chrono::steady_clock::now();
   for (int Rep = 0; Rep < 20000; ++Rep)
@@ -116,14 +118,16 @@ void benchmark() {
       RustFields F{};
       Sink += llvm_versiontuple_try_parse(
           reinterpret_cast<const uint8_t *>(S.data()), S.size(), &F);
+      VersionTuple V = fromRust(F);
+      Sink += V.getMajor();
     }
   End = std::chrono::steady_clock::now();
   double RustNs =
       std::chrono::duration<double, std::nano>(End - Start).count() /
       (20000.0 * Inputs.size());
 
-  std::printf("benchmark: c++ %.2f ns rust %.2f ns speedup %.2fx\n", CppNs,
-              RustNs, CppNs / RustNs);
+  std::printf("benchmark: c++ %.2f ns rust-public %.2f ns speedup %.2fx\n",
+              CppNs, RustNs, CppNs / RustNs);
 }
 
 } // namespace

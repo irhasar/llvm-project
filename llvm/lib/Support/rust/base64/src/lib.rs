@@ -372,8 +372,10 @@ pub unsafe extern "C" fn llvm_base64_validate_rust(
 /// # Safety
 ///
 /// `src` must be readable for `len` bytes and may be null when `len` is zero.
-/// `dst` must be writable for `len / 4 * 3` bytes and may be null when `len`
-/// is zero. `out_len` must be a valid, writable pointer.
+/// `dst` must be writable for the validated decoded length; the decoder writes
+/// exactly that many bytes. A buffer of `len / 4 * 3` bytes is always large
+/// enough, but padded input needs one or two bytes less. `dst` may be null when
+/// `len` is zero. `out_len` must be a valid, writable pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_base64_decode_valid_rust(
     src: *const u8,

@@ -12,7 +12,9 @@ Examples:
     g++ -O3 -c ... -o /tmp/ebcdic-cpp.o
 
   python3 llvm/utils/rust-migration/bench_metrics.py \
-    --label rust-runtime --repeat 5 -- ./build/bin/llvm-rust-convertebcdic-differential
+    --label rust-runtime --repeat 5 -- \
+    ./build/bin/llvm-rust-convertebcdic-differential \
+    --no-checks --bench-backend=rust
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import shlex
 import statistics
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -36,7 +39,43 @@ def path_size(path: Path) -> int:
     return sum(child.stat().st_size for child in path.rglob("*") if child.is_file())
 
 
-def run_once(command: list[str], cwd: str | None) -> dict[str, float | int]:
+def wait_status_code(status: int) -> int:
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return -os.WTERMSIG(status)
+    raise RuntimeError(f"unexpected wait status {status}")
+
+
+def build_launcher() -> Path | None:
+    """Build the tiny Linux launcher that isolates the benchmark from Python.
+
+    A Popen child inherits Python's resident pages before exec, and wait4 folds
+    that pre-exec peak into ru_maxrss. The launcher forks a distinct child, so
+    only the launcher's small footprint can inflate the reported peak.
+    """
+    if sys.platform != "linux":
+        return None
+    source = Path(__file__).with_name("measure_exec.c")
+    if not source.is_file():
+        return None
+    compiler = os.environ.get("CC", "cc")
+    try:
+        directory = Path(tempfile.mkdtemp(prefix="llvm-rust-bench-"))
+        launcher = directory / "measure_exec"
+        subprocess.run(
+            [compiler, "-O2", "-o", str(launcher), str(source)],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return launcher
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def run_once_direct(command: list[str], cwd: str | None) -> dict[str, float | int]:
     started = time.perf_counter()
     proc = subprocess.Popen(
         command,
@@ -47,7 +86,7 @@ def run_once(command: list[str], cwd: str | None) -> dict[str, float | int]:
     )
     _, status, usage = os.wait4(proc.pid, 0)
     elapsed = time.perf_counter() - started
-    proc.returncode = os.waitstatus_to_exitcode(status)
+    proc.returncode = wait_status_code(status)
     if proc.returncode != 0:
         raise RuntimeError(f"command exited with {proc.returncode}: {command}")
     # Linux reports KiB; macOS reports bytes. Normalize to KiB.
@@ -58,6 +97,39 @@ def run_once(command: list[str], cwd: str | None) -> dict[str, float | int]:
         "wall_s": elapsed,
         "user_s": usage.ru_utime,
         "sys_s": usage.ru_stime,
+        "maxrss_kib": maxrss,
+    }
+
+
+def run_once_launcher(
+    command: list[str], cwd: str | None, launcher: Path
+) -> dict[str, float | int]:
+    proc = subprocess.run(
+        [str(launcher), *command],
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    fields = proc.stdout.decode().split()
+    if len(fields) != 5:
+        raise RuntimeError(
+            f"launcher produced {len(fields)} fields, expected 5: {fields!r}"
+        )
+    returncode, wall, user, system, maxrss = (
+        int(fields[0]),
+        float(fields[1]),
+        float(fields[2]),
+        float(fields[3]),
+        int(fields[4]),
+    )
+    if returncode != 0:
+        raise RuntimeError(f"command exited with {returncode}: {command}")
+    return {
+        "wall_s": wall,
+        "user_s": user,
+        "sys_s": system,
         "maxrss_kib": maxrss,
     }
 
@@ -84,6 +156,12 @@ def main() -> int:
         help="command run before each measured run, e.g. 'cargo clean'",
     )
     parser.add_argument("--json", action="store_true", help="emit JSON instead of Markdown")
+    parser.add_argument(
+        "--rss-backend",
+        choices=("auto", "launcher", "wait4"),
+        default="auto",
+        help="peak-RSS backend; launcher isolates Linux benchmarks from Python",
+    )
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
 
@@ -99,16 +177,37 @@ def main() -> int:
 
     prepare = shlex.split(args.prepare) if args.prepare else None
     label = args.label or os.path.basename(command[0])
+
+    launcher: Path | None = None
+    if args.rss_backend != "wait4":
+        launcher = build_launcher()
+        if launcher is None and args.rss_backend == "launcher":
+            print("launcher unavailable; install a C compiler or use wait4",
+                  file=sys.stderr)
+            return 1
+        if launcher is None:
+            print(
+                "warning: peak RSS uses wait4 and includes Python's pre-exec "
+                "footprint",
+                file=sys.stderr,
+            )
+    rss_backend = "launcher" if launcher is not None else "wait4"
+
+    def run(command: list[str]) -> dict[str, float | int]:
+        if launcher is not None:
+            return run_once_launcher(command, args.cwd, launcher)
+        return run_once_direct(command, args.cwd)
+
     runs: list[dict[str, float | int]] = []
     try:
         for _ in range(args.warmup):
             if prepare:
-                run_once(prepare, args.cwd)
-            run_once(command, args.cwd)
+                run(prepare)
+            run(command)
         for _ in range(args.repeat):
             if prepare:
-                run_once(prepare, args.cwd)
-            runs.append(run_once(command, args.cwd))
+                run(prepare)
+            runs.append(run(command))
     except (OSError, RuntimeError) as error:
         print(f"{label}: {error}", file=sys.stderr)
         return 1
@@ -120,14 +219,25 @@ def main() -> int:
     wall = median(walls)
     user = median(users)
     system = median(systems)
-    artifact_bytes = sum(path_size(Path(path)) for path in args.artifact)
+    cpu = [
+        (u + s) / w * 100.0
+        for w, u, s in zip(walls, users, systems)
+        if w
+    ]
+    artifact_dir = Path(args.cwd) if args.cwd is not None else Path.cwd()
+    artifact_bytes = sum(
+        path_size(artifact_dir / path) for path in args.artifact
+    )
     result = {
         "label": label,
         "runs": len(runs),
+        "rss_backend": rss_backend,
         "wall_ms_median": wall * 1000.0,
         "user_ms_median": user * 1000.0,
         "sys_ms_median": system * 1000.0,
-        "cpu_percent_median": (user + system) / wall * 100.0 if wall else 0.0,
+        "cpu_percent_median": median(cpu),
+        "maxrss_mib_median": median(rss) / 1024.0,
+        "maxrss_mib_min": min(rss) / 1024.0 if rss else 0.0,
         "maxrss_mib_max": max(rss) / 1024.0 if rss else 0.0,
         "artifact_bytes": artifact_bytes,
         "wall_ms_min": min(walls) * 1000.0 if walls else 0.0,
@@ -141,7 +251,9 @@ def main() -> int:
             f"| {label} | {result['runs']} | {result['wall_ms_median']:.2f} "
             f"({result['wall_ms_min']:.2f}-{result['wall_ms_max']:.2f}) | "
             f"{result['user_ms_median']:.2f} | {result['sys_ms_median']:.2f} | "
-            f"{result['cpu_percent_median']:.1f}% | {result['maxrss_mib_max']:.2f} | "
+            f"{result['cpu_percent_median']:.1f}% | "
+            f"{result['maxrss_mib_median']:.2f} "
+            f"({result['maxrss_mib_min']:.2f}-{result['maxrss_mib_max']:.2f}) | "
             f"{artifact_bytes} |"
         )
     return 0

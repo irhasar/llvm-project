@@ -43,14 +43,24 @@ void convertToUTF8(StringRef Source, SmallVectorImpl<char> &Result) {
   // more room.
   Result.resize_for_overwrite(Source.size());
   size_t ResultLen = 0;
+  size_t Consumed = 0;
   int32_t Status = llvm_convertebcdic_to_utf8(
       reinterpret_cast<const uint8_t *>(Source.data()), Source.size(),
-      reinterpret_cast<uint8_t *>(Result.data()), Result.size(), &ResultLen);
+      reinterpret_cast<uint8_t *>(Result.data()), Result.size(), &ResultLen,
+      &Consumed);
   if (Status == 3) {
+    size_t PrefixLen = ResultLen;
+    size_t SuffixLen = 0;
+    size_t SuffixConsumed = 0;
     Result.resize_for_overwrite(Source.size() * 2);
     Status = llvm_convertebcdic_to_utf8(
-        reinterpret_cast<const uint8_t *>(Source.data()), Source.size(),
-        reinterpret_cast<uint8_t *>(Result.data()), Result.size(), &ResultLen);
+        reinterpret_cast<const uint8_t *>(Source.data()) + Consumed,
+        Source.size() - Consumed,
+        reinterpret_cast<uint8_t *>(Result.data()) + PrefixLen,
+        Result.size() - PrefixLen, &SuffixLen, &SuffixConsumed);
+    ResultLen = PrefixLen + SuffixLen;
+    assert(Consumed + SuffixConsumed == Source.size() &&
+           "Rust EBCDIC retry did not consume the whole source");
   }
   assert(Status == 0 && "Rust EBCDIC conversion ran out of output space");
   (void)Status;

@@ -125,8 +125,10 @@ unsafe fn to_ebcdic(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i3
 }
 
 /// Converts EBCDIC-1047 to UTF-8. Every byte is valid, so the only possible
-/// failure is insufficient output space.
-unsafe fn to_utf8(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32, usize) {
+/// failure is insufficient output space. Returns `(status, bytes_written,
+/// bytes_consumed)`; on `OUTPUT_TOO_SMALL` the caller can resume at
+/// `bytes_consumed` instead of restarting the conversion.
+unsafe fn to_utf8(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32, usize, usize) {
     let mut written = 0;
     let mut i = 0;
     if cap >= len.saturating_mul(2) {
@@ -139,7 +141,7 @@ unsafe fn to_utf8(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32,
             *dst.add(written + 1) = ch & 0xbf;
             written += 1 + high as usize;
         }
-        return (OK, written);
+        return (OK, written, len);
     }
 
     if cap >= len {
@@ -148,20 +150,20 @@ unsafe fn to_utf8(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32,
             i += 1;
             if ch >= 128 {
                 if written + 2 > cap {
-                    return (OUTPUT_TOO_SMALL, written);
+                    return (OUTPUT_TOO_SMALL, written, i - 1);
                 }
                 *dst.add(written) = 0xc0 | (ch >> 6);
                 *dst.add(written + 1) = ch & 0xbf;
                 written += 2;
             } else {
                 if written == cap {
-                    return (OUTPUT_TOO_SMALL, written);
+                    return (OUTPUT_TOO_SMALL, written, i - 1);
                 }
                 *dst.add(written) = ch;
                 written += 1;
             }
         }
-        return (OK, written);
+        return (OK, written, len);
     }
 
     while i < len {
@@ -169,7 +171,7 @@ unsafe fn to_utf8(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32,
         i += 1;
         let needed = if ch >= 128 { 2 } else { 1 };
         if cap - written < needed {
-            return (OUTPUT_TOO_SMALL, written);
+            return (OUTPUT_TOO_SMALL, written, i - 1);
         }
         if ch >= 128 {
             *dst.add(written) = 0xc0 | (ch >> 6);
@@ -179,10 +181,11 @@ unsafe fn to_utf8(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32,
         }
         written += needed;
     }
-    (OK, written)
+    (OK, written, len)
 }
 
-/// Converts ISO-8859-1 input to EBCDIC-1047.
+/// Converts UTF-8 input for the U+0000..U+00FF repertoire (one- and two-byte
+/// sequences only) to EBCDIC-1047.
 ///
 /// # Safety
 ///
@@ -204,11 +207,15 @@ pub unsafe extern "C" fn llvm_convertebcdic_to_ebcdic(
 
 /// Converts EBCDIC-1047 input to UTF-8.
 ///
+/// `*out_consumed` receives the number of input bytes converted. When the
+/// status is `OUTPUT_TOO_SMALL`, the caller can retry from that offset with the
+/// remaining output buffer instead of redoing the prefix.
+///
 /// # Safety
 ///
 /// `src` must be readable for `len` bytes and may be null when `len` is zero.
 /// `dst` must be writable for `cap` bytes and may be null when `cap` is zero.
-/// `out_len` must be a valid, writable pointer.
+/// `out_len` and `out_consumed` must be valid, writable pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertebcdic_to_utf8(
     src: *const u8,
@@ -216,9 +223,11 @@ pub unsafe extern "C" fn llvm_convertebcdic_to_utf8(
     dst: *mut u8,
     cap: usize,
     out_len: *mut usize,
+    out_consumed: *mut usize,
 ) -> i32 {
-    let (status, written) = to_utf8(src, len, dst, cap);
+    let (status, written, consumed) = to_utf8(src, len, dst, cap);
     *out_len = written;
+    *out_consumed = consumed;
     status
 }
 
@@ -245,6 +254,7 @@ mod tests {
     fn to_utf8_vec(input: &[u8]) -> (i32, Vec<u8>) {
         let mut out = vec![0u8; input.len() * 2];
         let mut len = 0usize;
+        let mut consumed = 0usize;
         let status = unsafe {
             llvm_convertebcdic_to_utf8(
                 input.as_ptr(),
@@ -252,8 +262,10 @@ mod tests {
                 out.as_mut_ptr(),
                 out.len(),
                 &mut len,
+                &mut consumed,
             )
         };
+        assert_eq!(consumed, input.len());
         out.truncate(len);
         (status, out)
     }
@@ -299,8 +311,17 @@ mod tests {
         let input = [0x51u8];
         let mut out = [0u8; 1];
         let mut len = 0;
-        let status =
-            unsafe { llvm_convertebcdic_to_utf8(input.as_ptr(), 1, out.as_mut_ptr(), 1, &mut len) };
-        assert_eq!((status, len), (OUTPUT_TOO_SMALL, 0));
+        let mut consumed = 0;
+        let status = unsafe {
+            llvm_convertebcdic_to_utf8(
+                input.as_ptr(),
+                1,
+                out.as_mut_ptr(),
+                1,
+                &mut len,
+                &mut consumed,
+            )
+        };
+        assert_eq!((status, len, consumed), (OUTPUT_TOO_SMALL, 0, 0));
     }
 }

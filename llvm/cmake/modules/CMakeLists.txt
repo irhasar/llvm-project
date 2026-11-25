@@ -2,6 +2,34 @@ include(ExtendPath)
 include(LLVMDistributionSupport)
 include(FindPrefixFromConfig)
 
+# Rust archives linked privately into a static C++ library remain in that
+# library's exported link interface. Record the enabled support archives so
+# LLVMConfig.cmake can recreate their imported targets in both the build and
+# install packages.
+function(llvm_record_rust_imported_library target library_dir)
+  get_property(libname GLOBAL PROPERTY LLVM_RUST_${target}_LIBRARY_NAME)
+  if(NOT libname)
+    set(libname
+      "${CMAKE_STATIC_LIBRARY_PREFIX}${target}${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  endif()
+  set(locations "")
+  if(CMAKE_CONFIGURATION_TYPES)
+    foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES)
+      string(TOUPPER "${config}" config_upper)
+      set(location "${library_dir}/${libname}")
+      string(REPLACE "${CMAKE_CFG_INTDIR}" "${config}" location "${location}")
+      list(APPEND locations "${config_upper}=${location}")
+    endforeach()
+  endif()
+  string(REPLACE ";" "," locations "${locations}")
+  set_property(GLOBAL APPEND PROPERTY LLVM_CONFIG_RUST_IMPORTED_TARGETS
+    "${target}|${libname}|${locations}")
+endfunction()
+
+set(LLVM_CONFIG_RUST_SUPPORT_PORTS
+  SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF CONVERTEBCDIC XXHASH DJB
+  VERSIONTUPLE OPTIONSTRCMP)
+
 # CMAKE_INSTALL_PACKAGEDIR might be absolute, so don't reuse below.
 string(REPLACE "${CMAKE_CFG_INTDIR}" "." llvm_cmake_builddir "${LLVM_LIBRARY_DIR}")
 set(llvm_cmake_builddir "${llvm_cmake_builddir}/cmake/llvm")
@@ -66,6 +94,17 @@ set(LLVM_CONFIG_LIBRARY_DIRS
   # FIXME: Should there be other entries here?
   )
 list(REMOVE_DUPLICATES LLVM_CONFIG_LIBRARY_DIRS)
+
+set_property(GLOBAL PROPERTY LLVM_CONFIG_RUST_IMPORTED_TARGETS "")
+foreach(rust_port IN LISTS LLVM_CONFIG_RUST_SUPPORT_PORTS)
+  if(LLVM_ENABLE_RUST_${rust_port})
+    string(TOLOWER "${rust_port}" rust_library)
+    llvm_record_rust_imported_library("llvm_${rust_library}"
+      "${LLVM_LIBRARY_DIR}")
+  endif()
+endforeach()
+get_property(LLVM_CONFIG_RUST_IMPORTED_TARGETS GLOBAL
+  PROPERTY LLVM_CONFIG_RUST_IMPORTED_TARGETS)
 
 # The Rust archive is an imported target in the build tree. Recreate it in
 # LLVMConfig.cmake so an exported static component can resolve its private
@@ -193,6 +232,17 @@ set(LLVM_CONFIG_LIBRARY_DIRS
   # FIXME: Should there be other entries here?
   )
 list(REMOVE_DUPLICATES LLVM_CONFIG_LIBRARY_DIRS)
+
+set_property(GLOBAL PROPERTY LLVM_CONFIG_RUST_IMPORTED_TARGETS "")
+foreach(rust_port IN LISTS LLVM_CONFIG_RUST_SUPPORT_PORTS)
+  if(LLVM_ENABLE_RUST_${rust_port})
+    string(TOLOWER "${rust_port}" rust_library)
+    llvm_record_rust_imported_library("llvm_${rust_library}"
+      "${LLVM_CONFIG_LIBRARY_DIR}")
+  endif()
+endforeach()
+get_property(LLVM_CONFIG_RUST_IMPORTED_TARGETS GLOBAL
+  PROPERTY LLVM_CONFIG_RUST_IMPORTED_TARGETS)
 
 # Keep the Rust demangler's imported target available to installed consumers.
 # Installed libraries live directly in the install library directory, so a
