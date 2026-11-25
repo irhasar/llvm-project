@@ -85,7 +85,8 @@ Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
 (`LLVM_ENABLE_RUST_BASE64`), `ConvertUTF.cpp`
 (`LLVM_ENABLE_RUST_CONVERTUTF`), `ConvertEBCDIC.cpp`
 (`LLVM_ENABLE_RUST_CONVERTEBCDIC`), `xxhash.cpp`
-(`LLVM_ENABLE_RUST_XXHASH`), and `DJB.cpp` (`LLVM_ENABLE_RUST_DJB`).
+(`LLVM_ENABLE_RUST_XXHASH`), `DJB.cpp` (`LLVM_ENABLE_RUST_DJB`), and
+`VersionTuple.cpp` (`LLVM_ENABLE_RUST_VERSIONTUPLE`).
 Selection criteria: small, deterministic,
 byte-buffer in / byte-buffer out, no LLVM types in the interface, existing unit
 tests.
@@ -858,6 +859,42 @@ sequence. That malformed multi-byte input is undefined behaviour in the
 reference, so the differential harness does not use it as an oracle. The Rust
 port returns U+FFFD for each malformed sequence and never writes out of bounds.
 All valid UTF-8 and all single-byte inputs are bit-identical.
+
+## Tenth port: VersionTuple
+
+`VersionTuple.cpp` keeps the class, its constructors, `getAsString`,
+`operator<<`, and `withMajorReplaced` in C++. With
+`LLVM_ENABLE_RUST_VERSIONTUPLE` on, only `VersionTuple::tryParse` is replaced
+by a call to `llvm_versiontuple_try_parse(data, length, *fields)`. The Rust
+function returns 0 on success and fills five `uint32_t` components plus a flags
+word; the C++ wrapper selects the matching constructor and leaves the object
+untouched on failure.
+
+The parser is one index-based loop over the input. It uses wrapping `u32`
+arithmetic, matches the original component limits (`build < 2^20`,
+`subbuild < 2^10`), and masks minor and subminor to 31 bits so oversized values
+truncate exactly like the C++ bitfields. The C ABI struct is `#[repr(C)]` and
+contains only `uint32_t`, so no Rust layout assumptions cross the boundary.
+
+The differential target does not link `LLVMSupport`; `test/reference.cpp`
+carries the original parse loop because `VersionTuple.cpp` also contains stream
+helpers that need Support. The corpus covers valid boundaries, invalid
+separators and trailing bytes, oversized components, and 300,000 random ASCII
+strings: 300,086 inputs, 0 mismatches. `test/stable.cpp` checks every component
+presence flag and that a failed parse leaves the destination unchanged.
+
+Measured on this Zen 4 host with `g++ -O3` and `-C opt-level=3`, five-component
+versions:
+
+| Backend | ns/parse |
+|---------|----------|
+| C++ | 13.82 |
+| Rust | 11.56 |
+
+Rust is 1.20x faster. The gain comes from avoiding repeated
+`StringRef::substr`/`consume_front` calls and writing the parsed result once.
+The linked stable test and `LLVMSupport` were not rebuilt for this measurement;
+the CMake differential target and standalone stable binaries were built.
 
 ## Resource measurements for EBCDIC and D
 

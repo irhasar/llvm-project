@@ -586,6 +586,32 @@ add_executable(llvm-djb-stable EXCLUDE_FROM_ALL
   rust/djb/test/stable.cpp)
 target_link_libraries(llvm-djb-stable PRIVATE LLVMSupport)
 
+if(LLVM_ENABLE_RUST_VERSIONTUPLE)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_versiontuple
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/versiontuple/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_VERSIONTUPLE)
+  target_link_libraries(LLVMSupport PRIVATE llvm_versiontuple)
+
+  add_executable(llvm-rust-versiontuple-differential EXCLUDE_FROM_ALL
+    rust/versiontuple/test/differential.cpp
+    rust/versiontuple/test/reference.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/ABIBreak.cpp")
+  target_include_directories(llvm-rust-versiontuple-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-versiontuple-differential PRIVATE llvm_versiontuple)
+  add_custom_target(check-llvm-rust-versiontuple
+    COMMAND llvm-rust-versiontuple-differential
+    COMMAND llvm-versiontuple-stable
+    DEPENDS llvm-rust-versiontuple-differential llvm-versiontuple-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-versiontuple-stable EXCLUDE_FROM_ALL
+  rust/versiontuple/test/stable.cpp)
+target_link_libraries(llvm-versiontuple-stable PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport

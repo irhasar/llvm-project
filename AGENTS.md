@@ -38,6 +38,7 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON \
   -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON \
   -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON \
+  -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON \
   -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
@@ -48,9 +49,9 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 
 ninja -C build LLVMSupport llvm-sha1-stable llvm-sha256-stable \
   llvm-convertutf-stable llvm-convertebcdic-stable llvm-djb-stable \
-  llvm-rustdemangle-stable llvm-dlang-stable \
+  llvm-versiontuple-stable llvm-rustdemangle-stable llvm-dlang-stable \
   llvm-rust-rustdemangle-differential llvm-rust-dlang-differential \
-  llvm-rust-djb-differential llc
+  llvm-rust-djb-differential llvm-rust-versiontuple-differential llc
 ```
 
 Full LLVM builds are large; prefer building `LLVMSupport` and the specific
@@ -177,6 +178,39 @@ is not used as a differential oracle; the Rust port replaces it with U+FFFD.
 Measured here with `g++ -O3` and `-C opt-level=3`: 1.6x to 1.7x on ASCII
 debug-info names and 1.4x to 1.6x on non-ASCII names. The linked stable test
 shrinks from 30,376 to 20,640 bytes.
+
+## VersionTuple port
+
+`llvm/lib/Support/rust/versiontuple` is gated by
+`LLVM_ENABLE_RUST_VERSIONTUPLE` (default `OFF`). Only
+`VersionTuple::tryParse` is replaced; the class layout, constructors,
+`getAsString`, `operator<<`, and `withMajorReplaced` stay in C++. The Rust
+entry point is `llvm_versiontuple_try_parse(data, len, *out)` returning 0 on
+success; `out` carries five `uint32_t` components and a flags word.
+
+```sh
+(cd llvm/lib/Support/rust/versiontuple &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build llvm-rust-versiontuple-differential llvm-versiontuple-stable
+./build/bin/llvm-versiontuple-stable
+./build/bin/llvm-rust-versiontuple-differential
+```
+
+The differential target deliberately does not link `LLVMSupport`.
+`test/reference.cpp` carries the original parse loop as the oracle because
+`VersionTuple.cpp` also defines stream helpers that need `LLVMSupport`.
+Coverage is the boundary corpus plus 300,000 random ASCII strings; the
+observed result is 300,086 inputs and 0 mismatches. `test/stable.cpp` checks
+component presence and that a failed parse leaves the destination unchanged.
+
+Measured here with `g++ -O3` and `-C opt-level=3` on five-component versions:
+C++ 13.82 ns, Rust 11.56 ns, or 1.20x faster. The win comes from a single
+index-based digit loop and from writing the result once, instead of repeated
+`StringRef::substr`/`consume_front` calls. The parser uses wrapping `u32`
+arithmetic and masks minor/subminor to 31 bits so oversized components match
+the C++ bitfield truncation.
 
 ## Demangler port
 

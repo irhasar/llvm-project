@@ -15,6 +15,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cassert>
+#include <cstdint>
 
 using namespace llvm;
 
@@ -39,6 +40,42 @@ raw_ostream &llvm::operator<<(raw_ostream &Out, const VersionTuple &V) {
     Out << '.' << *Subbuild;
   return Out;
 }
+
+#if defined(LLVM_RUST_VERSIONTUPLE)
+struct VersionTupleFields {
+  uint32_t Major;
+  uint32_t Minor;
+  uint32_t Subminor;
+  uint32_t Build;
+  uint32_t Subbuild;
+  uint32_t Flags;
+};
+
+extern "C" uint8_t llvm_versiontuple_try_parse(const uint8_t *Data, size_t Len,
+                                                VersionTupleFields *Out);
+
+bool VersionTuple::tryParse(StringRef Input) {
+  VersionTupleFields Fields;
+  if (llvm_versiontuple_try_parse(
+          reinterpret_cast<const uint8_t *>(Input.data()), Input.size(),
+          &Fields))
+    return true;
+
+  if (Fields.Flags & 8)
+    *this = VersionTuple(Fields.Major, Fields.Minor, Fields.Subminor,
+                         Fields.Build, Fields.Subbuild);
+  else if (Fields.Flags & 4)
+    *this = VersionTuple(Fields.Major, Fields.Minor, Fields.Subminor,
+                         Fields.Build);
+  else if (Fields.Flags & 2)
+    *this = VersionTuple(Fields.Major, Fields.Minor, Fields.Subminor);
+  else if (Fields.Flags & 1)
+    *this = VersionTuple(Fields.Major, Fields.Minor);
+  else
+    *this = VersionTuple(Fields.Major);
+  return false;
+}
+#else
 
 static bool parseInt(StringRef &input, unsigned &value) {
   assert(value == 0);
@@ -125,6 +162,7 @@ bool VersionTuple::tryParse(StringRef input) {
   *this = VersionTuple(major, minor, subminor, build, subbuild);
   return false;
 }
+#endif
 
 VersionTuple VersionTuple::withMajorReplaced(unsigned NewMajor) const {
   if (HasSubbuild)
