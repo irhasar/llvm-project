@@ -85,6 +85,19 @@ llvm::Error llvm::decodeBase64(llvm::StringRef Input,
       return createStringError(std::errc::illegal_byte_sequence,
                                "Base64 encoded strings must be a multiple of 4 "
                                "bytes in length");
+    // Match the C++ loop: it decodes and keeps every complete block before
+    // the block that holds the bad character, then returns the error.
+    const size_t GoodBlocks = BadIndex / 4;
+    const size_t PartialLen = GoodBlocks * 3;
+    if (PartialLen != 0) {
+      Output.resize(PartialLen);
+      size_t OutLen = 0;
+      Rc = llvm_base64_decode_valid_rust(
+          reinterpret_cast<const uint8_t *>(Input.data()), GoodBlocks * 4,
+          Output.data(), &OutLen);
+      assert(Rc == 0 && OutLen == PartialLen &&
+             "valid Base64 prefix must decode");
+    }
     return createStringError(std::errc::illegal_byte_sequence,
                              "Invalid Base64 character %#2.2x at index %" PRIu64,
                              Input[BadIndex], static_cast<uint64_t>(BadIndex));

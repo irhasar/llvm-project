@@ -24,6 +24,10 @@ extern "C" size_t llvm_base64_encode_rust(const uint8_t *Src, size_t Len,
                                      char *Dst);
 extern "C" int llvm_base64_decode_rust(const uint8_t *Src, size_t Len, char *Dst,
                                   size_t *OutLen, size_t *BadIndex);
+extern "C" int llvm_base64_validate_rust(const uint8_t *Src, size_t Len,
+                                         size_t *OutLen, size_t *BadIndex);
+extern "C" int llvm_base64_decode_valid_rust(const uint8_t *Src, size_t Len,
+                                             char *Dst, size_t *OutLen);
 
 namespace {
 
@@ -187,6 +191,42 @@ DecodeResult RustDecode(const char *Input, size_t InputLength) {
   return R;
 }
 
+// Benchmark-only path that matches decodeBase64: validate the whole input,
+// then decode it. The correctness tests use RustDecode, which keeps the
+// partial output the C++ loop leaves behind.
+DecodeResult RustDecodePublic(const char *Input, size_t InputLength) {
+  DecodeResult R;
+  if (InputLength == 0) {
+    R.S = Ok;
+    return R;
+  }
+  if ((InputLength % 4) != 0) {
+    R.S = LengthError;
+    return R;
+  }
+  size_t DecodedLen = 0;
+  size_t BadIndex = 0;
+  int Rc = llvm_base64_validate_rust(
+      reinterpret_cast<const uint8_t *>(Input), InputLength, &DecodedLen,
+      &BadIndex);
+  R.BadIndex = BadIndex;
+  if (Rc != 0) {
+    R.S = Rc == 1 ? LengthError : BadChar;
+    return R;
+  }
+  R.Output.resize(DecodedLen);
+  size_t OutLen = 0;
+  Rc = llvm_base64_decode_valid_rust(
+      reinterpret_cast<const uint8_t *>(Input), InputLength, R.Output.data(),
+      &OutLen);
+  if (Rc != 0 || OutLen != DecodedLen) {
+    R.S = BadChar;
+    return R;
+  }
+  R.S = Ok;
+  return R;
+}
+
 //===----------------------------------------------------------------------===//
 // Test harness.
 //===----------------------------------------------------------------------===//
@@ -245,14 +285,17 @@ double BenchEncode(bool Rust, const std::vector<uint8_t> &Data, size_t Len,
   return Best;
 }
 
-double BenchDecode(bool Rust, const std::vector<char> &Encoded, size_t Iters) {
+double BenchDecode(bool Rust, bool Public, const std::vector<char> &Encoded,
+                   size_t Iters) {
   double Best = 1e30;
   for (int Rep = 0; Rep < 5; ++Rep) {
     auto Start = std::chrono::steady_clock::now();
     size_t Sink = 0;
     for (size_t I = 0; I < Iters; ++I) {
-      DecodeResult R = Rust ? RustDecode(Encoded.data(), Encoded.size())
-                            : ReferenceDecode(Encoded.data(), Encoded.size());
+      DecodeResult R =
+          !Rust ? ReferenceDecode(Encoded.data(), Encoded.size())
+                : Public ? RustDecodePublic(Encoded.data(), Encoded.size())
+                         : RustDecode(Encoded.data(), Encoded.size());
       Sink += R.Output.size();
     }
     auto End = std::chrono::steady_clock::now();
@@ -380,7 +423,7 @@ int main() {
     std::printf("%10zu", L);
   std::printf("\n");
 
-  std::vector<double> RefEnc, RustEnc, RefDec, RustDec;
+  std::vector<double> RefEnc, RustEnc, RefDec, RustDec, RustDecOnePass;
   for (size_t L : Lengths)
     RefEnc.push_back(BenchEncode(false, Data, L, IterationsFor(L, 100'000'000)));
   for (size_t L : Lengths)
@@ -406,9 +449,14 @@ int main() {
     Encoded.emplace_back(E.begin(), E.end());
   }
   for (size_t I = 0; I < std::size(Lengths); ++I)
-    RefDec.push_back(BenchDecode(false, Encoded[I], IterationsFor(Lengths[I], 100'000'000)));
+    RefDec.push_back(BenchDecode(false, false, Encoded[I],
+                                 IterationsFor(Lengths[I], 100'000'000)));
   for (size_t I = 0; I < std::size(Lengths); ++I)
-    RustDec.push_back(BenchDecode(true, Encoded[I], IterationsFor(Lengths[I], 100'000'000)));
+    RustDec.push_back(BenchDecode(true, true, Encoded[I],
+                                  IterationsFor(Lengths[I], 100'000'000)));
+  for (size_t I = 0; I < std::size(Lengths); ++I)
+    RustDecOnePass.push_back(BenchDecode(
+        true, false, Encoded[I], IterationsFor(Lengths[I], 100'000'000)));
 
   std::printf("\n%-14s", "decode");
   for (size_t L : Lengths)
@@ -416,7 +464,10 @@ int main() {
   std::printf("\n%-14s", "C++ ns/call");
   for (double V : RefDec)
     std::printf("%10.1f", V);
-  std::printf("\n%-14s", "Rust ns/call");
+  std::printf("\n%-14s", "Rust 1-pass");
+  for (double V : RustDecOnePass)
+    std::printf("%10.1f", V);
+  std::printf("\n%-14s", "Rust public");
   for (double V : RustDec)
     std::printf("%10.1f", V);
   std::printf("\n%-14s", "speedup");

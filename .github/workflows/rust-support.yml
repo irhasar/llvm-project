@@ -158,6 +158,9 @@ jobs:
       - name: Fold preserves results
         run: |
           set -euo pipefail
+          build/bin/llc -O3 -mcpu=x86-64 "$IR" -o /tmp/base.s
+          build/bin/llc -O3 -mcpu=x86-64 -x86-fold-add-into-lea "$IR" \
+            -o /tmp/fold.s
           build/bin/llc -O3 -mcpu=x86-64 -filetype=obj "$IR" -o /tmp/base.o
           build/bin/llc -O3 -mcpu=x86-64 -filetype=obj \
             -x86-fold-add-into-lea "$IR" -o /tmp/fold.o

@@ -78,11 +78,22 @@ int main() {
     Expect(Dec.empty(), "invalid input does not resize output");
   }
 
+  {
+    // A complete block before the bad one stays decoded, matching the C++
+    // loop's partially filled vector.
+    std::vector<char> Dec;
+    llvm::Error E = llvm::decodeBase64("Zm9v!AAA", Dec);
+    Expect(static_cast<bool>(E), "invalid after a valid block");
+    llvm::consumeError(std::move(E));
+    Expect(Dec.size() == 3 && Dec[0] == 'f' && Dec[1] == 'o' && Dec[2] == 'o',
+           "partial output matches the C++ loop");
+  }
+
   if (Failures)
     return 1;
   std::printf("golden vectors: %zu RFC 4648 cases\n",
               sizeof(Vectors) / sizeof(Vectors[0]));
-  std::printf("error cases: 6\n");
+  std::printf("error cases: 7\n");
   std::printf("OK: Base64 encode/decode through the public API\n");
   return 0;
 }
