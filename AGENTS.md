@@ -62,6 +62,13 @@ Every crate under `llvm/lib/Support/rust/` follows the same rules:
 - Each component has its own `LLVM_ENABLE_RUST_<COMPONENT>` switch, default
   `OFF`, and `Cargo.lock` is committed.
 
+MD5 is the exception that proves the codegen rule: it carries a generic x86-64
+body that emits `a + x + t` as an explicit `lea` through `asm!` (LLVM otherwise
+reassociates the constant to the end of the chain and loses the LEA) and a
+`#[target_feature(enable = "bmi1,bmi2")]` copy selected by CPUID. The generic
+copy is within 1% of `g++ -O3`; the BMI copy is 3-13% faster on Zen 4. Other
+architectures use the pure-Rust add grouping.
+
 Checks for a crate:
 
 ```sh

@@ -13,6 +13,9 @@
 
 #![cfg_attr(not(test), no_std)]
 
+#[cfg(target_arch = "x86_64")]
+use core::arch::asm;
+
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
@@ -42,15 +45,39 @@ fn i(x: u32, y: u32, z: u32) -> u32 {
     y ^ (x | !z)
 }
 
+// LLVM's reassociation moves the round constant to the end of the add chain,
+// which leaves `a + f + x` for the backend and costs one extra add per step.
+// Compute `a + x + t` with an explicit LEA instead: base and index carry the
+// two registers, the displacement carries the constant. GCC already picks
+// this shape, so the generic-target codegen gap disappears.
+#[cfg(target_arch = "x86_64")]
 macro_rules! step {
-    ($f:ident, $a:ident, $b:ident, $c:ident, $d:ident, $x:expr, $t:expr, $s:expr) => {
-        $a = $a
+    ($f:ident, $a:ident, $b:ident, $c:ident, $d:ident, $x:expr, $t:expr, $s:expr) => {{
+        let sum: u32;
+        asm!(
+            "lea {sum:e}, [{a:r} + {x:r} + {t}]",
+            sum = lateout(reg) sum,
+            a = in(reg) $a,
+            x = in(reg) $x,
+            t = const $t as u32 as i32,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+        $a = sum
             .wrapping_add($f($b, $c, $d))
-            .wrapping_add($x)
-            .wrapping_add($t)
             .rotate_left($s)
             .wrapping_add($b);
-    };
+    }};
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+macro_rules! step {
+    ($f:ident, $a:ident, $b:ident, $c:ident, $d:ident, $x:expr, $t:expr, $s:expr) => {{
+        let sum = $a.wrapping_add($x).wrapping_add($t);
+        $a = sum
+            .wrapping_add($f($b, $c, $d))
+            .rotate_left($s)
+            .wrapping_add($b);
+    }};
 }
 
 #[inline(always)]
@@ -60,8 +87,35 @@ unsafe fn load32(p: *const u8) -> u32 {
 
 const IV: [u32; 4] = [0x6745_2301, 0xefcd_ab89, 0x98ba_dcfe, 0x1032_5476];
 
+#[cfg(target_arch = "x86_64")]
+static HAS_BMI: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+/// Write-once cache of the BMI1/BMI2 check. `0` is unknown, `1` is absent and
+/// `2` is present.
+#[cfg(target_arch = "x86_64")]
+fn has_bmi() -> bool {
+    use core::sync::atomic::Ordering;
+    match HAS_BMI.load(Ordering::Relaxed) {
+        2 => true,
+        1 => false,
+        _ => {
+            use core::arch::x86_64::{__cpuid, __cpuid_count};
+            let max_leaf = __cpuid(0).eax;
+            let leaf7 = if max_leaf >= 7 {
+                __cpuid_count(7, 0).ebx
+            } else {
+                0
+            };
+            let ok = leaf7 & (1 << 3) != 0 && leaf7 & (1 << 8) != 0;
+            HAS_BMI.store(if ok { 2 } else { 1 }, Ordering::Relaxed);
+            ok
+        }
+    }
+}
+
 /// Runs the 64-step compression function over `blocks` full 64-byte blocks.
-unsafe fn body_raw(state: &mut [u32; 4], data: *const u8, blocks: usize) {
+#[inline(always)]
+unsafe fn body_impl(state: &mut [u32; 4], data: *const u8, blocks: usize) {
     unsafe {
         let mut a = state[0];
         let mut b = state[1];
@@ -156,6 +210,21 @@ unsafe fn body_raw(state: &mut [u32; 4], data: *const u8, blocks: usize) {
         state[2] = c;
         state[3] = d;
     }
+}
+
+unsafe fn body_raw(state: &mut [u32; 4], data: *const u8, blocks: usize) {
+    #[cfg(target_arch = "x86_64")]
+    if has_bmi() {
+        unsafe { body_bmi(state, data, blocks) };
+        return;
+    }
+    unsafe { body_impl(state, data, blocks) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "bmi1,bmi2")]
+unsafe fn body_bmi(state: &mut [u32; 4], data: *const u8, blocks: usize) {
+    unsafe { body_impl(state, data, blocks) }
 }
 
 unsafe fn hash_raw(data: *const u8, len: usize, out: *mut u8) {
@@ -318,6 +387,25 @@ mod tests {
         let data: Vec<u8> = (0..4096).map(|_| next() as u8).collect();
         for len in 0..data.len() {
             assert_eq!(digest(&data[..len]), reference(&data[..len]), "len {len}");
+        }
+    }
+
+    #[test]
+    fn generic_and_bmi_bodies_agree() {
+        let mut data = [0u8; 128];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(37).wrapping_add(11);
+        }
+        let mut generic = IV;
+        unsafe { body_impl(&mut generic, data.as_ptr(), 2) };
+        let mut dispatched = IV;
+        unsafe { body_raw(&mut dispatched, data.as_ptr(), 2) };
+        assert_eq!(generic, dispatched);
+        #[cfg(target_arch = "x86_64")]
+        if has_bmi() {
+            let mut bmi = IV;
+            unsafe { body_bmi(&mut bmi, data.as_ptr(), 2) };
+            assert_eq!(generic, bmi);
         }
     }
 

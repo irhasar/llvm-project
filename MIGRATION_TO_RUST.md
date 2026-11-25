@@ -114,13 +114,19 @@ generic x86-64 target unless noted:
 | SHA-256         | 4.1x (SHA-NI path)                            |
 | Base64 encode   | 1.6x at 48 B, 6.2x at 1 MiB                   |
 | Base64 decode   | 3.5x at 12 B, 5.0x at 1 MiB                   |
-| MD5             | 0.83x generic, 1.09x with `-march=znver4` both |
+| MD5             | 1.03x to 1.13x (LEA asm + BMI1/BMI2 path)     |
 
-MD5 is the one port where generic LLVM codegen loses to GCC. GCC folds the
-`a + f + x + t` chains into LEA and LLVM leaves them as adds (651 against 586
-instructions in the 64-step body); at a matched `-march=znver4` the Rust body
-is 593 instructions and 1.09x faster. This is a codegen gap, not an algorithmic
-one, and it is what the fork's `-x86-fold-add-into-lea` experiment targets.
+MD5 initially lost to GCC at the generic target (0.83x). LLVM's reassociation
+moved the round constant to the end of `a + f + x + t`, leaving three register
+operands for the backend, while GCC folded `a + x + t` into one LEA
+(base + index + displacement) and added `f` separately. The crate now emits
+that LEA explicitly with a small `asm!` block, which brings the generic body to
+parity, and adds a `#[target_feature(enable = "bmi1,bmi2")]` body selected by
+CPUID so `rorx` and `andn` are used when the CPU has them. On this Zen 4 host
+the dispatched body is 1.03x to 1.13x faster than the C++ reference; the
+generic fallback is at parity (0.99x to 1.07x). The `asm!` path is x86-64 only;
+other targets use the pure-Rust grouping. The crate tests compare the generic
+and BMI bodies bit for bit.
 
 The point of this phase is volume: prove that the plumbing works for many small
 crates, and settle conventions (error reporting via return codes, output buffer
