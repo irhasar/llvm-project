@@ -83,7 +83,8 @@ Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
 `MD5.cpp` (`LLVM_ENABLE_RUST_MD5`), `SHA1.cpp` (`LLVM_ENABLE_RUST_SHA1`),
 `SHA256.cpp` (`LLVM_ENABLE_RUST_SHA256`), `Base64.cpp`
 (`LLVM_ENABLE_RUST_BASE64`), `ConvertUTF.cpp`
-(`LLVM_ENABLE_RUST_CONVERTUTF`), and `xxhash.cpp`
+(`LLVM_ENABLE_RUST_CONVERTUTF`), `ConvertEBCDIC.cpp`
+(`LLVM_ENABLE_RUST_CONVERTEBCDIC`), and `xxhash.cpp`
 (`LLVM_ENABLE_RUST_XXHASH`). Selection criteria: small, deterministic,
 byte-buffer in / byte-buffer out, no LLVM types in the interface, existing unit
 tests.
@@ -125,6 +126,7 @@ generic x86-64 target unless noted:
 | Base64 decode   | 3.0x at 12 B, 3.8x at 1 MiB                   |
 | MD5             | 1.03x to 1.13x (LEA asm + BMI1/BMI2 path)     |
 | ConvertUTF      | 4.5x UTF-8 ASCII, 1.2-1.5x mixed; 1.6x UTF-32->UTF-16 ASCII; 12x `isLegalUTF8String` |
+| ConvertEBCDIC   | 1.11x UTF-8 output, 1.16-1.22x EBCDIC output on 16-64 B payloads |
 | xxHash 64-bit   | 0.99x at 12 B, 1.1x at 48 B, 2.5x at 768 B, 3.5x at 1 MiB |
 | xxHash 128-bit  | 1.04x at 12 B, 1.2x at 48 B, 2.3x at 768 B, 3.5x at 1 MiB |
 
@@ -739,6 +741,41 @@ AArch64 differential was cross-compiled and run under `qemu-aarch64
 `aarch64` job runs the crate tests, including `neon_matches_scalar`, under
 `qemu-aarch64`.
 
+## Eighth port: ConvertEBCDIC
+
+`ConvertEBCDIC.cpp` exposes two byte-buffer functions:
+`ConverterEBCDIC::convertToEBCDIC` and `convertToUTF8`. The Rust crate keeps
+the same `SmallVectorImpl<char>`-owned output contract: the C++ wrapper sizes
+the vector to the maximum possible output, the crate writes through the
+`(pointer, capacity)` pair, and the wrapper shrinks to the returned length.
+The crate reports both a status and the number of bytes written, so failed
+UTF-8 input leaves the same partial output as the C++ loop.
+
+The hot path assumes the wrapper's maximum-size allocation and drops the
+per-byte capacity check. The EBCDIC-to-UTF-8 path always writes two bytes and
+advances by one or two, which removes the output branch; the UTF-8-to-EBCDIC
+path keeps the C++ validation rules for `C2`/`C3` sequences and rejects
+truncated or malformed input with the same `std::errc` mapping.
+
+`test/differential.cpp` compares both directions against the original C++
+implementation compiled under `ConverterEBCDICCpp`, over golden inputs and
+100,000 random byte strings. `test/stable.cpp` checks the public wrapper with
+the option both on and off. The standalone test targets carry a tiny
+`SmallVector` growth stub and do not link `LLVMSupport`, so the port can be
+checked without a full support build. Measured on this Zen 4 host with
+`g++ -O3` and `-C opt-level=3` on generic x86-64, best of five rounds, on
+16-64-byte payloads:
+
+| Direction       | Rust vs C++ |
+|-----------------|-------------|
+| EBCDIC -> UTF-8 | 1.11x         |
+| UTF-8 -> EBCDIC | 1.16-1.22x    |
+
+The option is `LLVM_ENABLE_RUST_CONVERTEBCDIC` (default `OFF`). A local
+configure adds `llvm_convertebcdic` to `LLVM_SYSTEM_LIBS`; the standalone
+tests build without `LLVMSupport`, so no large LLVM target was rebuilt for the
+measurement.
+
 ## Risks and mitigations
 
 | Risk | Mitigation |
@@ -762,8 +799,8 @@ keeps every step of the migration reversible.
 ## Next steps
 
 1. Keep the SHA-NI dispatch as the default for SHA-1 and SHA-256. The Phase 1
-   candidate list (CRC, MD5, SHA-1, SHA-256, Base64, ConvertUTF, xxHash) is
-   complete. Phase 2 now covers the Rust and D demanglers; evaluate the
+   candidate list (CRC, MD5, SHA-1, SHA-256, Base64, ConvertUTF, ConvertEBCDIC,
+   xxHash) is complete. Phase 2 now covers the Rust and D demanglers; evaluate the
    Itanium and Microsoft demanglers next.
 2. Decide whether `-x86-fold-add-into-lea` should become default on targets
    where a three-operand LEA is cheap. That requires a CodeGen test suite and

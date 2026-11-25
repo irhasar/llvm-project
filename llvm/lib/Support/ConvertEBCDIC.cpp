@@ -15,6 +15,41 @@
 
 #include "llvm/Support/ConvertEBCDIC.h"
 
+#if defined(LLVM_RUST_CONVERTEBCDIC)
+#include "ConvertEBCDICFFI.h"
+
+namespace llvm::ConverterEBCDIC {
+std::error_code convertToEBCDIC(StringRef Source,
+                                SmallVectorImpl<char> &Result) {
+  assert(Result.empty() && "Result must be empty!");
+  Result.resize_for_overwrite(Source.size());
+  size_t ResultLen = 0;
+  int32_t Status = llvm_convertebcdic_to_ebcdic(
+      reinterpret_cast<const uint8_t *>(Source.data()), Source.size(),
+      reinterpret_cast<uint8_t *>(Result.data()), Result.size(), &ResultLen);
+  Result.resize(ResultLen);
+  if (Status == 0)
+    return {};
+  if (Status == 2)
+    return std::make_error_code(std::errc::invalid_argument);
+  return std::make_error_code(std::errc::illegal_byte_sequence);
+}
+
+void convertToUTF8(StringRef Source, SmallVectorImpl<char> &Result) {
+  assert(Result.empty() && "Result must be empty!");
+  Result.resize_for_overwrite(Source.size() * 2);
+  size_t ResultLen = 0;
+  int32_t Status = llvm_convertebcdic_to_utf8(
+      reinterpret_cast<const uint8_t *>(Source.data()), Source.size(),
+      reinterpret_cast<uint8_t *>(Result.data()), Result.size(), &ResultLen);
+  assert(Status == 0 && "Rust EBCDIC conversion ran out of output space");
+  (void)Status;
+  Result.resize(ResultLen);
+}
+} // namespace llvm::ConverterEBCDIC
+
+#else
+
 using namespace llvm;
 
 static const unsigned char ISO88591ToIBM1047[256] = {
@@ -121,3 +156,5 @@ void ConverterEBCDIC::convertToUTF8(StringRef Source,
     Result.push_back(static_cast<char>(Ch));
   }
 }
+
+#endif // LLVM_RUST_CONVERTEBCDIC

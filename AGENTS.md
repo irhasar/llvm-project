@@ -5,7 +5,7 @@ The migration itself is described in `MIGRATION_TO_RUST.md`; read that first.
 
 ## What this fork is
 
-- Shallow clone on branch `rust-migration-phase4` (`git rev-parse
+- Shallow clone on branch `rust-migration-phase6` (`git rev-parse
   --is-shallow-repository` returns `true`). History before the tip is absent.
 - The Rust migration of `lib/Support` components lives under
   `llvm/lib/Support/rust/<component>/`; demangler ports live under
@@ -36,8 +36,9 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON \
   -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON \
   -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON \
-  -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_XXHASH=ON \
-  -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON \
+  -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON \
+  -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON \
+  -DLLVM_ENABLE_RUST_DLANG=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
   -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_INCLUDE_TESTS=OFF \
@@ -46,7 +47,8 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_LIBEDIT=OFF
 
 ninja -C build LLVMSupport llvm-sha1-stable llvm-sha256-stable \
-  llvm-convertutf-stable llvm-rustdemangle-stable llvm-dlang-stable \
+  llvm-convertutf-stable llvm-convertebcdic-stable llvm-rustdemangle-stable \
+  llvm-dlang-stable \
   llvm-rust-rustdemangle-differential llvm-rust-dlang-differential llc
 ```
 

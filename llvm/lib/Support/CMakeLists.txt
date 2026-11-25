@@ -482,6 +482,57 @@ add_executable(llvm-convertutf-stable EXCLUDE_FROM_ALL
   rust/convertutf/test/stable.cpp)
 target_link_libraries(llvm-convertutf-stable PRIVATE LLVMSupport)
 
+# The standalone EBCDIC tests avoid linking LLVMSupport on 64-bit ELF by
+# providing the one SmallVector out-of-line symbol they can reach. Other
+# targets use the real support library.
+if(UNIX AND NOT APPLE AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(LLVM_EBCDIC_STANDALONE_SOURCES
+    rust/convertebcdic/test/SmallVectorStub.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/ConvertEBCDIC.cpp")
+  set(LLVM_EBCDIC_TEST_SUPPORT_LIBS)
+else()
+  set(LLVM_EBCDIC_STANDALONE_SOURCES)
+  set(LLVM_EBCDIC_TEST_SUPPORT_LIBS LLVMSupport)
+endif()
+
+if(LLVM_ENABLE_RUST_CONVERTEBCDIC)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_convertebcdic
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/convertebcdic/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_CONVERTEBCDIC)
+  target_link_libraries(LLVMSupport PRIVATE llvm_convertebcdic)
+
+  add_executable(llvm-rust-convertebcdic-differential EXCLUDE_FROM_ALL
+    rust/convertebcdic/test/differential.cpp
+    rust/convertebcdic/test/ConvertEBCDICCpp.cpp
+    ${LLVM_EBCDIC_STANDALONE_SOURCES})
+  target_compile_definitions(llvm-rust-convertebcdic-differential PRIVATE
+    LLVM_RUST_CONVERTEBCDIC)
+  target_include_directories(llvm-rust-convertebcdic-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-convertebcdic-differential PRIVATE
+    llvm_convertebcdic ${LLVM_EBCDIC_TEST_SUPPORT_LIBS})
+  add_custom_target(check-llvm-rust-convertebcdic
+    COMMAND llvm-rust-convertebcdic-differential
+    DEPENDS llvm-rust-convertebcdic-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-convertebcdic-stable EXCLUDE_FROM_ALL
+  rust/convertebcdic/test/stable.cpp
+  ${LLVM_EBCDIC_STANDALONE_SOURCES})
+target_include_directories(llvm-convertebcdic-stable PRIVATE
+  ${LLVM_MAIN_INCLUDE_DIR}
+  ${LLVM_BINARY_DIR}/include)
+target_link_libraries(llvm-convertebcdic-stable PRIVATE
+  ${LLVM_EBCDIC_TEST_SUPPORT_LIBS})
+if(LLVM_ENABLE_RUST_CONVERTEBCDIC)
+  target_compile_definitions(llvm-convertebcdic-stable PRIVATE
+    LLVM_RUST_CONVERTEBCDIC)
+  target_link_libraries(llvm-convertebcdic-stable PRIVATE llvm_convertebcdic)
+endif()
+
 if(LLVM_ENABLE_RUST_XXHASH)
   include(AddRustLibrary)
   add_llvm_rust_staticlib(llvm_xxhash
@@ -553,8 +604,8 @@ set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${llvm_system_libs}")
 
 # The Rust ports are static archives installed next to the other LLVM
 # libraries, so downstream links need them in llvm-config --system-libs.
-foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF XXHASH RUSTDEMANGLE
-                  DLANG)
+foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF CONVERTEBCDIC
+                  XXHASH RUSTDEMANGLE DLANG)
   if(LLVM_ENABLE_RUST_${rust_port})
     if(rust_port STREQUAL "DLANG")
       set(rust_port_lower "dlangdemangle")

@@ -16,6 +16,7 @@ on:
       - 'llvm/lib/Support/Base64.cpp'
       - 'llvm/lib/Support/ConvertUTF.cpp'
       - 'llvm/lib/Support/ConvertUTFWrapper.cpp'
+      - 'llvm/lib/Support/ConvertEBCDIC.cpp'
       - 'llvm/lib/Support/xxhash.cpp'
       - 'llvm/lib/Support/CMakeLists.txt'
       - 'llvm/lib/Demangle/**'
@@ -44,7 +45,7 @@ jobs:
           rustc --version
       - name: fmt, clippy and unit tests
         run: |
-          for crate in siphash crc md5 sha1 sha256 base64 convertutf xxhash; do
+          for crate in siphash crc md5 sha1 sha256 base64 convertutf convertebcdic xxhash; do
             echo "::group::$crate"
             (cd "llvm/lib/Support/rust/$crate" \
               && cargo fmt --check \
@@ -103,7 +104,7 @@ jobs:
         run: |
           RUST_FLAGS=""
           if [ "${{ matrix.backend }}" = "rust" ]; then
-            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON"
+            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON"
           fi
           cmake -G Ninja -S llvm -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -121,8 +122,8 @@ jobs:
         run: |
           ninja -C build llvm-siphash-stable-hash llvm-crc-stable llvm-md5-stable \
             llvm-sha1-stable llvm-sha256-stable llvm-base64-stable \
-            llvm-convertutf-stable llvm-xxhash-stable llvm-rustdemangle-stable \
-            llvm-dlang-stable
+            llvm-convertutf-stable llvm-convertebcdic-stable llvm-xxhash-stable \
+            llvm-rustdemangle-stable llvm-dlang-stable
           ./build/bin/llvm-siphash-stable-hash
           ./build/bin/llvm-crc-stable
           ./build/bin/llvm-md5-stable
@@ -130,6 +131,7 @@ jobs:
           ./build/bin/llvm-sha256-stable
           ./build/bin/llvm-base64-stable
           ./build/bin/llvm-convertutf-stable
+          ./build/bin/llvm-convertebcdic-stable
           ./build/bin/llvm-xxhash-stable
           ./build/bin/llvm-rustdemangle-stable
           ./build/bin/llvm-dlang-stable
