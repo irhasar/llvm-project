@@ -455,6 +455,32 @@ endif()
 add_executable(llvm-base64-stable EXCLUDE_FROM_ALL rust/base64/test/stable.cpp)
 target_link_libraries(llvm-base64-stable PRIVATE LLVMSupport)
 
+if(LLVM_ENABLE_RUST_CONVERTUTF)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_convertutf
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/convertutf/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_CONVERTUTF)
+  target_link_libraries(LLVMSupport PRIVATE llvm_convertutf)
+
+  add_executable(llvm-rust-convertutf-differential EXCLUDE_FROM_ALL
+    rust/convertutf/test/differential.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/ConvertUTF.cpp")
+  target_include_directories(llvm-rust-convertutf-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-convertutf-differential PRIVATE
+    llvm_convertutf)
+  add_custom_target(check-llvm-rust-convertutf
+    COMMAND llvm-rust-convertutf-differential
+    COMMAND llvm-convertutf-stable
+    DEPENDS llvm-rust-convertutf-differential llvm-convertutf-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-convertutf-stable EXCLUDE_FROM_ALL
+  rust/convertutf/test/stable.cpp)
+target_link_libraries(llvm-convertutf-stable PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport

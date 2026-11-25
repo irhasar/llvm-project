@@ -79,10 +79,11 @@ native configurations.
 
 Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
 `MD5.cpp` (`LLVM_ENABLE_RUST_MD5`), `SHA1.cpp` (`LLVM_ENABLE_RUST_SHA1`),
-`SHA256.cpp` (`LLVM_ENABLE_RUST_SHA256`) and `Base64.cpp`
-(`LLVM_ENABLE_RUST_BASE64`). Remaining candidate: `ConvertUTF.cpp`. Selection
-criteria: small, deterministic, byte-buffer in / byte-buffer out, no LLVM types
-in the interface, existing unit tests.
+`SHA256.cpp` (`LLVM_ENABLE_RUST_SHA256`), `Base64.cpp`
+(`LLVM_ENABLE_RUST_BASE64`) and `ConvertUTF.cpp`
+(`LLVM_ENABLE_RUST_CONVERTUTF`). Selection criteria: small, deterministic,
+byte-buffer in / byte-buffer out, no LLVM types in the interface, existing unit
+tests.
 
 `Base64` needed one structural concession: `encodeBase64` is a template in the
 public header, so its body cannot be swapped per translation unit without the
@@ -115,6 +116,7 @@ generic x86-64 target unless noted:
 | Base64 encode   | 1.6x at 48 B, 6.2x at 1 MiB                   |
 | Base64 decode   | 3.5x at 12 B, 5.0x at 1 MiB                   |
 | MD5             | 1.03x to 1.13x (LEA asm + BMI1/BMI2 path)     |
+| ConvertUTF      | 4.5x UTF-8 ASCII, 1.2-1.5x mixed; 12x `isLegalUTF8String` |
 
 MD5 initially lost to GCC at the generic target (0.83x). LLVM's reassociation
 moved the round constant to the end of `a + f + x + t`, leaving three register
@@ -494,6 +496,54 @@ that pin the carry-preserving INC case. It is opt-in
 because it changes shared x86 codegen and because the Rust ports no longer need
 it to win: the default SHA-NI path is 1.8-4.1x faster than the C++ baseline.
 
+
+## Sixth port: ConvertUTF
+
+Implementation: `llvm/lib/Support/rust/convertutf`, behind
+`LLVM_ENABLE_RUST_CONVERTUTF`. This is the first whole-file port rather than a
+single compression body. `ConvertUTF.cpp` keeps the public signatures and
+forwards all twelve exported entry points to `llvm_convertutf_*`; the static
+tables and the C++ fallback bodies are compiled only when the option is off, so
+the Rust build does not carry dead C++ code. `ConvertUTFWrapper.cpp` is
+unchanged and continues to call the same C++ API.
+
+The Rust code is a direct translation of the Unicode 6.3 rules, including the
+`sourceExhausted` / `targetExhausted` / `sourceIllegal` pointer positions and
+the maximal-subpart replacement used by `ConvertUTF8toUTF32` in lenient mode.
+On top of that it adds ASCII fast paths: `ConvertUTF8toUTF16` and
+`ConvertUTF8toUTF32` write ASCII directly, and the UTF-16/UTF-32 directions
+consume a leading ASCII run before entering the scalar loop. `isLegalUTF8String`
+scans ASCII eight bytes at a time, which matters for JSON and command-line
+parsing.
+
+`test/differential.cpp` compiles the original `ConvertUTF.cpp` (without the
+option define) next to the Rust archive and compares result codes, source and
+target offsets, and every output element for all target capacities, both
+conversion flags, valid and malformed UTF-8, UTF-16 with unpaired surrogates,
+and UTF-32 values above U+10FFFF. It also exhaustively compares the helper
+functions over every one- and two-byte sequence, every three-byte sequence
+starting with `E0`-`EF`, and a sampled set of four-byte sequences.
+`test/stable.cpp` is the golden test that runs against `LLVMSupport` with the
+option both on and off.
+
+Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`:
+
+| Conversion              | ASCII          | Mixed          |
+|-------------------------|----------------|----------------|
+| UTF-8 -> UTF-16         | 4.5x           | 1.2x           |
+| UTF-8 -> UTF-32         | 4.0x           | 1.5x           |
+| UTF-16 -> UTF-8         | 1.5x - 2.0x    | 1.05x          |
+| UTF-32 -> UTF-8         | 1.0x - 1.5x    | 1.0x - 1.1x    |
+| UTF-16 -> UTF-32        | 1.0x - 1.5x    | 1.0x - 1.2x    |
+| UTF-32 -> UTF-16        | 1.0x - 1.4x    | 0.7x - 1.1x    |
+| `isLegalUTF8String`     | 6x - 12x       | 2.5x           |
+
+The UTF-32 -> UTF-16 mixed case is the only one that occasionally trails the
+C++ loop (about 0.7x at 256 units, parity from 1 KiB and at 64 KiB); UTF-32
+input is rare in LLVM, and the ASCII and small-input cases are faster. The
+helper functions are bit-identical to the C++ implementation; the exhaustive
+check covers the `findMaximalSubpart` table directly.
+
 ## Risks and mitigations
 
 | Risk | Mitigation |
@@ -516,9 +566,9 @@ keeps every step of the migration reversible.
 
 ## Next steps
 
-1. Keep the SHA-NI dispatch as the default for SHA-1 and SHA-256. Port
-   `Base64.cpp` and `ConvertUTF.cpp` next; both are byte-buffer in/out and fit
-   the existing crate conventions.
+1. Keep the SHA-NI dispatch as the default for SHA-1 and SHA-256. The Phase 1
+   candidate list (CRC, MD5, SHA-1, SHA-256, Base64, ConvertUTF) is complete;
+   evaluate the Phase 2 demangler work next.
 2. Decide whether `-x86-fold-add-into-lea` should become default on targets
    where a three-operand LEA is cheap. That requires a CodeGen test suite and
    wider benchmarking; the peephole is opt-in until then.

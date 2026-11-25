@@ -678,6 +678,8 @@ option(LLVM_ENABLE_RUST_SHA256
   "Use the Rust implementation of SHA-256 in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_BASE64
   "Use the Rust implementation of Base64 in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_CONVERTUTF
+  "Use the Rust implementation of ConvertUTF in LLVM Support (experimental)" OFF)
 set(LLVM_RUST_FLAGS "" CACHE STRING
   "Extra flags passed to rustc via RUSTFLAGS when building Rust components")
 

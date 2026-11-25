@@ -35,6 +35,7 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON \
   -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON \
   -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON \
+  -DLLVM_ENABLE_RUST_CONVERTUTF=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
   -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_INCLUDE_TESTS=OFF \
@@ -42,7 +43,8 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_INCLUDE_EXAMPLES=OFF -DLLVM_ENABLE_BINDINGS=OFF \
   -DLLVM_ENABLE_LIBEDIT=OFF
 
-ninja -C build LLVMSupport llvm-sha1-stable llvm-sha256-stable llc
+ninja -C build LLVMSupport llvm-sha1-stable llvm-sha256-stable \
+  llvm-convertutf-stable llc
 ```
 
 Full LLVM builds are large; prefer building `LLVMSupport` and the specific
@@ -68,6 +70,13 @@ reassociates the constant to the end of the chain and loses the LEA) and a
 `#[target_feature(enable = "bmi1,bmi2")]` copy selected by CPUID. The generic
 copy is within 1% of `g++ -O3`; the BMI copy is 3-13% faster on Zen 4. Other
 architectures use the pure-Rust add grouping.
+
+ConvertUTF is the first whole-file port: every exported function in
+`ConvertUTF.cpp` forwards to `llvm_convertutf_*`, and the C++ static tables and
+fallback bodies are compiled only when the option is off. The public header and
+`ConvertUTFWrapper.cpp` are unchanged. Its differential test compiles the
+original `ConvertUTF.cpp` next to the Rust archive, so it needs the LLVM
+include directories and does not link `LLVMSupport`.
 
 Checks for a crate:
 
@@ -101,6 +110,10 @@ To prove a backend-neutral result, configure the option `OFF`, rebuild
   (add `-march=native` only when comparing native codegen on both sides).
   Base64 follows the same shape:
   `cd llvm/lib/Support/rust/base64 && cargo build --release --locked && g++ -O3 -std=c++17 test/differential.cpp -Ltarget/release -lllvm_base64 -o /tmp/base64-diff && /tmp/base64-diff`.
+  ConvertUTF compiles the C++ reference as a second translation unit:
+  `cd llvm/lib/Support/rust/convertutf && cargo build --release --locked && g++ -O3 -std=c++17 -I ../../../../include -I <build>/include test/differential.cpp ../../../ConvertUTF.cpp -Ltarget/release -lllvm_convertutf -o /tmp/convertutf-diff && /tmp/convertutf-diff`.
+  Add `-DLLVM_RUST_CONVERTUTF` to exercise the C++ shim instead of the
+  reference bodies.
 - `-C target-cpu=native` is exposed through `LLVM_RUST_FLAGS`; it is not a
   safe default for redistributed binaries.
 
