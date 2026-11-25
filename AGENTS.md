@@ -205,6 +205,11 @@ Every C++/Rust comparison must measure both sides, not only throughput:
 - Use the same optimization level (`g++ -O3` against `-C opt-level=3`), input
   corpus, CPU affinity, and warmup. Report at least five repetitions as median
   and min-max. Never compare `-O2` C++ with `-O3` Rust.
+- Toolchain caveat: `cargo build` invokes the installed `rustc`, which uses its
+  own bundled LLVM (currently 23.1.6), not the LLVM built from this repository.
+  The C++ reference is built by GCC 14.2. The repository's LLVM is used by
+  `llc` only in the explicit IR/backend experiments. Do not describe these as
+  same-LLVM codegen comparisons.
 - Separate process-level CPU/RSS from per-operation timings. Isolate a backend
   with `--no-checks --bench-backend=cpp|rust` before comparing resources.
 - `llvm/utils/rust-migration/bench_metrics.py` measures wall time, user/system

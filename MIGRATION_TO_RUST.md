@@ -127,6 +127,11 @@ backends with the same optimization level and corpus:
   median/min-max. A large static Rust archive is reported separately from the
   linked binary because linker garbage collection removes most unused archive
   members.
+- Toolchain caveat: `cargo build` uses the installed `rustc`'s bundled LLVM
+  (currently 23.1.6), not the LLVM built from this repository. The C++ side is
+  GCC 14.2. The repository's LLVM processes Rust-emitted IR only in the
+  explicit `llc` experiments. The comparison is cross-compiler, not same-LLVM
+  codegen.
 
 `llvm/utils/rust-migration/bench_metrics.py` measures a command with `wait4`:
 
