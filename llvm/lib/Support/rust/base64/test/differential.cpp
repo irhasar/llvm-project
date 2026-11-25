@@ -212,6 +212,21 @@ DecodeResult RustDecodePublic(const char *Input, size_t InputLength) {
   R.BadIndex = BadIndex;
   if (Rc != 0) {
     R.S = Rc == 1 ? LengthError : BadChar;
+    if (Rc == 2) {
+      const size_t GoodBlocks = BadIndex / 4;
+      const size_t PartialLen = GoodBlocks * 3;
+      if (PartialLen != 0) {
+        R.Output.resize(PartialLen);
+        size_t OutLen = 0;
+        int DecodeRc = llvm_base64_decode_valid_rust(
+            reinterpret_cast<const uint8_t *>(Input), GoodBlocks * 4,
+            R.Output.data(), &OutLen);
+        if (DecodeRc != 0 || OutLen != PartialLen) {
+          R.Output.clear();
+          R.S = BadChar;
+        }
+      }
+    }
     return R;
   }
   R.Output.resize(DecodedLen);
@@ -305,6 +320,12 @@ double BenchDecode(bool Rust, bool Public, const std::vector<char> &Encoded,
                     .count();
     Best = std::min(Best, Ns / double(Iters));
   }
+  DecodeResult Expected = ReferenceDecode(Encoded.data(), Encoded.size());
+  DecodeResult Check =
+      !Rust ? Expected
+            : Public ? RustDecodePublic(Encoded.data(), Encoded.size())
+                     : RustDecode(Encoded.data(), Encoded.size());
+  SameResult(Expected, Check, Encoded.size());
   return Best;
 }
 
@@ -343,12 +364,14 @@ int main() {
     }
     DecodeResult RefDec = ReferenceDecode(V.Encoded, EncLen);
     DecodeResult RustDec = RustDecode(V.Encoded, EncLen);
-    if (!SameResult(RefDec, RustDec, EncLen))
+    DecodeResult RustPub = RustDecodePublic(V.Encoded, EncLen);
+    if (!SameResult(RefDec, RustDec, EncLen) ||
+        !SameResult(RefDec, RustPub, EncLen))
       continue;
-    if (RustDec.Output.size() != PlainLen ||
+    if (RustPub.Output.size() != PlainLen ||
         (PlainLen != 0 &&
-         std::memcmp(RustDec.Output.data(), V.Plain, PlainLen) != 0))
-      Fail("rfc4648 decode", PlainLen);
+         std::memcmp(RustPub.Output.data(), V.Plain, PlainLen) != 0))
+      Fail("rfc4648 public decode", PlainLen);
   }
 
   // Encode: every length through 1024, plus larger powers of two.
@@ -369,12 +392,13 @@ int main() {
     std::string Enc = ReferenceEncode(Data.data(), Len);
     DecodeResult Ref = ReferenceDecode(Enc.data(), Enc.size());
     DecodeResult Rust = RustDecode(Enc.data(), Enc.size());
-    if (!SameResult(Ref, Rust, Len))
+    DecodeResult RustPub = RustDecodePublic(Enc.data(), Enc.size());
+    if (!SameResult(Ref, Rust, Len) || !SameResult(Ref, RustPub, Len))
       continue;
-    if (Rust.Output.size() != Len ||
+    if (RustPub.Output.size() != Len ||
         (Len != 0 &&
-         std::memcmp(Rust.Output.data(), Data.data(), Len) != 0))
-      Fail("decode roundtrip", Len);
+         std::memcmp(RustPub.Output.data(), Data.data(), Len) != 0))
+      Fail("public decode roundtrip", Len);
   }
 
   // Invalid input: every byte value in every position of a four-character
@@ -386,7 +410,9 @@ int main() {
         Input[Pos] = static_cast<char>(Byte);
         DecodeResult Ref = ReferenceDecode(Input.data(), Input.size());
         DecodeResult Rust = RustDecode(Input.data(), Input.size());
+        DecodeResult RustPub = RustDecodePublic(Input.data(), Input.size());
         SameResult(Ref, Rust, Input.size());
+        SameResult(Ref, RustPub, Input.size());
       }
     }
   }
@@ -407,7 +433,9 @@ int main() {
     }
     DecodeResult Ref = ReferenceDecode(Input.data(), Input.size());
     DecodeResult Rust = RustDecode(Input.data(), Input.size());
+    DecodeResult RustPub = RustDecodePublic(Input.data(), Input.size());
     SameResult(Ref, Rust, Input.size());
+    SameResult(Ref, RustPub, Input.size());
   }
 
   if (Failures)
@@ -478,6 +506,8 @@ int main() {
     std::printf("%10.0f", Lengths[I] / RustDec[I] * 1e3);
   std::printf("\n");
 
+  if (Failures)
+    return 1;
   std::printf("\nOK: Rust Base64 is bit-identical to the C++ reference\n");
   return 0;
 }
