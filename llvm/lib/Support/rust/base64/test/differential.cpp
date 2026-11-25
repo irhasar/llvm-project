@@ -1,5 +1,9 @@
 //===-- differential.cpp - Differential test for the Rust Base64 ---------===//
 //
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
 // Compares the Rust encoder/decoder against the C++ implementation that LLVM
 // ships today: the encodeBase64 template from llvm/Support/Base64.h and the
 // decodeBase64 loop from llvm/lib/Support/Base64.cpp. Both references are

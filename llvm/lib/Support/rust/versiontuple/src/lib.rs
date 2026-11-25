@@ -7,7 +7,6 @@
 //===----------------------------------------------------------------------===//
 
 #![cfg_attr(not(test), no_std)]
-#![allow(clippy::missing_safety_doc)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 #[cfg(not(test))]
@@ -71,6 +70,12 @@ fn take_dot(input: &[u8], pos: &mut usize) -> bool {
     false
 }
 
+/// Parses a version tuple into `out`.
+///
+/// # Safety
+///
+/// `data` must be readable for `len` bytes and may be null when `len` is zero.
+/// `out` must be a valid, writable pointer to a `ParsedVersion`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_versiontuple_try_parse(
     data: *const u8,

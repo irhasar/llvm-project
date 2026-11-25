@@ -1,5 +1,9 @@
 //===-- stable.cpp - Golden values for llvm::crc32 and JamCRC --------------===//
 //
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
 // Built against LLVMSupport with either backend. With --emit it prints the
 // initializer list, which is how the constants below are produced; without it
 // the test checks the values.

@@ -12,7 +12,6 @@
 //===----------------------------------------------------------------------===//
 
 #![cfg_attr(not(test), no_std)]
-#![allow(clippy::missing_safety_doc)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 #[cfg(not(test))]
@@ -281,6 +280,11 @@ fn djb_hash(bytes: &[u8], mut h: u32) -> u32 {
     h
 }
 
+/// Computes the DJB case-folding hash of `len` bytes.
+///
+/// # Safety
+///
+/// `data` must be readable for `len` bytes and may be null when `len` is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_djb_case_folding_hash(data: *const u8, len: usize, h: u32) -> u32 {
     let input = if len == 0 {

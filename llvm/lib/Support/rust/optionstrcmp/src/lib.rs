@@ -7,7 +7,6 @@
 //===----------------------------------------------------------------------===//
 
 #![cfg_attr(not(test), no_std)]
-#![allow(clippy::missing_safety_doc)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 #[cfg(not(test))]
@@ -43,6 +42,12 @@ fn compare_bytes(a: &[u8], b: &[u8]) -> i32 {
     0
 }
 
+/// Compares two option names.
+///
+/// # Safety
+///
+/// `a` must be readable for `a_len` bytes and `b` for `b_len` bytes. Either
+/// pointer may be null when its length is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_optionstrcmp_name(
     a: *const u8,

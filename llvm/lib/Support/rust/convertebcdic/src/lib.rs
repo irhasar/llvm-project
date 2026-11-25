@@ -15,7 +15,6 @@
 //===----------------------------------------------------------------------===//
 
 #![cfg_attr(not(test), no_std)]
-#![allow(clippy::missing_safety_doc)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 #[cfg(not(test))]
@@ -183,6 +182,13 @@ unsafe fn to_utf8(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32,
     (OK, written)
 }
 
+/// Converts ISO-8859-1 input to EBCDIC-1047.
+///
+/// # Safety
+///
+/// `src` must be readable for `len` bytes and may be null when `len` is zero.
+/// `dst` must be writable for `cap` bytes and may be null when `cap` is zero.
+/// `out_len` must be a valid, writable pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertebcdic_to_ebcdic(
     src: *const u8,
@@ -196,6 +202,13 @@ pub unsafe extern "C" fn llvm_convertebcdic_to_ebcdic(
     status
 }
 
+/// Converts EBCDIC-1047 input to UTF-8.
+///
+/// # Safety
+///
+/// `src` must be readable for `len` bytes and may be null when `len` is zero.
+/// `dst` must be writable for `cap` bytes and may be null when `cap` is zero.
+/// `out_len` must be a valid, writable pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertebcdic_to_utf8(
     src: *const u8,

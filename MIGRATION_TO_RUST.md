@@ -59,9 +59,10 @@ Non-goals (for now):
 Crates live next to the component they replace
 (`llvm/lib/<Component>/rust/<crate>/`), and their `Cargo.lock` is committed.
 All crates use edition 2024 (`rust-version = "1.85"`) with `no_std`,
-`panic = "abort"`, LTO and one codegen unit. `rust-toolchain.toml` pins the
-latest nightly (tested with `rustc 1.102.0-nightly`); the crates still build on
-stable Rust 1.85 and newer.
+`panic = "abort"`, LTO and one codegen unit. `rust-toolchain.toml` pins stable
+Rust 1.100.0. CI runs the crate tests, clippy, and rustfmt with both 1.100.0
+and `nightly-2026-11-23`, so nightly compatibility stays visible without making
+nightly the default.
 Each component is gated behind its own `LLVM_ENABLE_RUST_<COMPONENT>` option,
 defaulting to `OFF`.
 
@@ -995,7 +996,8 @@ keeps every step of the migration reversible.
 4. Extend `AddRustLibrary.cmake` with a `--target` mapping for cross builds.
    Runtime dispatch inside the crates already keeps the produced archives
    usable across x86-64 feature levels.
-5. Keep `rust-toolchain.toml` on a pinned nightly and the CI legs in
+5. Keep `rust-toolchain.toml` on stable 1.100.0 and exercise
+   `nightly-2026-11-23` as an explicit compatibility leg. Keep the CI legs in
    `.github/workflows/rust-support.yml` (lint, C++/Rust golden tests,
    differential checks, and the `codegen-lea` llc job).
 6. Keep installing enabled Rust archives as companions and listing them in

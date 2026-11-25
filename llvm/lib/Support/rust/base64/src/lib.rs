@@ -24,9 +24,6 @@
 //===----------------------------------------------------------------------===//
 
 #![cfg_attr(not(test), no_std)]
-// The extern "C" entry points document their pointer contracts in the C
-// headers; repeating them as Rust `# Safety` sections would be redundant.
-#![allow(clippy::missing_safety_doc)]
 
 #[cfg(not(test))]
 #[panic_handler]
@@ -172,8 +169,14 @@ mod ssse3 {
     }
 }
 
-/// Encodes `len` bytes from `src` into `dst`. `dst` must have room for
-/// `(len + 2) / 3 * 4` bytes. Returns the number of bytes written.
+/// Encodes `len` bytes from `src` into `dst`. Returns the number of bytes
+/// written.
+///
+/// # Safety
+///
+/// `src` must be readable for `len` bytes and may be null when `len` is zero.
+/// `dst` must be writable for `(len + 2) / 3 * 4` bytes and may be null when
+/// `len` is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_base64_encode_rust(
     src: *const u8,
@@ -201,13 +204,18 @@ pub unsafe extern "C" fn llvm_base64_encode_rust(
     len.div_ceil(3) * 4
 }
 
-/// Decodes `len` bytes from `src` into `dst`. `len` must be a multiple of 4
-/// and `dst` must have room for `len / 4 * 3` bytes.
+/// Decodes `len` bytes from `src` into `dst`.
 ///
 /// Returns 0 on success, 1 if `len` is not a multiple of 4, and 2 for an
 /// invalid character. In both error cases `*out_len` is the number of bytes
 /// written before the error and `*bad_index` identifies the offending byte,
 /// matching the partially filled vector the C++ decoder leaves behind.
+///
+/// # Safety
+///
+/// `src` must be readable for `len` bytes and may be null when `len` is zero.
+/// `dst` must be writable for `len / 4 * 3` bytes and may be null when `len`
+/// is zero. `out_len` and `bad_index` must be valid, writable pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_base64_decode_rust(
     src: *const u8,
@@ -286,6 +294,11 @@ pub unsafe extern "C" fn llvm_base64_decode_rust(
 /// Validates a Base64 string without writing output. Returns 0 on success and
 /// stores the decoded length in `out_len`; returns 1 if `len` is not a
 /// multiple of 4, or 2 for an invalid character (stored in `bad_index`).
+///
+/// # Safety
+///
+/// `src` must be readable for `len` bytes and may be null when `len` is zero.
+/// `out_len` and `bad_index` must be valid, writable pointers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_base64_validate_rust(
     src: *const u8,
@@ -355,6 +368,12 @@ pub unsafe extern "C" fn llvm_base64_validate_rust(
 
 /// Decodes a Base64 string that `llvm_base64_validate_rust` has accepted.
 /// Writes exactly the decoded length, including the short final chunk.
+///
+/// # Safety
+///
+/// `src` must be readable for `len` bytes and may be null when `len` is zero.
+/// `dst` must be writable for `len / 4 * 3` bytes and may be null when `len`
+/// is zero. `out_len` must be a valid, writable pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_base64_decode_valid_rust(
     src: *const u8,

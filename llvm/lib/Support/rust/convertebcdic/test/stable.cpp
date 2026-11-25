@@ -1,5 +1,9 @@
 //===-- stable.cpp - Golden tests for EBCDIC conversion ------------------===//
 //
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
 // Exercises the public ConverterEBCDIC API. Built with the Rust backend when
 // LLVM_ENABLE_RUST_CONVERTEBCDIC is enabled and with the C++ backend otherwise.
 //

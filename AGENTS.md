@@ -5,7 +5,7 @@ The migration itself is described in `MIGRATION_TO_RUST.md`; read that first.
 
 ## What this fork is
 
-- Shallow clone on branch `rust-migration-phase5` (`git rev-parse
+- Shallow clone on the current Rust migration branch (`git rev-parse
   --is-shallow-repository` returns `true`). History before the tip is absent.
 - The Rust migration of `lib/Support` components lives under
   `llvm/lib/Support/rust/<component>/`; demangler ports live under
@@ -17,6 +17,9 @@ The migration itself is described in `MIGRATION_TO_RUST.md`; read that first.
 ## Toolchain in this container
 
 - `rustc`/`cargo` 1.100.0 (stable), edition 2024 crates (`rust-version = "1.85"`).
+  `rust-toolchain.toml` pins that stable release; CI also runs the crates with
+  `nightly-2026-11-23` for compatibility. Use `cargo +nightly-2026-11-23` for
+  the nightly leg; nightly is not required by the default build.
 - `cmake` 4.4.5 and `ninja` 1.13 are installed in `~/.local/bin`.
 - GCC 14.2 at `/usr/bin/g++`. Host CPU: AMD EPYC 9B14 (Zen 4) with SHA-NI.
 

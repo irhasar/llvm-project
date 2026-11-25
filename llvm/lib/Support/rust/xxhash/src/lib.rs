@@ -53,7 +53,6 @@
 // b0adcc54188c3130b1793e7b19c62eb1e669f7df (June 2024).
 
 #![cfg_attr(not(test), no_std)]
-#![allow(clippy::missing_safety_doc)]
 // The raw-pointer helpers are unsafe by contract; keep their bodies readable.
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -1121,11 +1120,22 @@ pub(crate) fn xxh3_128bits(input: *const u8, len: usize) -> Hash128 {
     xxh3_hash_long_128b(input, len, secret, XXH_SECRET_DEFAULT_SIZE)
 }
 
+/// Computes the XXH3 64-bit hash of `len` bytes.
+///
+/// # Safety
+///
+/// `data` must be readable for `len` bytes and may be null when `len` is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_xxhash_xxh3_64bits(data: *const u8, len: usize) -> u64 {
     xxh3_64bits(data, len)
 }
 
+/// Computes the XXH3 128-bit hash and writes it as two `u64` values.
+///
+/// # Safety
+///
+/// `data` must be readable for `len` bytes and may be null when `len` is zero.
+/// `out` must be writable for two `u64` values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_xxhash_xxh3_128bits(data: *const u8, len: usize, out: *mut u64) {
     let h = xxh3_128bits(data, len);
@@ -1133,11 +1143,22 @@ pub unsafe extern "C" fn llvm_xxhash_xxh3_128bits(data: *const u8, len: usize, o
     *out.add(1) = h.high;
 }
 
+/// Computes the scalar XXH3 64-bit hash of `len` bytes.
+///
+/// # Safety
+///
+/// `data` must be readable for `len` bytes and may be null when `len` is zero.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_xxhash_xxh3_64bits_scalar(data: *const u8, len: usize) -> u64 {
     xxh3_64bits_scalar(data, len)
 }
 
+/// Computes the scalar XXH3 128-bit hash and writes it as two `u64` values.
+///
+/// # Safety
+///
+/// `data` must be readable for `len` bytes and may be null when `len` is zero.
+/// `out` must be writable for two `u64` values.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_xxhash_xxh3_128bits_scalar(
     data: *const u8,

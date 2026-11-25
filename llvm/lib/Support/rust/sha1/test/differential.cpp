@@ -1,5 +1,9 @@
 //===-- differential.cpp - Differential test for the Rust SHA-1 -----------===//
 //
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
 // Compares the Rust one-shot SHA-1 against the C++ compression function LLVM
 // ships (copied verbatim below) and reports throughput for both.
 //
