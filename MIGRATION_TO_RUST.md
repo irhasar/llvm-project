@@ -171,8 +171,8 @@ differential test.
 
 Correctness coverage:
 
-* `cargo test` runs four golden groups, including a punycode identifier and a
-  `.llvm.<hash>` suffix.
+* `cargo test` runs four golden groups, a suffix-dot scan test, a punycode
+  identifier, and a `.llvm.<hash>` suffix.
 * `llvm-rust-rustdemangle-differential` demangles 205 real `libstd` symbols
   extracted from the toolchain's `libstd-*.rlib`, then 50,000 random byte
   strings and 50,000 mutations of the corpus. Both backends must agree on
@@ -181,29 +181,34 @@ Correctness coverage:
   option on and off, so the C++ and Rust backends are checked against identical
   expected values.
 
-The corpus and the differential test are the performance harness. The main
-optimization was replacing the branchy ASCII classification in identifier and
-number parsing with three 256-byte lookup tables (`CHAR_CLASS`,
-`BASE62_DIGITS`, `HEX_DIGITS`); this removed enough branches to move the port
-from slightly slower to consistently faster. Output growth keeps the C++
-`OutputBuffer` hysteresis and reserves the terminator only once at the end, so
-the parser pays one capacity compare per append instead of a growth check.
+The corpus and the differential test are the performance harness. Three
+changes moved the port from slightly slower to consistently faster:
+
+* Branchy ASCII classification in identifier and number parsing became three
+  256-byte lookup tables (`CHAR_CLASS`, `BASE62_DIGITS`, `HEX_DIGITS`).
+* The `.<suffix>` scan uses an eight-byte-at-a-time match instead of a byte
+  loop, matching what `std::string_view::find` gets from `memchr`. On short
+  symbols this scan was the largest remaining cost.
+* Short inputs (at most 64 bytes) start with a 32-byte output buffer; the C++
+  `OutputBuffer` hysteresis is kept once the buffer reaches 1 KiB.
+
+Output growth reserves the terminator only once at the end, so the parser pays
+one capacity compare per append instead of a growth check.
 
 Measured on this Zen 4 host with `g++ -O3` against `-C opt-level=3`, generic
 x86-64 on both sides:
 
 | Corpus                         | Full string path | Pointer API |
 |--------------------------------|------------------|-------------|
-| 205 real `libstd` symbols      | 1.02x - 1.06x    | 1.05x - 1.08x |
-| 50 shortest symbols            | 1.08x - 1.09x    | 0.98x       |
-| 50 longest symbols             | 1.09x - 1.10x    | 1.07x - 1.11x |
+| 205 real `libstd` symbols      | 1.15x - 1.17x    | 1.14x - 1.17x |
+| 50 shortest symbols            | 1.07x - 1.08x    | 1.10x       |
+| 50 longest symbols             | 1.14x - 1.16x    | 1.16x - 1.18x |
 
 Each row is the best of five rounds, alternating the two backends, to keep CPU
 frequency drift out of the comparison. The pointer-API column times
 `llvm::rustDemangle` without constructing a `std::string`; the full path times
-the same call plus the caller's string copy. The shortest-symbol pointer API is
-2% below parity, inside the 5% gate; every other row is faster. Overall the port
-is faster, not merely at parity.
+the same call plus the caller's string copy. Every row is faster, including the
+short-symbol pointer API.
 
 A local configure with only `LLVM_ENABLE_RUST_RUSTDEMANGLE=ON` produced
 `LLVM_SYSTEM_LIBS = "-lrt -ldl -lm -lllvm_rustdemangle"`. The

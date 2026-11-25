@@ -97,13 +97,23 @@ struct Out {
 }
 
 impl Out {
-    fn new() -> Self {
-        Self {
+    fn new(initial_cap: usize) -> Self {
+        let mut out = Self {
             buf: core::ptr::null_mut(),
             cap: 0,
             len: 0,
             failed: false,
+        };
+        if initial_cap != 0 {
+            let buf = unsafe { realloc(core::ptr::null_mut(), initial_cap) };
+            if buf.is_null() {
+                out.failed = true;
+            } else {
+                out.buf = buf.cast();
+                out.cap = initial_cap;
+            }
         }
+        out
     }
 
     #[inline(always)]
@@ -131,11 +141,15 @@ impl Out {
         } else {
             self.cap.saturating_mul(2)
         };
-        // Match OutputBuffer's hysteresis so long outputs do not reallocate at
-        // every doubling boundary.
-        let hysteretic = need.saturating_add(992);
-        if new_cap < hysteretic {
-            new_cap = hysteretic;
+        if self.cap >= 1024 {
+            // Match OutputBuffer's hysteresis so long outputs do not
+            // reallocate at every doubling boundary.
+            let hysteretic = need.saturating_add(992);
+            if new_cap < hysteretic {
+                new_cap = hysteretic;
+            }
+        } else if new_cap < need {
+            new_cap = need;
         }
         let new_buf = unsafe { realloc(self.buf.cast(), new_cap) };
         if new_buf.is_null() {
@@ -224,6 +238,36 @@ impl Out {
     }
 }
 
+// std::string_view::find uses memchr; a byte-at-a-time scan was a measurable
+// share of short-symbol parsing.
+#[inline]
+fn find_dot(bytes: &[u8]) -> Option<usize> {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    const DOTS: u64 = b'.' as u64 * ONES;
+
+    let mut index = 0;
+    while index + 8 <= bytes.len() {
+        let word = unsafe { core::ptr::read_unaligned(bytes.as_ptr().add(index).cast::<u64>()) };
+        let masked = word ^ DOTS;
+        if (masked.wrapping_sub(ONES) & !masked & HIGHS) != 0 {
+            for offset in 0..8 {
+                if bytes[index + offset] == b'.' {
+                    return Some(index + offset);
+                }
+            }
+        }
+        index += 8;
+    }
+    while index < bytes.len() {
+        if bytes[index] == b'.' {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
+}
+
 struct Demangler<'a> {
     max_recursion_level: usize,
     recursion_level: usize,
@@ -268,7 +312,7 @@ impl<'a> Demangler<'a> {
         }
 
         let rest = &mangled[2..];
-        let dot = rest.iter().position(|&byte| byte == b'.');
+        let dot = find_dot(rest);
         let (input, suffix) = match dot {
             Some(index) => (&rest[..index], Some(&rest[index..])),
             None => (rest, None),
@@ -948,7 +992,7 @@ impl<'a> Demangler<'a> {
         if self.error || self.position >= self.input.len() {
             0
         } else {
-            self.input[self.position]
+            unsafe { *self.input.get_unchecked(self.position) }
         }
     }
 
@@ -958,14 +1002,17 @@ impl<'a> Demangler<'a> {
             self.fail();
             return 0;
         }
-        let byte = self.input[self.position];
+        let byte = unsafe { *self.input.get_unchecked(self.position) };
         self.position += 1;
         byte
     }
 
     #[inline(always)]
     fn consume_if(&mut self, prefix: u8) -> bool {
-        if self.error || self.position >= self.input.len() || self.input[self.position] != prefix {
+        if self.error
+            || self.position >= self.input.len()
+            || unsafe { *self.input.get_unchecked(self.position) } != prefix
+        {
             return false;
         }
         self.position += 1;
@@ -1290,7 +1337,8 @@ pub unsafe extern "C" fn llvm_rustdemangle_demangle(
     } else {
         core::slice::from_raw_parts(input, input_len)
     };
-    let mut demangler = Demangler::new(Out::new());
+    let initial_cap = if input_len <= 64 { 32 } else { 1024 };
+    let mut demangler = Demangler::new(Out::new(initial_cap));
     if !demangler.demangle(input) || demangler.out.failed {
         if !demangler.out.buf.is_null() {
             free(demangler.out.buf.cast());
@@ -1363,6 +1411,16 @@ mod tests {
         for (input, expected) in cases {
             let output = demangle(input).expect("demangles");
             assert_eq!(&output, expected);
+        }
+    }
+
+    #[test]
+    fn finds_suffix_dot_at_any_offset() {
+        for offset in 0..32 {
+            let mut bytes = vec![b'a'; offset];
+            bytes.push(b'.');
+            bytes.extend_from_slice(b"llvm.1");
+            assert_eq!(find_dot(&bytes), Some(offset));
         }
     }
 

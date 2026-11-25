@@ -194,26 +194,24 @@ static double measureApi(bool Rust, const std::vector<std::string> &Corpus,
   return Seconds * 1e9 / (static_cast<double>(Iterations) * Corpus.size());
 }
 
-static double bestMeasure(bool Rust, const std::vector<std::string> &Corpus,
-                          unsigned Iterations, unsigned Rounds) {
-  double Best = 1e300;
+static void benchmarkPair(bool Api, const std::vector<std::string> &Corpus,
+                          unsigned Iterations, unsigned Rounds,
+                          const char *Label) {
+  double BestCpp = 1e300;
+  double BestRust = 1e300;
   for (unsigned I = 0; I != Rounds; ++I) {
-    double Value = measure(Rust, Corpus, Iterations);
-    if (Value < Best)
-      Best = Value;
+    // Alternate the backends so CPU frequency drift cannot favour either one.
+    double Cpp = Api ? measureApi(false, Corpus, Iterations)
+                     : measure(false, Corpus, Iterations);
+    double Rust = Api ? measureApi(true, Corpus, Iterations)
+                      : measure(true, Corpus, Iterations);
+    if (Cpp < BestCpp)
+      BestCpp = Cpp;
+    if (Rust < BestRust)
+      BestRust = Rust;
   }
-  return Best;
-}
-
-static double bestMeasureApi(bool Rust, const std::vector<std::string> &Corpus,
-                             unsigned Iterations, unsigned Rounds) {
-  double Best = 1e300;
-  for (unsigned I = 0; I != Rounds; ++I) {
-    double Value = measureApi(Rust, Corpus, Iterations);
-    if (Value < Best)
-      Best = Value;
-  }
-  return Best;
+  std::printf("%s: c++ %.1f ns/symbol, rust %.1f ns/symbol, speedup %.2fx\n",
+              Label, BestCpp, BestRust, BestCpp / BestRust);
 }
 
 static bool loadCorpus(const char *Path, std::vector<std::string> &Corpus) {
@@ -271,15 +269,8 @@ int main(int argc, char **argv) {
   if (Benchmark) {
     unsigned Iterations = 20000;
     constexpr unsigned Rounds = 5;
-    double ReferenceNS = bestMeasure(false, Corpus, Iterations, Rounds);
-    double RustNS = bestMeasure(true, Corpus, Iterations, Rounds);
-    double ApiCppNS = bestMeasureApi(false, Corpus, Iterations, Rounds);
-    double ApiRustNS = bestMeasureApi(true, Corpus, Iterations, Rounds);
-    std::printf("benchmark: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
-                "speedup %.2fx\n",
-                ReferenceNS, RustNS, ReferenceNS / RustNS);
-    std::printf("api: c++ %.1f ns/symbol, rust %.1f ns/symbol, speedup %.2fx\n",
-                ApiCppNS, ApiRustNS, ApiCppNS / ApiRustNS);
+    benchmarkPair(false, Corpus, Iterations, Rounds, "benchmark");
+    benchmarkPair(true, Corpus, Iterations, Rounds, "api");
   }
 
   if (Failures != 0) {
