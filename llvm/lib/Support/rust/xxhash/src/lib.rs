@@ -1212,7 +1212,7 @@ mod tests {
 
     fn check_backend_matches_scalar() {
         let data: Vec<u8> = (0..4096).map(|i| (i * 37 + 11) as u8).collect();
-        for &len in &[241usize, 242, 255, 256, 511, 512, 768, 1024, 2048, 4096] {
+        for len in 241..=data.len() {
             let scalar64 = xxh3_64bits_scalar(data.as_ptr(), len);
             let dispatched64 = xxh3_64bits(data.as_ptr(), len);
             assert_eq!(scalar64, dispatched64, "64-bit length {}", len);
