@@ -553,9 +553,14 @@ set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${llvm_system_libs}")
 
 # The Rust ports are static archives installed next to the other LLVM
 # libraries, so downstream links need them in llvm-config --system-libs.
-foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF XXHASH RUSTDEMANGLE)
+foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF XXHASH RUSTDEMANGLE
+                  DLANG)
   if(LLVM_ENABLE_RUST_${rust_port})
-    string(TOLOWER ${rust_port} rust_port_lower)
+    if(rust_port STREQUAL "DLANG")
+      set(rust_port_lower "dlangdemangle")
+    else()
+      string(TOLOWER ${rust_port} rust_port_lower)
+    endif()
     set_property(TARGET LLVMSupport APPEND PROPERTY LLVM_SYSTEM_LIBS
                  "llvm_${rust_port_lower}")
   endif()

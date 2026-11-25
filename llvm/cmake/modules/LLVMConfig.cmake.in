@@ -63,6 +63,7 @@ endif()
 set(LLVM_ENABLE_RTTI @LLVM_ENABLE_RTTI@)
 
 set(LLVM_ENABLE_RUST_RUSTDEMANGLE @LLVM_ENABLE_RUST_RUSTDEMANGLE@)
+set(LLVM_ENABLE_RUST_DLANG @LLVM_ENABLE_RUST_DLANG@)
 
 set(LLVM_ENABLE_LIBEDIT @HAVE_LIBEDIT@)
 if(LLVM_ENABLE_LIBEDIT)
@@ -172,6 +173,40 @@ if(LLVM_ENABLE_RUST_RUSTDEMANGLE AND NOT TARGET llvm_rustdemangle)
   endif()
   unset(_llvm_rustdemangle_location)
   unset(_llvm_rustdemangle_locations)
+endif()
+
+if(LLVM_ENABLE_RUST_DLANG AND NOT TARGET llvm_dlangdemangle)
+  add_library(llvm_dlangdemangle STATIC IMPORTED GLOBAL)
+  set(_llvm_dlangdemangle_location
+    "@LLVM_CONFIG_DLANG_IMPORTED_LOCATION@")
+  if(_llvm_dlangdemangle_location)
+    set_target_properties(llvm_dlangdemangle PROPERTIES
+      IMPORTED_LOCATION "${_llvm_dlangdemangle_location}")
+  endif()
+  set(_llvm_dlangdemangle_locations
+    "@LLVM_CONFIG_DLANG_IMPORTED_LOCATIONS@")
+  foreach(_llvm_dlangdemangle_entry IN LISTS _llvm_dlangdemangle_locations)
+    string(FIND "${_llvm_dlangdemangle_entry}" "=" _llvm_dlangdemangle_sep)
+    if(_llvm_dlangdemangle_sep EQUAL -1)
+      continue()
+    endif()
+    string(SUBSTRING "${_llvm_dlangdemangle_entry}" 0
+      ${_llvm_dlangdemangle_sep} _llvm_dlangdemangle_config)
+    math(EXPR _llvm_dlangdemangle_start "${_llvm_dlangdemangle_sep} + 1")
+    string(SUBSTRING "${_llvm_dlangdemangle_entry}"
+      ${_llvm_dlangdemangle_start} -1 _llvm_dlangdemangle_path)
+    set_property(TARGET llvm_dlangdemangle APPEND PROPERTY
+      IMPORTED_CONFIGURATIONS "${_llvm_dlangdemangle_config}")
+    set_target_properties(llvm_dlangdemangle PROPERTIES
+      "IMPORTED_LOCATION_${_llvm_dlangdemangle_config}"
+      "${_llvm_dlangdemangle_path}")
+  endforeach()
+  if(NOT _llvm_dlangdemangle_location AND NOT _llvm_dlangdemangle_locations)
+    set_target_properties(llvm_dlangdemangle PROPERTIES
+      IMPORTED_LOCATION "${LLVM_LIBRARY_DIR}/@LLVM_RUST_DLANG_LIBRARY_NAME@")
+  endif()
+  unset(_llvm_dlangdemangle_location)
+  unset(_llvm_dlangdemangle_locations)
 endif()
 
 # This is a secondary one for generated files

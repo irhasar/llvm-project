@@ -22,6 +22,15 @@
 #include <limits>
 #include <string_view>
 
+#if defined(LLVM_RUST_DLANG)
+#include "DLangDemangleFFI.h"
+
+char *llvm::dlangDemangle(std::string_view MangledName) {
+  return llvm::detail::dlangDemangleViaFFI(MangledName);
+}
+
+#else
+
 using namespace llvm;
 using llvm::itanium_demangle::OutputBuffer;
 using llvm::itanium_demangle::starts_with;
@@ -721,3 +730,5 @@ char *llvm::dlangDemangle(std::string_view MangledName) {
   std::free(Demangled.getBuffer());
   return nullptr;
 }
+
+#endif // LLVM_RUST_DLANG
