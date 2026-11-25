@@ -28,13 +28,15 @@ const D_ROUNDS: usize = 4;
 
 macro_rules! sipround {
     ($v0:ident, $v1:ident, $v2:ident, $v3:ident) => {
+        // Interleave the independent v0/v1 and v2/v3 halves; the generic
+        // x86 scheduler needs the extra ILP to match GCC.
         $v0 = $v0.wrapping_add($v1);
-        $v1 = $v1.rotate_left(13);
-        $v1 ^= $v0;
-        $v0 = $v0.rotate_left(32);
         $v2 = $v2.wrapping_add($v3);
+        $v1 = $v1.rotate_left(13);
         $v3 = $v3.rotate_left(16);
+        $v1 ^= $v0;
         $v3 ^= $v2;
+        $v0 = $v0.rotate_left(32);
         $v0 = $v0.wrapping_add($v3);
         $v3 = $v3.rotate_left(21);
         $v3 ^= $v0;

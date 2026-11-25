@@ -179,9 +179,10 @@ void Benchmark() {
 
   std::printf("\n%-10s %14s %14s %8s\n", "input", "C++ ns/op", "Rust ns/op",
               "ratio");
-  for (size_t Len : {size_t{8}, size_t{16}, size_t{32}, size_t{128}, size_t{1024}}) {
+  for (size_t Len : {size_t{8}, size_t{16}, size_t{32}, size_t{64}, size_t{256},
+                     size_t{1024}, size_t{4096}, size_t{65536}}) {
     std::vector<uint8_t> Data(Len, 0x5a);
-    constexpr size_t Iterations = 2000000;
+    const size_t Iterations = Len >= 4096 ? 200000 : 2000000;
     double Cpp = 1e30, Rust = 1e30;
     for (int Round = 0; Round < 5; ++Round) {
       if (Round & 1) {

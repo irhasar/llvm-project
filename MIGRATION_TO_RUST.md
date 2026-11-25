@@ -126,9 +126,15 @@ that LEA explicitly with a small `asm!` block, which brings the generic body to
 parity, and adds a `#[target_feature(enable = "bmi1,bmi2")]` body selected by
 CPUID so `rorx` and `andn` are used when the CPU has them. On this Zen 4 host
 the dispatched body is 1.03x to 1.13x faster than the C++ reference; the
-generic fallback is at parity (0.99x to 1.07x). The `asm!` path is x86-64 only;
-other targets use the pure-Rust grouping. The crate tests compare the generic
-and BMI bodies bit for bit.
+generic body is 0.99x to 1.07x (parity to slightly faster). The `asm!` path is
+x86-64 only; other targets use the pure-Rust grouping. The crate tests
+compare the generic and BMI bodies bit for bit.
+
+The only sub-1.0 rows are SHA-1's scalar fallback on long inputs
+(0.96x-0.97x, within the 5% gate) and UTF-16 -> UTF-8 mixed at 16 units
+(0.99x, measurement noise); the default SHA-NI path is 1.8x faster, so the
+shipped configuration still wins. SipHash is at parity under generic codegen
+(1.00x-1.01x) and 5-9% faster with `-C target-cpu=native`.
 
 The point of this phase is volume: prove that the plumbing works for many small
 crates, and settle conventions (error reporting via return codes, output buffer
@@ -193,44 +199,49 @@ Same optimization level, generic codegen (C++: `g++ -O3`; Rust:
 
 | input bytes | C++ ns/op | Rust ns/op | ratio |
 | ----------- | --------- | ---------- | ----- |
-| 8           | 11.5      | 11.7       | 0.98x |
-| 16          | 14.8      | 14.7       | 1.00x |
-| 32          | 20.3      | 20.6       | 0.99x |
-| 64          | 32.7      | 32.7       | 1.00x |
-| 256         | 103.4     | 103.3      | 1.00x |
-| 1024        | 386.1     | 386.2      | 1.00x |
-| 4096        | 1519.9    | 1667.3     | 0.91x |
+| 8           | 11.23     | 11.27      | 1.00x |
+| 16          | 14.47     | 14.44      | 1.00x |
+| 32          | 20.59     | 20.34      | 1.01x |
+| 64          | 32.52     | 32.16      | 1.01x |
+| 256         | 103.73    | 103.77     | 1.00x |
+| 1024        | 389.40    | 388.36     | 1.00x |
+| 4096        | 1524.60   | 1523.62    | 1.00x |
+| 65536       | 24401.3   | 24371.4    | 1.00x |
 
 Same flags, host-tuned codegen (C++: `g++ -O3 -march=native`; Rust:
 `-C target-cpu=native -C opt-level=3`):
 
 | input bytes | C++ ns/op | Rust ns/op | ratio |
 | ----------- | --------- | ---------- | ----- |
-| 8           | 11.5      | 10.9       | 1.06x |
-| 16          | 14.7      | 13.5       | 1.09x |
-| 32          | 20.3      | 19.0       | 1.07x |
-| 64          | 32.2      | 30.3       | 1.06x |
-| 256         | 102.8     | 97.5       | 1.05x |
-| 1024        | 386.2     | 367.0      | 1.05x |
-| 4096        | 1515.1    | 1438.2     | 1.05x |
+| 8           | 12.32     | 11.26      | 1.09x |
+| 16          | 14.72     | 13.71      | 1.07x |
+| 32          | 20.86     | 19.16      | 1.09x |
+| 64          | 32.56     | 30.81      | 1.06x |
+| 256         | 103.56    | 98.56      | 1.05x |
+| 1024        | 387.81    | 369.47     | 1.05x |
+| 4096        | 1526.31   | 1449.31    | 1.05x |
+| 65536       | 24347.5   | 23127.2    | 1.05x |
 
 With identical target flags the Rust port is 5-9% faster at every size,
-including 4 KiB. With generic codegen the two are at parity up to 1 KiB, where
-most `getStableSipHash` calls live, and Rust is 9% slower at 4 KiB. Comparing
-`g++ -O2` against `-C opt-level=3` is not a fair fight and makes Rust look
-faster on short inputs than it is; the tables above use the same optimization
-level on both sides.
+including 4 KiB. With generic codegen the two are at parity at every size
+(1.00x-1.01x). Comparing `g++ -O2` against `-C opt-level=3` is not a fair
+fight and makes Rust look faster on short inputs than it is; the tables above
+use the same optimization level on both sides.
 
-The long-input gap is a scheduling-model artifact, not an algorithmic one.
-`GenericX86Model` in `X86Schedule.td` sets `CompleteModel = 0` and provides no
-instruction schedules, so the machine scheduler has no latency data for the
-rotate chain and emits a schedule that stalls roughly two cycles per 8-byte
-block on this core. Selecting a real model (`-C target-cpu=native`, or a
-specific `-C target-cpu=znver4`) removes the gap. Measured and rejected
-alternatives, none of which help: enabling BMI2 alone (`rorx` with the generic
-model), disabling the machine scheduler, forcing source-order scheduling,
-`-pre-RA-sched=list-ilp` (partial, 0.90x), manual two-block unrolling, a rolled
-inner loop, and `-O2` instead of `-O3`.
+The old long-input gap was a scheduling-model artifact, not an algorithmic
+one. `GenericX86Model` in `X86Schedule.td` sets `CompleteModel = 0` and
+provides no instruction schedules, so the machine scheduler had no latency
+data for the rotate chain and emitted a schedule that stalled roughly two
+cycles per 8-byte block on this core. The fix is to interleave the two
+independent halves of the round in the source: `v0 += v1` is issued together
+with `v2 += v3`, and likewise for the two rotates and the two XORs. That gives
+the generic scheduler independent work without a target model, and the 4 KiB
+ratio is now 1.00x. Selecting a real model (`-C target-cpu=native`, or a
+specific `-C target-cpu=znver4`) still makes Rust 5-9% faster. Measured and
+rejected alternatives, none of which help: enabling BMI2 alone (`rorx` with
+the generic model), disabling the machine scheduler, forcing source-order
+scheduling, `-pre-RA-sched=list-ilp` (partial, 0.90x), manual two-block
+unrolling, a rolled inner loop, and `-O2` instead of `-O3`.
 
 Because `-C target-cpu=native` emits code for the build host, it is not a safe
 default for binaries that ship to other machines. `LLVM_RUST_FLAGS` exposes
@@ -310,33 +321,37 @@ Correctness:
 * `cargo test` checks every length from 0 to 4095 against a loop-based
   RFC 1321 oracle, plus the raw block interface.
 
-Performance, ns per call, generic codegen at the same optimization level
-(`-O3` vs `-C opt-level=3`):
+Performance, ns per call, default path on this Zen 4 host (the BMI1/BMI2
+body is selected by CPUID; the generic body is 0.99x-1.07x):
 
-| bytes | C++   | Rust   | ratio |
-| ----- | ----- | ------ | ----- |
-| 16    | 112.1 | 123.8  | 0.90x |
-| 64    | 206.6 | 231.9  | 0.89x |
-| 256   | 488.2 | 572.2  | 0.85x |
-| 1024  | 1619  | 1932   | 0.84x |
-| 4096  | 6148  | 7391   | 0.83x |
-| 65536 | 96542 | 119146 | 0.81x |
+| bytes | C++    | Rust    | ratio |
+| ----- | ------ | ------- | ----- |
+| 16    | 111.37 | 100.98  | 1.10x |
+| 64    | 207.86 | 185.19  | 1.12x |
+| 256   | 489.88 | 455.10  | 1.08x |
+| 1024  | 1619.78| 1534.31 | 1.06x |
+| 4096  | 6135.86| 5852.95 | 1.05x |
+| 65536 | 96489.4| 92283.2 | 1.05x |
 
 With matched target flags (`g++ -O3 -march=native` and
-`-C target-cpu=native`) the result flips: Rust is 1.06-1.13x faster.
+`-C target-cpu=native`) Rust is 1.06-1.13x faster.
 
-This is the first component where the Rust port is slower by default, and the
-cause is visible in the instruction mix. Each MD5 step is
-`a + f(b,c,d) + m + t`, and GCC fuses those additions into LEA
-(82 `add` + 116 `lea` per block), while LLVM's generic x86 model emits plain
-adds (232 `add`) and needs a `mov` in front of every `rol`. Enabling BMI2 alone
-produces `rorx` but still no LEA, so it does not help; only a real scheduling
-model makes LLVM use both `rorx` and LEA.
+The first generic build was slower (0.83x). The cause is visible in the
+instruction mix: each MD5 step is `a + f(b,c,d) + m + t`, and GCC fuses those
+additions into LEA (82 `add` + 116 `lea` per block), while LLVM's generic x86
+model emitted plain adds (232 `add`) and needed a `mov` in front of every
+`rol`. The crate now computes `a + m + t` with an explicit LEA `asm!` block,
+which removes the generic-target gap, and adds a
+`#[target_feature(enable = "bmi1,bmi2")]` body selected by CPUID so `rorx`
+and `andn` are used when the CPU has them. The generic body is now
+0.99x-1.07x (parity to slightly faster); the dispatched body is 1.05x-1.12x
+on this host and 1.03x-1.13x with matched native flags. The `asm!` path is
+x86-64 only; other targets use the pure-Rust grouping, and the crate tests
+compare the generic and BMI bodies bit for bit.
 
-Because the port misses the 5% performance gate under generic codegen, MD5
-stays opt-in and is documented as "needs a tuned `LLVM_RUST_FLAGS`". It is
-kept in the tree as the control case for the experiment: it shows that the
-gap is a codegen-model issue rather than anything specific to the algorithm.
+The port no longer misses the 5% performance gate. It remains behind the
+default-off `LLVM_ENABLE_RUST_MD5` option like every other component, but it
+does not need a tuned `LLVM_RUST_FLAGS`.
 
 ## Fourth port: SHA-1
 
@@ -415,10 +430,14 @@ baseline never uses. `llvm_sha{1,256}_hash_scalar` and
 the scalar and accelerated numbers separately and state whether the host has
 SHA-NI.
 
-## Codegen investigation: why the generic x86-64 build loses
+## Codegen investigation: the original MD5 generic regression
 
-The MD5 regression is not specific to Rust. It is the difference between GCC and
-LLVM for the same algorithm on baseline x86-64, and it is visible pass by pass.
+The original MD5 generic regression is not specific to Rust. It is the
+difference between GCC and LLVM for the same algorithm on baseline x86-64, and
+it is visible pass by pass. The crate now avoids it with the explicit LEA
+described above; this section records the underlying difference and the
+opt-in `X86FixupLEAs` fold that came out of the investigation.
+
 Dumping the machine pipeline of the MD5 crate (`-C llvm-args=-print-after-all`)
 and following `body_raw` gives:
 
@@ -530,20 +549,22 @@ Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`:
 
 | Conversion              | ASCII          | Mixed          |
 |-------------------------|----------------|----------------|
-| UTF-8 -> UTF-16         | 4.5x           | 1.2x           |
-| UTF-8 -> UTF-32         | 4.0x           | 1.5x           |
-| UTF-16 -> UTF-8         | 1.5x - 2.0x    | 1.05x          |
-| UTF-32 -> UTF-8         | 1.0x - 1.5x    | 1.0x - 1.1x    |
-| UTF-16 -> UTF-32        | 1.0x - 1.5x    | 1.0x - 1.2x    |
-| UTF-32 -> UTF-16        | 1.6x           | 1.0x           |
-| `isLegalUTF8String`     | 6x - 12x       | 2.5x           |
+| UTF-8 -> UTF-16         | 3.4x - 4.5x    | 1.20x - 1.26x  |
+| UTF-8 -> UTF-32         | 3.8x - 4.7x    | 1.27x - 1.37x  |
+| UTF-16 -> UTF-8         | 1.38x - 1.50x  | 0.99x - 1.01x  |
+| UTF-32 -> UTF-8         | 1.31x - 1.37x  | 1.04x - 1.09x  |
+| UTF-16 -> UTF-32        | 1.29x - 1.49x  | 1.00x - 1.06x  |
+| UTF-32 -> UTF-16        | 1.45x - 1.61x  | 1.00x - 1.01x  |
+| `isLegalUTF8String`     | 2.3x at 16 B, 6x - 12x from 64 B | 1.5x - 2.2x |
 
 The UTF-32 -> UTF-16 direction now has a guaranteed-capacity loop that skips
 the per-code-point target checks when the caller provided two UTF-16 slots per
 input code point, an out-of-line ASCII block that writes four UTF-16 units per
 64-bit store, and a single 32-bit store for each surrogate pair. ASCII input is
-1.6x faster than C++; mixed BMP/supplementary input is at parity (1.00-1.01x)
-from 256 units upward. The helper functions are bit-identical to the C++
+1.45x-1.61x faster than C++; mixed BMP/supplementary input is at parity
+(1.00-1.01x) from 256 units upward. The only sub-1.0 row is UTF-16 -> UTF-8
+mixed at 16 units (0.99x), which is measurement noise; every other mixed row
+is at or above parity. The helper functions are bit-identical to the C++
 implementation; the exhaustive check covers the `findMaximalSubpart` table
 directly.
 
