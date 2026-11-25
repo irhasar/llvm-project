@@ -131,8 +131,15 @@ build/bin/llc -O3 -mcpu=x86-64 -filetype=obj -x86-fold-add-into-lea \
   "$IR" -o /tmp/fold.o
 
 # The MIR fixtures live in .github/workflows/rust-support.yml (step "MIR flag
-# regression"); save them as /tmp/fold.mir and /tmp/carry.mir, then:
-build/bin/llc -run-pass=x86-fixup-leas -x86-fold-add-into-lea /tmp/fold.mir -o -
+# regression"); save them as /tmp/{fold,carry,wide,dbg}.mir, then:
+for case in fold carry wide dbg; do
+  build/bin/llc -run-pass=x86-fixup-leas -x86-fold-add-into-lea \
+    "/tmp/$case.mir" -o "/tmp/$case.out.mir"
+done
+grep -q 'LEA64_32r $rdi, 1, $noreg, 5, $noreg' /tmp/fold.out.mir
+grep -q 'LEA64r $rdi, 1, $noreg, 5, $noreg' /tmp/wide.out.mir
+grep -q ADD32ri /tmp/carry.out.mir              # carry live across INC
+grep -q 'srcinst: 2, srcop: 0' /tmp/dbg.out.mir # ADD debug ref remapped
 
 # Downstream link through llvm-config. Use g++, llvm-config does not add the
 # C++ runtime.

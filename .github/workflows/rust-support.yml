@@ -265,7 +265,29 @@ jobs:
               RET64 $rax
           ...
           EOF
-          for case in fold carry wide; do
+          cat > /tmp/dbg.mir <<'EOF'
+          --- |
+            define i32 @dbg(i32 %x, i32 %y) {
+            entry:
+              ret i32 %x
+            }
+          ...
+          ---
+          name:            dbg
+          alignment:       16
+          tracksRegLiveness: true
+          body:             |
+            bb.0:
+              liveins: $edi, $esi
+
+              $r11d = LEA64_32r $rdi, 1, $noreg, 0, $noreg, debug-instr-number 1
+              $r11d = ADD32ri $r11d, 5, implicit-def $eflags, debug-instr-number 2
+              $esi = ADD32rr $esi, $esi, implicit-def dead $eflags
+              $eax = COPY $r11d
+              RET64 $eax
+          ...
+          EOF
+          for case in fold carry wide dbg; do
             build/bin/llc -run-pass=x86-fixup-leas -x86-fold-add-into-lea \
               "/tmp/$case.mir" -o "/tmp/$case.out.mir"
           done
@@ -280,6 +302,9 @@ jobs:
             exit 1
           fi
           grep -q ADD32ri /tmp/carry.out.mir
+          # The deleted ADD's instruction number must be substituted with the
+          # replacement LEA, not silently dropped.
+          grep -q 'srcinst: 2, srcop: 0' /tmp/dbg.out.mir
       - name: Upload asm
         if: always()
         uses: actions/upload-artifact@v4
