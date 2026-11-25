@@ -72,6 +72,44 @@ Every crate under `llvm/lib/*/rust/` follows the same rules:
 - Each component has its own `LLVM_ENABLE_RUST_<COMPONENT>` switch, default
   `OFF`, and `Cargo.lock` is committed.
 
+## Migration policy (agreed 2026-11-25)
+
+The experiments showed that Rust can beat C++ on leaf components, but they do
+not justify a whole-LLVM rewrite or a core-free default. Keep the migration
+optional and incremental.
+
+- Migrate self-contained leaf components first. Use the stable Rust toolchain
+  and the normal `no_std` (plus `alloc` or `std` only when the component
+  genuinely needs it) staticlib/C-ABI path. The default build must not invoke
+  `cargo`, nightly, `build-std`, or `RUSTC_BOOTSTRAP`.
+- The core-free artifact experiment (`-Z build-std=core,compiler_builtins`,
+  `panic=immediate-abort`) is an **opt-in experiment for small, allocation-free
+  leaf crates**, not the default and not a model for the whole project. It
+  changes panic semantics and adds nightly/rust-src requirements.
+- Direct C++ ABI exports (mangled symbols, `std::string_view`/`SmallVector`
+  layout, Itanium ABI) are research prototypes only. Production components
+  cross a C ABI; the public C++ headers and class layouts stay unchanged.
+- Do not rewrite LLVM's IR, code generator, or target backends merely to gain
+  performance. Rust and C++ both lower through LLVM; backend speed comes from
+  algorithms, data layout, allocation, PGO/BOLT, ThinLTO, and target tuning.
+  A whole-LLVM/rustc-backend rewrite is a separate research project with a
+  bootstrap problem, not an incremental migration step.
+- A new port ships only if it clears the measurement gate below; otherwise keep
+  the C++ implementation. “Rust” is not itself a performance result.
+
+Gate per component, measured on the same machine and input distribution:
+
+- runtime at least 1.05x faster, or a clearly documented safety/size win;
+- peak RSS no more than 2% higher;
+- compile time no more than 10% higher;
+- archive and linked binary not larger;
+- option `OFF` builds without cargo and stays byte-identical;
+- `cargo test`, differential fuzzing, and golden tests pass with the option
+  `ON` and `OFF`.
+
+Record rejected experiments and their numbers in `MIGRATION_TO_RUST.md` so the
+same idea is not retried blindly.
+
 MD5 is the exception that proves the codegen rule: it carries a generic x86-64
 body that emits `a + x + t` as an explicit `lea` through `asm!` (LLVM otherwise
 reassociates the constant to the end of the chain and loses the LEA) and a
