@@ -19,24 +19,26 @@
 
 namespace llvm {
 char *dlangDemangleCpp(std::string_view MangledName);
+bool dlangDemangleCppBytes(std::string_view MangledName, std::string &Result);
 }
 
 static bool rustDemangle(std::string_view Mangled, std::string &Result) {
-  char *Text = llvm::dlangDemangle(Mangled);
-  if (!Text)
+  uint8_t *Buffer = nullptr;
+  intptr_t Len = llvm_dlangdemangle_demangle(
+      reinterpret_cast<const uint8_t *>(Mangled.data()), Mangled.size(),
+      &Buffer);
+  if (Len <= 0) {
+    std::free(Buffer);
     return false;
-  Result.assign(Text);
-  std::free(Text);
+  }
+  Result.assign(reinterpret_cast<const char *>(Buffer),
+                static_cast<size_t>(Len));
+  std::free(Buffer);
   return true;
 }
 
 static bool referenceDemangle(std::string_view Mangled, std::string &Result) {
-  char *Text = llvm::dlangDemangleCpp(Mangled);
-  if (!Text)
-    return false;
-  Result.assign(Text);
-  std::free(Text);
-  return true;
+  return llvm::dlangDemangleCppBytes(Mangled, Result);
 }
 
 static bool check(std::string_view Mangled) {
@@ -140,6 +142,15 @@ static std::vector<std::string> makeCorpus() {
   Corpus.push_back("_D3foo3bar6__S3bazZ");
   Corpus.push_back("_D3foo3bar6__S3foo3bari");
   return Corpus;
+}
+
+static bool checkNulSuffix() {
+  std::string_view Input("_D3a\0b3barQeZ", 13);
+  std::string Rust;
+  std::string Reference;
+  if (!rustDemangle(Input, Rust) || !referenceDemangle(Input, Reference))
+    return false;
+  return Rust == Reference && Rust.size() == 11 && Rust[1] == '\0';
 }
 
 static std::vector<std::string> makeLongCorpus() {
@@ -280,6 +291,11 @@ int main() {
   for (const std::string &Symbol : Corpus) {
     if (!check(Symbol))
       ++Failures;
+  }
+
+  if (!checkNulSuffix()) {
+    std::fprintf(stderr, "differential NUL suffix comparison failed\n");
+    return 1;
   }
 
   if (!checkFuzz()) {

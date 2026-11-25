@@ -231,12 +231,14 @@ differential harness compiles as `llvm::dlangDemangleCpp`.
 
 The differential test generates 448 valid symbols, 100,000 random byte strings,
 100,000 mutations of the generated corpus, and 100,000 targeted back-reference
-inputs. It reports 0 mismatches on all 300,000 fuzz inputs and on the corpus.
+inputs. It compares raw `(pointer, length)` outputs, including bytes after an
+embedded NUL, and reports 0 mismatches on all 300,000 fuzz inputs and on the
+corpus.
 `llvm-dlang-stable` runs the golden vectors with the option on and off. Measured
 on the same Zen 4 host with `g++ -O3` and `-C opt-level=3` on generic x86-64,
-best of five rounds, the public wrapper is 1.09x to 1.17x faster on the full
-string path (including the caller's std::string copy), 1.10x to 1.21x faster on
-the pointer API, and 1.11x to 1.19x faster on long qualified names with repeated
+best of five rounds, the public wrapper is 1.19x to 1.22x faster on the full
+string path (including the caller's std::string copy), 1.26x to 1.31x faster on
+the pointer API, and 1.17x to 1.20x faster on long qualified names with repeated
 back references. The first NUL is found once with `memchr` and cached lazily, so
 NUL-free names do not rescan for back references. A successful parse that stops
 at NUL is accepted even when the explicit input length has trailing bytes,
