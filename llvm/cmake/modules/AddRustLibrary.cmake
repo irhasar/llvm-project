@@ -1,7 +1,8 @@
 #===----------------------------------------------------------------------===#
 # Build support for incrementally porting LLVM components to Rust.
 #
-# add_llvm_rust_staticlib(<target> <cargo-manifest>)
+# add_llvm_rust_staticlib(<target> <cargo-manifest>
+#   [INSTALL_COMPONENT <component>] [INSTALL_WITH_TOOLCHAIN])
 #
 # Builds a Rust crate as a static library with cargo and exposes it as the
 # STATIC IMPORTED target <target>. <target> must match the crate's [lib] name
@@ -18,7 +19,7 @@ find_program(LLVM_RUST_CARGO_EXECUTABLE
 mark_as_advanced(LLVM_RUST_CARGO_EXECUTABLE)
 
 function(add_llvm_rust_staticlib name manifest)
-  cmake_parse_arguments(ARG "" "INSTALL_COMPONENT" "" ${ARGN})
+  cmake_parse_arguments(ARG "" "INSTALL_COMPONENT" "INSTALL_WITH_TOOLCHAIN" ${ARGN})
   if(NOT ARG_INSTALL_COMPONENT)
     set(ARG_INSTALL_COMPONENT LLVMSupport)
   endif()
@@ -100,18 +101,21 @@ function(add_llvm_rust_staticlib name manifest)
   set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${staged}")
   add_dependencies(${name} ${name}-rust)
 
-  # The archive belongs to the LLVMSupport install component so that
-  # `cmake --install --component LLVMSupport` yields a linkable package.
+  # The archive belongs to the owning component's install component so that
+  # `cmake --install --component <component>` yields a linkable package. It is
+  # omitted from toolchain-only installs unless the owner opts in.
   # Multi-config generators keep each configuration in its own directory;
   # LLVM spells that as $(Configuration), which only MSBuild expands, so name
   # the path with $<CONFIG> in the install rule.
-  if(CMAKE_CONFIGURATION_TYPES)
-    install(FILES
-              "${LLVM_BINARY_DIR}/$<CONFIG>/lib${LLVM_LIBDIR_SUFFIX}/${rust_lib_name}"
-            DESTINATION lib${LLVM_LIBDIR_SUFFIX}
-            COMPONENT ${ARG_INSTALL_COMPONENT})
-  else()
-    install(FILES "${staged}" DESTINATION lib${LLVM_LIBDIR_SUFFIX}
-            COMPONENT ${ARG_INSTALL_COMPONENT})
+  if(NOT LLVM_INSTALL_TOOLCHAIN_ONLY OR ARG_INSTALL_WITH_TOOLCHAIN)
+    if(CMAKE_CONFIGURATION_TYPES)
+      install(FILES
+                "${LLVM_BINARY_DIR}/$<CONFIG>/lib${LLVM_LIBDIR_SUFFIX}/${rust_lib_name}"
+              DESTINATION lib${LLVM_LIBDIR_SUFFIX}
+              COMPONENT ${ARG_INSTALL_COMPONENT})
+    else()
+      install(FILES "${staged}" DESTINATION lib${LLVM_LIBDIR_SUFFIX}
+              COMPONENT ${ARG_INSTALL_COMPONENT})
+    endif()
   endif()
 endfunction()

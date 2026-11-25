@@ -223,26 +223,27 @@ passes against the C++ backend.
 The second Phase 2 port is `llvm/lib/Demangle/DLangDemangle.cpp`, gated by
 `LLVM_ENABLE_RUST_DLANG` (default `OFF`). The crate lives in
 `llvm/lib/Demangle/rust/dlangdemangle` and exports
-`llvm_dlangdemangle(input, input_len, uint8_t **output) -> isize`; it uses the
-same `realloc`-owned output and NUL-terminator contract as the Rust demangler.
+`llvm_dlangdemangle_demangle(input, input_len, uint8_t **output) -> isize`; it
+uses the same `realloc`-owned output and NUL-terminator contract as the Rust demangler.
 `DLangDemangle.cpp` keeps the original implementation under `#else`, which the
 differential harness compiles as `llvm::dlangDemangleCpp`.
 
-The differential test generates 442 valid symbols, 100,000 random byte strings,
+The differential test generates 443 valid symbols, 100,000 random byte strings,
 100,000 mutations of the generated corpus, and 100,000 targeted back-reference
 inputs. It reports 0 mismatches on all 300,000 fuzz inputs and on the corpus.
 `llvm-dlang-stable` runs the golden vectors with the option on and off. Measured
 on the same Zen 4 host with `g++ -O3` and `-C opt-level=3` on generic x86-64,
-best of five rounds, the public wrapper is 1.09x to 1.13x faster on the full
-string path and 1.10x to 1.13x faster on the pointer API over the 442-symbol
-corpus.
+best of five rounds, the public wrapper is 1.10x to 1.13x faster on both the
+full string path (including the caller's std::string copy) and the pointer API
+over the 443-symbol corpus.
 
 The CMake targets build only `LLVMDemangle` and the Rust archive. With the
 option on, `llvm-config --system-libs` gains `-lllvm_dlangdemangle`, and
 `cmake --install --component LLVMDemangle` installs `libllvm_dlangdemangle.a`
 next to `libLLVMDemangle.a`; an install-only downstream consumer links and runs
 without the build tree (with the fork's usual placeholders for uninstalled LLVM
-libraries). Configuring `LLVM_ENABLE_RUST_DLANG=OFF` keeps the
+libraries); toolchain-only installs omit the archive with `LLVMDemangle`.
+Configuring `LLVM_ENABLE_RUST_DLANG=OFF` keeps the
 original C++ body and still passes `llvm-dlang-stable`.
 
 ### Phase 3 - object file readers

@@ -13,15 +13,16 @@
 #include <cstdlib>
 #include <string_view>
 
-extern "C" intptr_t llvm_dlangdemangle(const uint8_t *Input, uintptr_t InputLen,
-                                       uint8_t **Output);
+extern "C" intptr_t llvm_dlangdemangle_demangle(const uint8_t *Input,
+                                                uintptr_t InputLen,
+                                                uint8_t **Output);
 
 namespace llvm {
 namespace detail {
 
 inline char *dlangDemangleViaFFI(std::string_view MangledName) {
   uint8_t *Buffer = nullptr;
-  intptr_t Need = llvm_dlangdemangle(
+  intptr_t Need = llvm_dlangdemangle_demangle(
       reinterpret_cast<const uint8_t *>(MangledName.data()),
       MangledName.size(), &Buffer);
   if (Need < 0)

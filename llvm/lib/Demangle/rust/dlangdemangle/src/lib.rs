@@ -54,6 +54,20 @@ impl<'a> View<'a> {
         }
     }
 
+    /// A view that ends at the first NUL, matching the C++ backend's
+    /// std::string_view construction from a referenced identifier pointer.
+    fn at_until_nul(data: &'a [u8], pos: usize) -> Self {
+        let end = data[pos..]
+            .iter()
+            .position(|&byte| byte == 0)
+            .map_or(data.len(), |offset| pos + offset);
+        Self {
+            data: &data[..end],
+            pos,
+            valid: true,
+        }
+    }
+
     #[inline(always)]
     fn is_empty(self) -> bool {
         !self.valid || self.pos >= self.data.len()
@@ -351,7 +365,7 @@ impl<'a> Demangler<'a> {
             return false;
         }
 
-        *ret = View::at(self.input, qpos - refpos);
+        *ret = View::at_until_nul(self.input, qpos - refpos);
         true
     }
 
@@ -448,7 +462,7 @@ impl<'a> Demangler<'a> {
         }
 
         let mut type_out = Out::new(64);
-        if !self.parse_type(&mut type_out, mangled) {
+        if !self.parse_type(&mut type_out, mangled) || type_out.failed {
             mangled.clear();
         } else {
             let type_len = type_out.len;
@@ -715,7 +729,7 @@ impl<'a> Demangler<'a> {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn llvm_dlangdemangle(
+pub unsafe extern "C" fn llvm_dlangdemangle_demangle(
     input: *const u8,
     input_len: usize,
     output: *mut *mut u8,
@@ -773,7 +787,7 @@ mod tests {
 
     fn demangle(input: &[u8]) -> Option<Vec<u8>> {
         let mut output = core::ptr::null_mut();
-        let len = unsafe { llvm_dlangdemangle(input.as_ptr(), input.len(), &mut output) };
+        let len = unsafe { llvm_dlangdemangle_demangle(input.as_ptr(), input.len(), &mut output) };
         if len < 0 {
             return None;
         }
@@ -810,6 +824,7 @@ mod tests {
 
     #[test]
     fn invalid_inputs() {
+        assert_eq!(demangle(b"_D3a\0bQeZ"), None);
         for input in [
             "",
             "_D",

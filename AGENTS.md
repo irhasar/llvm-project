@@ -154,7 +154,8 @@ keep them when touching identifier, number, or suffix parsing.
 
 `llvm/lib/Demangle/rust/dlangdemangle` is the Phase 2 port of
 `DLangDemangle.cpp`, gated by `LLVM_ENABLE_RUST_DLANG` (default `OFF`). The
-crate exports `llvm_dlangdemangle(input, input_len, uint8_t **output) -> isize`
+crate exports
+`llvm_dlangdemangle_demangle(input, input_len, uint8_t **output) -> isize`
 and uses the same output-ownership model as `llvm_rustdemangle_demangle`.
 `DLangDemangle.cpp` becomes a thin wrapper when the option is on; the original
 body remains under `#else` and is the differential reference.
@@ -169,16 +170,18 @@ ninja -C build llvm-rust-dlang-differential llvm-dlang-stable
 ./build/bin/llvm-rust-dlang-differential
 ```
 
-The differential harness generates 442 valid symbols, 100,000 random byte
+The differential harness generates 443 valid symbols, 100,000 random byte
 strings, 100,000 mutations of the corpus, and 100,000 targeted back-reference
 inputs. It reports 0 mismatches and benchmarks the public wrapper against the
 C++ reference. Measured here with `g++ -O3` and `-C opt-level=3` on generic
-x86-64, best of five rounds: 1.09x to 1.13x on the full string path and 1.10x
-to 1.13x on the pointer API. With the option on, `llvm-config --system-libs`
-gains `-lllvm_dlangdemangle`; `cmake --install --component LLVMDemangle`
+x86-64, best of five rounds: 1.10x to 1.13x on both the full string path
+(including the caller's std::string copy) and the pointer API. With the
+option on, `llvm-config --system-libs` gains `-lllvm_dlangdemangle`;
+`cmake --install --component LLVMDemangle`
 installs `libllvm_dlangdemangle.a` alongside `libLLVMDemangle.a`. An
 install-only consumer links and runs without the build tree; the fork's partial
 install still needs placeholder files for the other uninstalled LLVM libraries.
+A toolchain-only install omits the companion archive along with `LLVMDemangle`.
 
 ## Benchmarks
 

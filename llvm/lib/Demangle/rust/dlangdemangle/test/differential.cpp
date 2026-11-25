@@ -130,6 +130,8 @@ static std::vector<std::string> makeCorpus() {
   Corpus.push_back("_D3foo3bar6__S3fooZ");
   Corpus.push_back("_D3foo6__S1233fooZ");
   Corpus.push_back("_D3foo3bar6__S1233bazZ");
+  // A back reference must stop at an embedded NUL, as the C++ string_view does.
+  Corpus.emplace_back("_D3a\0bQeZ", 9);
   Corpus.push_back("_D3foo3bar6__S3bazZ");
   Corpus.push_back("_D3foo3bar6__S3foo3bari");
   return Corpus;
@@ -215,7 +217,10 @@ static double measureRound(bool Rust, const std::vector<std::string> &Corpus) {
       char *Text =
           Rust ? llvm::dlangDemangle(Symbol) : llvm::dlangDemangleCpp(Symbol);
       if (Text) {
-        Sink += static_cast<unsigned char>(Text[0]);
+        std::string Copy(Text);
+        Sink += Copy.size();
+        if (!Copy.empty())
+          Sink += static_cast<unsigned char>(Copy[0]);
         std::free(Text);
       } else {
         ++Sink;
