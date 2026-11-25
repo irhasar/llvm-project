@@ -26,6 +26,7 @@ if(LLVM_ENABLE_RUST_RUSTDEMANGLE)
   target_compile_definitions(llvm-rust-rustdemangle-differential PRIVATE
     RUSTDEMANGLE_CORPUS="${CMAKE_CURRENT_SOURCE_DIR}/rust/rustdemangle/test/corpus.txt")
   target_include_directories(llvm-rust-rustdemangle-differential PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${LLVM_MAIN_INCLUDE_DIR}
     ${LLVM_BINARY_DIR}/include)
   target_link_libraries(llvm-rust-rustdemangle-differential PRIVATE

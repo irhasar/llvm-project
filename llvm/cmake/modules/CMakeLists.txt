@@ -67,6 +67,19 @@ set(LLVM_CONFIG_LIBRARY_DIRS
   )
 list(REMOVE_DUPLICATES LLVM_CONFIG_LIBRARY_DIRS)
 
+# The Rust archive is an imported target in the build tree. Recreate it in
+# LLVMConfig.cmake so an exported static component can resolve its private
+# link dependency from the installed package.
+set(LLVM_RUSTDEMANGLE_LIBRARY_NAME "")
+if(LLVM_ENABLE_RUST_RUSTDEMANGLE)
+  get_property(LLVM_RUSTDEMANGLE_LIBRARY_NAME GLOBAL
+    PROPERTY LLVM_RUST_llvm_rustdemangle_LIBRARY_NAME)
+  if(NOT LLVM_RUSTDEMANGLE_LIBRARY_NAME)
+    set(LLVM_RUSTDEMANGLE_LIBRARY_NAME
+      "${CMAKE_STATIC_LIBRARY_PREFIX}llvm_rustdemangle${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  endif()
+endif()
+
 set(LLVM_CONFIG_BINARY_DIR "${LLVM_BINARY_DIR}")
 set(LLVM_CONFIG_CMAKE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(LLVM_CONFIG_TOOLS_BINARY_DIR "${LLVM_TOOLS_BINARY_DIR}")
@@ -136,6 +149,17 @@ set(LLVM_CONFIG_LIBRARY_DIRS
   # FIXME: Should there be other entries here?
   )
 list(REMOVE_DUPLICATES LLVM_CONFIG_LIBRARY_DIRS)
+
+# Keep the Rust demangler's imported target available to installed consumers.
+set(LLVM_RUSTDEMANGLE_LIBRARY_NAME "")
+if(LLVM_ENABLE_RUST_RUSTDEMANGLE)
+  get_property(LLVM_RUSTDEMANGLE_LIBRARY_NAME GLOBAL
+    PROPERTY LLVM_RUST_llvm_rustdemangle_LIBRARY_NAME)
+  if(NOT LLVM_RUSTDEMANGLE_LIBRARY_NAME)
+    set(LLVM_RUSTDEMANGLE_LIBRARY_NAME
+      "${CMAKE_STATIC_LIBRARY_PREFIX}llvm_rustdemangle${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  endif()
+endif()
 
 set(LLVM_CONFIG_BINARY_DIR "\${LLVM_INSTALL_PREFIX}")
 extend_path(LLVM_CONFIG_CMAKE_DIR "\${LLVM_INSTALL_PREFIX}" "${LLVM_INSTALL_PACKAGE_DIR}")

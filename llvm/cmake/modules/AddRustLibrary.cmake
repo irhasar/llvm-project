@@ -68,6 +68,7 @@ function(add_llvm_rust_staticlib name manifest)
     set(rust_lib_name "lib${name}.a")
   endif()
   set(archive "${target_dir}/release/${rust_lib_name}")
+  set_property(GLOBAL PROPERTY LLVM_RUST_${name}_LIBRARY_NAME "${rust_lib_name}")
   # Stage the archive next to the other LLVM libraries so that llvm-config's
   # -l<name> resolves in the build tree and the install rule can pick it up.
   set(staged "${LLVM_LIBRARY_OUTPUT_INTDIR}/${rust_lib_name}")

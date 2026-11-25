@@ -119,9 +119,9 @@ option on, its `llvm::rustDemangle` is a thin wrapper around
 frees the pointer with `std::free`.
 
 ```sh
-cd llvm/lib/Demangle/rust/rustdemangle
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-cargo build --release --locked
+(cd llvm/lib/Demangle/rust/rustdemangle &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
 
 ninja -C build llvm-rust-rustdemangle-differential llvm-rustdemangle-stable
 ./build/bin/llvm-rustdemangle-stable
@@ -141,11 +141,11 @@ The CMake targets build only `LLVMDemangle` and the Rust archive, not
 `libLLVMDemangle.a` plus `libllvm_rustdemangle.a`.
 
 Measured on this host (`g++ -O3` vs `-C opt-level=3`, generic x86-64, best of
-five alternating rounds): 1.15x to 1.17x on both the full string path and the
-pointer API over the 205-symbol corpus. The 50 longest symbols are 1.14x to
-1.16x on the full path and 1.16x to 1.18x on the pointer API. The 50 shortest symbols
-are 1.07x to 1.08x on the full path and 1.10x on the pointer API. The
-character-class, base62, and hex lookup tables, the eight-byte suffix-dot
+five alternating rounds): 1.12x to 1.16x on the full string path and 1.11x to
+1.16x on the pointer API over the 205-symbol corpus. The 50 longest symbols are
+1.13x to 1.16x on the full path and 1.12x to 1.16x on the pointer API. The 50
+shortest symbols are 1.07x to 1.09x on the full path and 1.06x to 1.09x on the
+pointer API. The character-class, base62, and hex lookup tables, the eight-byte suffix-dot
 scan, and the 32-byte initial buffer for short inputs are what moved the parser
 ahead; keep them when touching identifier, number, or suffix parsing.
 

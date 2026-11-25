@@ -1419,7 +1419,9 @@ mod tests {
         for offset in 0..32 {
             let mut bytes = vec![b'a'; offset];
             bytes.push(b'.');
-            bytes.extend_from_slice(b"llvm.1");
+            // Enough trailing bytes for the dot to land in a full word,
+            // including at offsets that are multiples of eight.
+            bytes.extend_from_slice(b"llvm.1234567890");
             assert_eq!(find_dot(&bytes), Some(offset));
         }
     }
