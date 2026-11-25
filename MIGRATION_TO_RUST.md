@@ -37,7 +37,7 @@ Non-goals (for now):
    the C++ side already allocated. This keeps the port compatible with LLVM's
    existing threading and allocator assumptions. The exceptions are write-once,
    relaxed atomic caches of the CPU feature checks used to pick
-   runtime-dispatched paths (SSSE3, SHA-NI, BMI1/BMI2); they are idempotent and
+   runtime-dispatched paths (SSSE3, SHA-NI, BMI1/BMI2, AVX2); they are idempotent and
    thread-safe.
 5. Symbol names are prefixed with the component: `llvm_<component>_<function>`.
 6. Every crate carries the LLVM license header and
@@ -81,8 +81,9 @@ native configurations.
 Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
 `MD5.cpp` (`LLVM_ENABLE_RUST_MD5`), `SHA1.cpp` (`LLVM_ENABLE_RUST_SHA1`),
 `SHA256.cpp` (`LLVM_ENABLE_RUST_SHA256`), `Base64.cpp`
-(`LLVM_ENABLE_RUST_BASE64`) and `ConvertUTF.cpp`
-(`LLVM_ENABLE_RUST_CONVERTUTF`). Selection criteria: small, deterministic,
+(`LLVM_ENABLE_RUST_BASE64`), `ConvertUTF.cpp`
+(`LLVM_ENABLE_RUST_CONVERTUTF`), and `xxhash.cpp`
+(`LLVM_ENABLE_RUST_XXHASH`). Selection criteria: small, deterministic,
 byte-buffer in / byte-buffer out, no LLVM types in the interface, existing unit
 tests.
 
@@ -123,6 +124,8 @@ generic x86-64 target unless noted:
 | Base64 decode   | 3.0x at 12 B, 3.8x at 1 MiB                   |
 | MD5             | 1.03x to 1.13x (LEA asm + BMI1/BMI2 path)     |
 | ConvertUTF      | 4.5x UTF-8 ASCII, 1.2-1.5x mixed; 1.6x UTF-32->UTF-16 ASCII; 12x `isLegalUTF8String` |
+| xxHash 64-bit   | 0.99x at 12 B, 1.1x at 48 B, 2.5x at 768 B, 3.5x at 1 MiB |
+| xxHash 128-bit  | 1.04x at 12 B, 1.2x at 48 B, 2.3x at 768 B, 3.5x at 1 MiB |
 
 MD5 initially lost to GCC at the generic target (0.83x). LLVM's reassociation
 moved the round constant to the end of `a + f + x + t`, leaving three register
@@ -137,9 +140,9 @@ x86-64 only; other targets use the pure-Rust grouping. The crate tests
 compare the generic and BMI bodies bit for bit.
 
 The only sub-1.0 rows are SHA-1's scalar fallback on long inputs
-(0.96x-0.97x, within the 5% gate), UTF-16 -> UTF-8 mixed at 16 units (0.99x),
-and the exact-size UTF-32 -> UTF-16 path at 16-64 units (0.94x-0.98x); the
-last two are small-input overhead. The default SHA-NI path is 1.8x faster, so
+(0.96x-0.97x, within the 5% gate), xxHash 64-bit at 12 bytes (0.99x, parity),
+UTF-16 -> UTF-8 mixed at 16 units (0.99x), and the exact-size UTF-32 -> UTF-16
+path at 16-64 units (0.94x-0.98x); the last three are small-input overhead. The default SHA-NI path is 1.8x faster, so
 the shipped configuration still wins. SipHash is at parity under generic
 codegen (0.99x-1.03x) and 5-9% faster with `-C target-cpu=native`.
 
@@ -578,6 +581,48 @@ every large-input row is at or above parity. The helper functions are
 bit-identical to the C++ implementation; the exhaustive check covers the
 `findMaximalSubpart` table directly.
 
+## Seventh port: xxHash
+
+`xxhash.cpp` exposes `llvm::xxh3_64bits` and `llvm::xxh3_128bits`. Both are
+pure byte-buffer functions with a fixed 192-byte secret, so the crate can
+implement them behind the same two `LLVM_ABI` entry points. The scalar paths
+are a direct translation of the C++ code; the public 128-bit result is returned
+as two `uint64_t` values through an out parameter, which avoids relying on the
+platform ABI for a two-field struct return.
+
+On x86-64 the long-input path (`len > 240`) has an AVX2 implementation selected
+at runtime. It processes four 64-bit accumulators per iteration, using
+`_mm256_mul_epu32` for the 32x32->64 product and a shifted multiply for the
+scramble step. The C++ implementation only has a scalar x86-64 path and a NEON
+path, so this is the source of the large-input win. CPUID is serializing and
+costs microseconds in virtualized guests; the first version called it on every
+hash and lost badly at 768-4096 bytes. The crate now caches the result in a
+relaxed `AtomicU8`, so the check is paid once per process.
+
+`test/differential.cpp` compiles `xxhash.cpp` as a separate translation unit
+without `LLVM_RUST_XXHASH`, so the reference is always the C++ code. It checks
+every length from 0 to 2048, 20,000 random lengths, and 4 KiB, 64 KiB, and
+1 MiB inputs for both variants. `test/stable.cpp` checks published vectors and
+a deterministic 768/1024/4096-byte pattern through the public API, so it runs
+with the Rust option both on and off.
+
+Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`, generic
+x86-64 target, AVX2 detected at runtime:
+
+| Bytes  | 64-bit | 128-bit |
+|--------|--------|---------|
+| 12     | 0.99x  | 1.04x   |
+| 48     | 1.06x  | 1.19x   |
+| 192    | 1.17x  | 1.18x   |
+| 768    | 2.54x  | 2.28x   |
+| 4096   | 3.46x  | 3.28x   |
+| 65536  | 3.72x  | 3.74x   |
+| 1 MiB  | 3.53x  | 3.50x   |
+
+The 12-byte 64-bit row is parity (0.99x); from 48 bytes upward Rust is faster,
+and the AVX2 long path is 3.5x faster at 1 MiB. The 128-bit long path uses the
+same AVX2 accumulate/scramble loops and gets the same win.
+
 ## Risks and mitigations
 
 | Risk | Mitigation |
@@ -601,8 +646,8 @@ keeps every step of the migration reversible.
 ## Next steps
 
 1. Keep the SHA-NI dispatch as the default for SHA-1 and SHA-256. The Phase 1
-   candidate list (CRC, MD5, SHA-1, SHA-256, Base64, ConvertUTF) is complete;
-   evaluate the Phase 2 demangler work next.
+   candidate list (CRC, MD5, SHA-1, SHA-256, Base64, ConvertUTF, xxHash) is
+   complete; evaluate the Phase 2 demangler work next.
 2. Decide whether `-x86-fold-add-into-lea` should become default on targets
    where a three-operand LEA is cheap. That requires a CodeGen test suite and
    wider benchmarking; the peephole is opt-in until then.

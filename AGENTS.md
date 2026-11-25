@@ -35,7 +35,7 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON \
   -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON \
   -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON \
-  -DLLVM_ENABLE_RUST_CONVERTUTF=ON \
+  -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_XXHASH=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
   -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_INCLUDE_TESTS=OFF \
@@ -111,6 +111,8 @@ To prove a backend-neutral result, configure the option `OFF`, rebuild
   Base64 is the exception: its differential calls `llvm::decodeBase64`, so it
   needs `LLVMSupport` and is built by CMake:
   `ninja -C build llvm-rust-base64-differential && ./build/bin/llvm-rust-base64-differential`.
+  xxHash compiles the C++ reference as a second translation unit:
+  `cd llvm/lib/Support/rust/xxhash && cargo build --release --locked && g++ -O3 -std=c++17 -I ../../../../include -I <build>/include test/differential.cpp ../../xxhash.cpp -Ltarget/release -lllvm_xxhash -o /tmp/xxhash-diff && /tmp/xxhash-diff`.
   ConvertUTF compiles the C++ reference as a second translation unit:
   `cd llvm/lib/Support/rust/convertutf && cargo build --release --locked && g++ -O3 -std=c++17 -I ../../../../include -I <build>/include test/differential.cpp ../../ConvertUTF.cpp -Ltarget/release -lllvm_convertutf -o /tmp/convertutf-diff && /tmp/convertutf-diff`.
   Add `-DLLVM_RUST_CONVERTUTF` to exercise the C++ shim instead of the
@@ -144,6 +146,9 @@ its checks locally instead.
 ```sh
 ninja -C build llvm-rust-sha1-differential llvm-sha1-stable
 ./build/bin/llvm-rust-sha1-differential && ./build/bin/llvm-sha1-stable
+
+ninja -C build llvm-rust-xxhash-differential llvm-xxhash-stable
+./build/bin/llvm-rust-xxhash-differential && ./build/bin/llvm-xxhash-stable
 
 # IR for the LEA fold experiments.
 (cd llvm/lib/Support/rust/md5 &&

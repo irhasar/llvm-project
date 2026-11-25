@@ -44,6 +44,22 @@
 
 #include <stdlib.h>
 
+#if defined(LLVM_RUST_XXHASH)
+extern "C" uint64_t llvm_xxhash_xxh3_64bits(const uint8_t *Data, size_t Len);
+extern "C" void llvm_xxhash_xxh3_128bits(const uint8_t *Data, size_t Len,
+                                         uint64_t *Out);
+
+uint64_t llvm::xxh3_64bits(const uint8_t *Data, size_t Len) {
+  return llvm_xxhash_xxh3_64bits(Data, Len);
+}
+
+llvm::XXH128_hash_t llvm::xxh3_128bits(const uint8_t *Data, size_t Len) {
+  uint64_t Out[2];
+  llvm_xxhash_xxh3_128bits(Data, Len, Out);
+  return {Out[0], Out[1]};
+}
+#else
+
 #if !defined(LLVM_XXH_USE_NEON)
 #if (defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)) &&      \
     !defined(__ARM_BIG_ENDIAN)
@@ -954,3 +970,5 @@ llvm::XXH128_hash_t llvm::xxh3_128bits(const uint8_t *input, size_t len) {
                                   /*seed64=*/0);
   return XXH3_hashLong_128b(input, len, kSecret, sizeof(kSecret));
 }
+
+#endif // LLVM_RUST_XXHASH
