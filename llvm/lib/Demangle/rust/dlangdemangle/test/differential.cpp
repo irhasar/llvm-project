@@ -132,6 +132,11 @@ static std::vector<std::string> makeCorpus() {
   Corpus.push_back("_D3foo3bar6__S1233bazZ");
   // A back reference must stop at an embedded NUL, as the C++ string_view does.
   Corpus.emplace_back("_D3a\0bQeZ", 9);
+  // A target after the first NUL is still reachable and decodes as an identifier.
+  Corpus.emplace_back("_D3a\0b3barQeZ", 13);
+  // The C++ entry point accepts a parse that stops at NUL and ignores trailing
+  // bytes in the explicit input length.
+  Corpus.emplace_back("_D2T2a\0bQZ", 10);
   Corpus.push_back("_D3foo3bar6__S3bazZ");
   Corpus.push_back("_D3foo3bar6__S3foo3bari");
   return Corpus;

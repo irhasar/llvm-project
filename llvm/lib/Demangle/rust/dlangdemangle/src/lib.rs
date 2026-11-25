@@ -790,7 +790,8 @@ pub unsafe extern "C" fn llvm_dlangdemangle_demangle(
         let mut demangler = Demangler::new(input);
         let mut mangled = View::new(input);
         demangler.parse_mangle(&mut out, &mut mangled);
-        if !mangled.valid || mangled.absolute() != input.len() {
+        let consumed = mangled.absolute();
+        if !mangled.valid || (consumed != input.len() && input.get(consumed) != Some(&0)) {
             out.free();
             return -1;
         }
@@ -854,6 +855,18 @@ mod tests {
         check("_D3foo3barQeZ", "foo.bar.bar");
         check("_D3foo3barQe3bazZ", "foo.bar.bar.baz");
         check("_D4acore", "real acor");
+        // The back-reference target starts after the first NUL, so this checks
+        // both the bounded view and the embedded NUL in the output bytes.
+        assert_eq!(
+            demangle(b"_D3a\0b3barQeZ").as_deref(),
+            Some(b"a\0b.bar.bar".as_slice())
+        );
+        // C++ accepts a successful parse whose remaining view starts at NUL,
+        // even when the explicit input length includes trailing bytes.
+        assert_eq!(
+            demangle(b"_D2T2a\0bQZ").as_deref(),
+            Some(b"char T2".as_slice())
+        );
     }
 
     #[test]
