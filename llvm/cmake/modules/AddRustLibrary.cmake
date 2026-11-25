@@ -40,13 +40,32 @@ function(add_llvm_rust_staticlib name manifest)
     set(rust_host "${CMAKE_MATCH_1}")
   endif()
 
+  # Cargo's target has to agree with the C++ toolchain: MinGW cannot link an
+  # MSVC archive and MSVC cannot link a GNU one. Diagnose that here instead of
+  # failing at link time with an archive cargo never wrote.
+  if(rust_host)
+    if(MSVC AND NOT rust_host MATCHES "-msvc$")
+      message(FATAL_ERROR
+        "The Rust toolchain builds for ${rust_host} but the C++ compiler is "
+        "MSVC. Use a *-windows-msvc Rust target.")
+    elseif(NOT MSVC AND rust_host MATCHES "-msvc$")
+      message(FATAL_ERROR
+        "The Rust toolchain builds for ${rust_host} but the C++ compiler is "
+        "not MSVC. Use a GNU Rust target.")
+    endif()
+  endif()
+
   set(target_dir "${CMAKE_CURRENT_BINARY_DIR}/rust/${name}")
   # Rust's MSVC targets write <name>.lib, the GNU targets write lib<name>.a.
   if(rust_host MATCHES "-msvc$" OR (NOT rust_host AND MSVC))
-    set(archive "${target_dir}/release/${name}.lib")
+    set(rust_lib_name "${name}.lib")
   else()
-    set(archive "${target_dir}/release/lib${name}.a")
+    set(rust_lib_name "lib${name}.a")
   endif()
+  set(archive "${target_dir}/release/${rust_lib_name}")
+  # Stage the archive next to the other LLVM libraries so that llvm-config's
+  # -l<name> resolves in the build tree and the install rule can pick it up.
+  set(staged "${LLVM_LIBRARY_OUTPUT_INTDIR}/${rust_lib_name}")
 
   # Makefiles do not rerun a rule when only its recipe changes, so the
   # configured flags have to be a real dependency of the archive.
@@ -62,15 +81,17 @@ function(add_llvm_rust_staticlib name manifest)
     set(cargo_env "")
   endif()
 
-  add_custom_command(OUTPUT "${archive}"
+  add_custom_command(OUTPUT "${staged}"
     COMMAND ${cargo_env} "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
             --manifest-path "${manifest}" --target-dir "${target_dir}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${archive}" "${staged}"
     DEPENDS ${crate_sources}
     COMMENT "Building Rust crate ${name}"
     VERBATIM)
 
-  add_custom_target(${name}-rust DEPENDS "${archive}")
+  add_custom_target(${name}-rust DEPENDS "${staged}")
   add_library(${name} STATIC IMPORTED GLOBAL)
-  set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${archive}")
+  set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${staged}")
   add_dependencies(${name} ${name}-rust)
+  install(FILES "${staged}" DESTINATION lib${LLVM_LIBDIR_SUFFIX})
 endfunction()

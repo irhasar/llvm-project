@@ -443,7 +443,9 @@ peephole.
 
 This fork has no CodeGen test suite, so the fold is validated by the
 `codegen-lea` CI job: it builds `llc`, emits the MD5 crate's IR, compiles it
-with and without the flag, and requires the ADD count to drop. It is opt-in
+with and without the flag, requires the ADD count to drop, links both objects
+against a harness and requires identical digests, and runs a pair of MIR tests
+that pin the carry-preserving INC case. It is opt-in
 because it changes shared x86 codegen and because the Rust ports no longer need
 it to win: the default SHA-NI path is 1.8-4.1x faster than the C++ baseline.
 
