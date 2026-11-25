@@ -44,3 +44,35 @@ endif()
 add_executable(llvm-rustdemangle-stable EXCLUDE_FROM_ALL
   rust/rustdemangle/test/stable.cpp)
 target_link_libraries(llvm-rustdemangle-stable PRIVATE LLVMDemangle)
+
+if(LLVM_ENABLE_RUST_DLANG)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_dlangdemangle
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/dlangdemangle/Cargo.toml"
+    INSTALL_COMPONENT LLVMDemangle)
+  target_compile_definitions(LLVMDemangle PRIVATE LLVM_RUST_DLANG)
+  target_link_libraries(LLVMDemangle PRIVATE llvm_dlangdemangle)
+
+  add_executable(llvm-rust-dlang-differential EXCLUDE_FROM_ALL
+    rust/dlangdemangle/test/differential.cpp
+    rust/dlangdemangle/test/DLangDemangleCpp.cpp
+    DLangDemangle.cpp
+    ItaniumDemangle.cpp)
+  target_compile_definitions(llvm-rust-dlang-differential PRIVATE
+    LLVM_RUST_DLANG)
+  target_include_directories(llvm-rust-dlang-differential PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-dlang-differential PRIVATE
+    llvm_dlangdemangle)
+  add_custom_target(check-llvm-rust-dlang
+    COMMAND llvm-rust-dlang-differential
+    COMMAND llvm-dlang-stable
+    DEPENDS llvm-rust-dlang-differential llvm-dlang-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-dlang-stable EXCLUDE_FROM_ALL
+  rust/dlangdemangle/test/stable.cpp)
+target_link_libraries(llvm-dlang-stable PRIVATE LLVMDemangle)

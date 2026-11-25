@@ -3,8 +3,8 @@
 This document describes an experiment in porting LLVM components to Rust one at
 a time, without a flag day and without making the Rust toolchain a hard
 dependency of the build. The Phase 1 `lib/Support` slices are implemented and
-verified, and Phase 2 started with `llvm/lib/Demangle/RustDemangle.cpp`; the
-remaining phases below are the plan.
+verified, and Phase 2 started with `llvm/lib/Demangle/RustDemangle.cpp` and
+`llvm/lib/Demangle/DLangDemangle.cpp`; the remaining phases below are the plan.
 
 ## Goals and non-goals
 
@@ -219,6 +219,31 @@ build without `LLVMSupport`, and `cmake --install --component LLVMDemangle`
 installs both `libLLVMDemangle.a` and `libllvm_rustdemangle.a`. Configuring the
 option `OFF` produces the original system-libs list and the stable test still
 passes against the C++ backend.
+
+The second Phase 2 port is `llvm/lib/Demangle/DLangDemangle.cpp`, gated by
+`LLVM_ENABLE_RUST_DLANG` (default `OFF`). The crate lives in
+`llvm/lib/Demangle/rust/dlangdemangle` and exports
+`llvm_dlangdemangle(input, input_len, uint8_t **output) -> isize`; it uses the
+same `realloc`-owned output and NUL-terminator contract as the Rust demangler.
+`DLangDemangle.cpp` keeps the original implementation under `#else`, which the
+differential harness compiles as `llvm::dlangDemangleCpp`.
+
+The differential test generates 442 valid symbols, 100,000 random byte strings,
+100,000 mutations of the generated corpus, and 100,000 targeted back-reference
+inputs. It reports 0 mismatches on all 300,000 fuzz inputs and on the corpus.
+`llvm-dlang-stable` runs the golden vectors with the option on and off. Measured
+on the same Zen 4 host with `g++ -O3` and `-C opt-level=3` on generic x86-64,
+best of five rounds, the public wrapper is 1.09x to 1.13x faster on the full
+string path and 1.10x to 1.13x faster on the pointer API over the 442-symbol
+corpus.
+
+The CMake targets build only `LLVMDemangle` and the Rust archive. With the
+option on, `llvm-config --system-libs` gains `-lllvm_dlangdemangle`, and
+`cmake --install --component LLVMDemangle` installs `libllvm_dlangdemangle.a`
+next to `libLLVMDemangle.a`; an install-only downstream consumer links and runs
+without the build tree (with the fork's usual placeholders for uninstalled LLVM
+libraries). Configuring `LLVM_ENABLE_RUST_DLANG=OFF` keeps the
+original C++ body and still passes `llvm-dlang-stable`.
 
 ### Phase 3 - object file readers
 
@@ -730,8 +755,8 @@ keeps every step of the migration reversible.
 
 1. Keep the SHA-NI dispatch as the default for SHA-1 and SHA-256. The Phase 1
    candidate list (CRC, MD5, SHA-1, SHA-256, Base64, ConvertUTF, xxHash) is
-   complete. Phase 2 started with `RustDemangle`; evaluate the Itanium,
-   Microsoft, and DLang demanglers next.
+   complete. Phase 2 now covers the Rust and D demanglers; evaluate the
+   Itanium and Microsoft demanglers next.
 2. Decide whether `-x86-fold-add-into-lea` should become default on targets
    where a three-operand LEA is cheap. That requires a CodeGen test suite and
    wider benchmarking; the peephole is opt-in until then.
@@ -745,5 +770,6 @@ keeps every step of the migration reversible.
    `.github/workflows/rust-support.yml` (lint, C++/Rust golden tests,
    differential checks, and the `codegen-lea` llc job).
 6. Keep installing enabled Rust archives as companions and listing them in
-   `llvm-config`. `LLVMDemangle` now owns `libllvm_rustdemangle.a`; follow the
-   same per-component install pattern for the remaining ports.
+   `llvm-config`. `LLVMDemangle` now owns `libllvm_rustdemangle.a` and
+   `libllvm_dlangdemangle.a`; follow the same per-component install pattern for
+   the remaining ports.
