@@ -1,6 +1,7 @@
 name: Rust Support Ports
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - rakit-0.1.0-rc1
