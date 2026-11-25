@@ -141,8 +141,8 @@ jobs:
           ninja -C build check-llvm-rust-siphash check-llvm-rust-crc \
             check-llvm-rust-md5 check-llvm-rust-sha1 check-llvm-rust-sha256 \
             check-llvm-rust-base64 check-llvm-rust-convertutf \
-            check-llvm-rust-xxhash check-llvm-rust-rustdemangle \
-            check-llvm-rust-dlang
+            check-llvm-rust-convertebcdic check-llvm-rust-xxhash \
+            check-llvm-rust-rustdemangle check-llvm-rust-dlang
 
   codegen-lea:
     name: LEA fold (llc)

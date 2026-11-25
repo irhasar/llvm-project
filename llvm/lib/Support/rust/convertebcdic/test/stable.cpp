@@ -45,6 +45,14 @@ void checkUTF8(StringRef Input, const char *Expected, size_t ExpectedLen) {
     expect(std::memcmp(Out.data(), Expected, ExpectedLen) == 0, Expected);
 }
 
+void checkLongASCIIStaysInline() {
+  std::string Input(256, static_cast<char>(0xC1));
+  SmallVector<char, 256> Out;
+  ConverterEBCDIC::convertToUTF8(Input, Out);
+  expect(Out.size() == 256, "256-byte EBCDIC ASCII output");
+  expect(Out.capacity() == 256, "256-byte EBCDIC ASCII stays inline");
+}
+
 } // namespace
 
 int main() {
@@ -57,6 +65,7 @@ int main() {
   checkEBCDIC("\xC2", "", 0, false);
   checkEBCDIC("\xC2\x41", "", 0, false);
   checkEBCDIC("\x80", "", 0, false);
+  checkLongASCIIStaysInline();
   if (Failures != 0)
     return 1;
   std::printf("OK: EBCDIC golden vectors\n");

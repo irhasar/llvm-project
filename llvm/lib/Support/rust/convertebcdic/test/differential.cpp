@@ -68,6 +68,15 @@ Result cppToUTF8(StringRef Source) {
   return {0, std::vector<char>(Out.begin(), Out.end())};
 }
 
+std::string goffToUTF8(bool Rust, StringRef Source) {
+  SmallVector<char, 256> Out;
+  if (Rust)
+    ConverterEBCDIC::convertToUTF8(Source, Out);
+  else
+    ConverterEBCDICCpp::convertToUTF8(Source, Out);
+  return std::string(Out.begin(), Out.end());
+}
+
 bool checkEBCDIC(StringRef Source) {
   Result Rust = rustToEBCDIC(Source);
   Result Cpp = cppToEBCDIC(Source);
@@ -90,6 +99,12 @@ bool checkUTF8(StringRef Source) {
     return true;
   std::fprintf(stderr, "UTF8 mismatch for %zu bytes:", Source.size());
   for (unsigned char C : Source)
+    std::fprintf(stderr, " %02x", C);
+  std::fprintf(stderr, "\n  rust:");
+  for (unsigned char C : Rust.Bytes)
+    std::fprintf(stderr, " %02x", C);
+  std::fprintf(stderr, "\n  cpp:");
+  for (unsigned char C : Cpp.Bytes)
     std::fprintf(stderr, " %02x", C);
   std::fprintf(stderr, "\n");
   return false;
@@ -118,6 +133,19 @@ double measureEBCDIC(bool Rust, const std::vector<std::string> &Corpus) {
       Result R = Rust ? rustToEBCDIC(S) : cppToEBCDIC(S);
       Sink += R.Bytes.size();
     }
+  auto End = std::chrono::steady_clock::now();
+  std::chrono::duration<double, std::nano> D = End - Start;
+  if (Sink == 0)
+    std::fputc(0, stderr);
+  return D.count() / (2000.0 * Corpus.size());
+}
+
+double measureGOFF(bool Rust, const std::vector<std::string> &Corpus) {
+  auto Start = std::chrono::steady_clock::now();
+  size_t Sink = 0;
+  for (unsigned Round = 0; Round != 2000; ++Round)
+    for (const std::string &S : Corpus)
+      Sink += goffToUTF8(Rust, S).size();
   auto End = std::chrono::steady_clock::now();
   std::chrono::duration<double, std::nano> D = End - Start;
   if (Sink == 0)
@@ -167,27 +195,40 @@ int main() {
 
   std::vector<std::string> ToUTF8;
   std::vector<std::string> ToEBCDIC;
+  std::vector<std::string> GOFFNames;
   for (unsigned I = 0; I != 256; ++I) {
     ToUTF8.emplace_back(16 + (I % 4) * 16, static_cast<char>(I));
     ToEBCDIC.emplace_back(16 + (I % 4) * 16,
                           static_cast<char>('A' + (I % 26)));
+    static const unsigned char EBCDICUpper[] = {
+        0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9,
+        0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9,
+        0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9};
+    GOFFNames.emplace_back(129 + (I % 128),
+                           static_cast<char>(EBCDICUpper[I % 26]));
   }
 
   double CppUTF8 = 1e100;
   double RustUTF8 = 1e100;
   double CppEBCDIC = 1e100;
   double RustEBCDIC = 1e100;
+  double CppGOFF = 1e100;
+  double RustGOFF = 1e100;
   for (unsigned Round = 0; Round != 5; ++Round) {
     CppUTF8 = std::min(CppUTF8, measureUTF8(false, ToUTF8));
     RustUTF8 = std::min(RustUTF8, measureUTF8(true, ToUTF8));
     CppEBCDIC = std::min(CppEBCDIC, measureEBCDIC(false, ToEBCDIC));
     RustEBCDIC = std::min(RustEBCDIC, measureEBCDIC(true, ToEBCDIC));
+    CppGOFF = std::min(CppGOFF, measureGOFF(false, GOFFNames));
+    RustGOFF = std::min(RustGOFF, measureGOFF(true, GOFFNames));
   }
 
   std::printf("to utf8: c++ %.2f ns, rust %.2f ns, speedup %.2fx\n", CppUTF8,
               RustUTF8, CppUTF8 / RustUTF8);
   std::printf("to ebcdic: c++ %.2f ns, rust %.2f ns, speedup %.2fx\n",
               CppEBCDIC, RustEBCDIC, CppEBCDIC / RustEBCDIC);
+  std::printf("goff ascii: c++ %.2f ns, rust %.2f ns, speedup %.2fx\n",
+              CppGOFF, RustGOFF, CppGOFF / RustGOFF);
   std::printf("OK: Rust EBCDIC conversion matches the C++ reference\n");
   return 0;
 }

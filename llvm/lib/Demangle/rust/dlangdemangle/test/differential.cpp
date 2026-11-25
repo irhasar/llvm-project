@@ -22,7 +22,7 @@ char *dlangDemangleCpp(std::string_view MangledName);
 bool dlangDemangleCppBytes(std::string_view MangledName, std::string &Result);
 }
 
-static bool rustDemangle(std::string_view Mangled, std::string &Result) {
+static bool rustDemangleBytes(std::string_view Mangled, std::string &Result) {
   uint8_t *Buffer = nullptr;
   intptr_t Len = llvm_dlangdemangle_demangle(
       reinterpret_cast<const uint8_t *>(Mangled.data()), Mangled.size(),
@@ -37,28 +37,65 @@ static bool rustDemangle(std::string_view Mangled, std::string &Result) {
   return true;
 }
 
-static bool referenceDemangle(std::string_view Mangled, std::string &Result) {
+static bool referenceDemangleBytes(std::string_view Mangled,
+                                   std::string &Result) {
   return llvm::dlangDemangleCppBytes(Mangled, Result);
 }
 
-static bool check(std::string_view Mangled) {
-  std::string Rust;
-  std::string Reference;
-  bool RustOK = rustDemangle(Mangled, Rust);
-  bool ReferenceOK = referenceDemangle(Mangled, Reference);
+static bool rustDemanglePublic(std::string_view Mangled, std::string &Result) {
+  char *Text = llvm::detail::dlangDemangleViaFFI(Mangled);
+  if (!Text)
+    return false;
+  Result.assign(Text);
+  bool Terminated = Text[Result.size()] == '\0';
+  std::free(Text);
+  return Terminated;
+}
 
-  if (RustOK == ReferenceOK && (!RustOK || Rust == Reference))
+static bool referenceDemanglePublic(std::string_view Mangled,
+                                    std::string &Result) {
+  char *Text = llvm::dlangDemangleCpp(Mangled);
+  if (!Text)
+    return false;
+  Result.assign(Text);
+  bool Terminated = Text[Result.size()] == '\0';
+  std::free(Text);
+  return Terminated;
+}
+
+static void printBytes(const char *Label, const std::string &S) {
+  std::fprintf(stderr, "  %s (%zu):", Label, S.size());
+  for (unsigned char C : S)
+    std::fprintf(stderr, " %02x", C);
+  std::fputc('\n', stderr);
+}
+
+static bool check(std::string_view Mangled) {
+  std::string RustBytes;
+  std::string ReferenceBytes;
+  bool RustOK = rustDemangleBytes(Mangled, RustBytes);
+  bool ReferenceOK = referenceDemangleBytes(Mangled, ReferenceBytes);
+
+  std::string RustPublic;
+  std::string ReferencePublic;
+  bool RustPublicOK = rustDemanglePublic(Mangled, RustPublic);
+  bool ReferencePublicOK = referenceDemanglePublic(Mangled, ReferencePublic);
+
+  bool BytesMatch =
+      RustOK == ReferenceOK && (!RustOK || RustBytes == ReferenceBytes);
+  bool PublicMatch = RustPublicOK == ReferencePublicOK &&
+                     (!RustPublicOK || RustPublic == ReferencePublic);
+  if (BytesMatch && PublicMatch)
     return true;
 
-  std::fprintf(stderr, "mismatch for %zu-byte input: %.*s\n", Mangled.size(),
-               static_cast<int>(Mangled.size()), Mangled.data());
-  std::fprintf(stderr, "  bytes:");
-  for (unsigned char C : Mangled) std::fprintf(stderr, " %02x", C);
-  std::fprintf(stderr, "\n");
-  std::fprintf(stderr, "  rust ok=%d: %s\n", RustOK,
-               RustOK ? Rust.c_str() : "<null>");
-  std::fprintf(stderr, "  c++  ok=%d: %s\n", ReferenceOK,
-               ReferenceOK ? Reference.c_str() : "<null>");
+  std::fprintf(stderr, "mismatch for %zu-byte input\n", Mangled.size());
+  printBytes("input", std::string(Mangled));
+  printBytes("rust raw", RustBytes);
+  printBytes("c++ raw", ReferenceBytes);
+  printBytes("rust public", RustPublic);
+  printBytes("c++ public", ReferencePublic);
+  std::fprintf(stderr, "  ok raw=%d/%d public=%d/%d\n", RustOK, ReferenceOK,
+               RustPublicOK, ReferencePublicOK);
   return false;
 }
 
@@ -146,11 +183,20 @@ static std::vector<std::string> makeCorpus() {
 
 static bool checkNulSuffix() {
   std::string_view Input("_D3a\0b3barQeZ", 13);
-  std::string Rust;
-  std::string Reference;
-  if (!rustDemangle(Input, Rust) || !referenceDemangle(Input, Reference))
+  std::string Expected("a\0b.bar.bar", 11);
+  std::string RustBytes;
+  std::string ReferenceBytes;
+  std::string RustPublic;
+  std::string ReferencePublic;
+  if (!rustDemangleBytes(Input, RustBytes) ||
+      !referenceDemangleBytes(Input, ReferenceBytes) ||
+      !rustDemanglePublic(Input, RustPublic) ||
+      !referenceDemanglePublic(Input, ReferencePublic))
     return false;
-  return Rust == Reference && Rust.size() == 11 && Rust[1] == '\0';
+  if (RustBytes != Expected || ReferenceBytes != Expected)
+    return false;
+  // The public C-string wrapper must stop at the embedded NUL.
+  return RustPublic == "a" && ReferencePublic == "a";
 }
 
 static std::vector<std::string> makeLongCorpus() {

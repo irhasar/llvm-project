@@ -37,11 +37,21 @@ std::error_code convertToEBCDIC(StringRef Source,
 
 void convertToUTF8(StringRef Source, SmallVectorImpl<char> &Result) {
   assert(Result.empty() && "Result must be empty!");
-  Result.resize_for_overwrite(Source.size() * 2);
+  // ASCII-only EBCDIC names keep the output at one byte per input byte. Size
+  // for that case first so GOFF's SmallString<256> names stay inline; only
+  // retry at the two-byte worst case when the Rust code reports that it needs
+  // more room.
+  Result.resize_for_overwrite(Source.size());
   size_t ResultLen = 0;
   int32_t Status = llvm_convertebcdic_to_utf8(
       reinterpret_cast<const uint8_t *>(Source.data()), Source.size(),
       reinterpret_cast<uint8_t *>(Result.data()), Result.size(), &ResultLen);
+  if (Status == 3) {
+    Result.resize_for_overwrite(Source.size() * 2);
+    Status = llvm_convertebcdic_to_utf8(
+        reinterpret_cast<const uint8_t *>(Source.data()), Source.size(),
+        reinterpret_cast<uint8_t *>(Result.data()), Result.size(), &ResultLen);
+  }
   assert(Status == 0 && "Rust EBCDIC conversion ran out of output space");
   (void)Status;
   Result.resize(ResultLen);

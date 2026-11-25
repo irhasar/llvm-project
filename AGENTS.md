@@ -175,11 +175,14 @@ ninja -C build llvm-rust-dlang-differential llvm-dlang-stable
 The differential harness generates 448 valid symbols, 100,000 random byte
 strings, 100,000 mutations of the corpus, and 100,000 targeted back-reference
 inputs. It compares the raw `(pointer, length)` outputs, including bytes after
-an embedded NUL, reports 0 mismatches, and benchmarks the public wrapper against
-the C++ reference. Measured here with `g++ -O3` and `-C opt-level=3` on generic
-x86-64, best of five rounds: 1.19x to 1.22x on the full string path (including
-the caller's std::string copy), 1.26x to 1.31x on the pointer API, and 1.17x to
-1.20x on long qualified names with repeated back references. The first NUL is
+an embedded NUL, and calls the public `dlangDemangleViaFFI` wrapper so its
+terminator write is checked for every input. It reports 0 mismatches and
+benchmarks the public wrapper against the C++ reference. Mismatch diagnostics
+print full byte sequences rather than C strings. Measured here with `g++ -O3`
+and `-C opt-level=3` on generic x86-64, best of five rounds: 1.19x to 1.20x
+on the full string path (including the caller's std::string copy), 1.24x to
+1.25x on the pointer API, and 1.18x to 1.29x on long qualified names with
+repeated back references. The first NUL is
 found once with `memchr` and cached lazily, so NUL-free names do not rescan for
 back references. A successful parse that stops at NUL is accepted even when the
 explicit input length has trailing bytes, matching the C++ C-string check. With

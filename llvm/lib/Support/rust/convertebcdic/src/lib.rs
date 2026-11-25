@@ -143,6 +143,28 @@ unsafe fn to_utf8(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32,
         return (OK, written);
     }
 
+    if cap >= len {
+        while i < len {
+            let ch = IBM1047_TO_ISO88591[*src.add(i) as usize];
+            i += 1;
+            if ch >= 128 {
+                if written + 2 > cap {
+                    return (OUTPUT_TOO_SMALL, written);
+                }
+                *dst.add(written) = 0xc0 | (ch >> 6);
+                *dst.add(written + 1) = ch & 0xbf;
+                written += 2;
+            } else {
+                if written == cap {
+                    return (OUTPUT_TOO_SMALL, written);
+                }
+                *dst.add(written) = ch;
+                written += 1;
+            }
+        }
+        return (OK, written);
+    }
+
     while i < len {
         let ch = IBM1047_TO_ISO88591[*src.add(i) as usize];
         i += 1;
