@@ -170,7 +170,18 @@ double measureUTF8(bool Rust, const std::vector<std::string> &Corpus) {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+  bool RunChecks = true;
+  int BenchBackend = -1; // -1 both, 0 C++, 1 Rust.
+  for (int I = 1; I < argc; ++I) {
+    if (std::strcmp(argv[I], "--no-checks") == 0)
+      RunChecks = false;
+    else if (std::strcmp(argv[I], "--bench-backend=cpp") == 0)
+      BenchBackend = 0;
+    else if (std::strcmp(argv[I], "--bench-backend=rust") == 0)
+      BenchBackend = 1;
+  }
+
   const std::string EBCDICCorpus[] = {
       "", "A", "ABC", "Hello, world!",
       std::string("\x51", 1), std::string("\x51\x52\x53", 3),
@@ -180,17 +191,19 @@ int main() {
       "", "A", "ABC", "Hello, world!", "\xC3\xA9", "\xC2\xA0\xC3\xBF",
   };
 
-  for (const std::string &S : EBCDICCorpus) {
-    if (!checkUTF8(S))
+  if (RunChecks) {
+    for (const std::string &S : EBCDICCorpus) {
+      if (!checkUTF8(S))
+        return 1;
+    }
+    for (const std::string &S : UTF8Corpus) {
+      if (!checkEBCDIC(S))
+        return 1;
+    }
+    if (!checkFuzz()) {
+      std::fprintf(stderr, "fuzz failed\n");
       return 1;
-  }
-  for (const std::string &S : UTF8Corpus) {
-    if (!checkEBCDIC(S))
-      return 1;
-  }
-  if (!checkFuzz()) {
-    std::fprintf(stderr, "fuzz failed\n");
-    return 1;
+    }
   }
 
   std::vector<std::string> ToUTF8;
@@ -215,20 +228,35 @@ int main() {
   double CppGOFF = 1e100;
   double RustGOFF = 1e100;
   for (unsigned Round = 0; Round != 5; ++Round) {
-    CppUTF8 = std::min(CppUTF8, measureUTF8(false, ToUTF8));
-    RustUTF8 = std::min(RustUTF8, measureUTF8(true, ToUTF8));
-    CppEBCDIC = std::min(CppEBCDIC, measureEBCDIC(false, ToEBCDIC));
-    RustEBCDIC = std::min(RustEBCDIC, measureEBCDIC(true, ToEBCDIC));
-    CppGOFF = std::min(CppGOFF, measureGOFF(false, GOFFNames));
-    RustGOFF = std::min(RustGOFF, measureGOFF(true, GOFFNames));
+    if (BenchBackend != 1) {
+      CppUTF8 = std::min(CppUTF8, measureUTF8(false, ToUTF8));
+      CppEBCDIC = std::min(CppEBCDIC, measureEBCDIC(false, ToEBCDIC));
+      CppGOFF = std::min(CppGOFF, measureGOFF(false, GOFFNames));
+    }
+    if (BenchBackend != 0) {
+      RustUTF8 = std::min(RustUTF8, measureUTF8(true, ToUTF8));
+      RustEBCDIC = std::min(RustEBCDIC, measureEBCDIC(true, ToEBCDIC));
+      RustGOFF = std::min(RustGOFF, measureGOFF(true, GOFFNames));
+    }
   }
 
-  std::printf("to utf8: c++ %.2f ns, rust %.2f ns, speedup %.2fx\n", CppUTF8,
-              RustUTF8, CppUTF8 / RustUTF8);
-  std::printf("to ebcdic: c++ %.2f ns, rust %.2f ns, speedup %.2fx\n",
-              CppEBCDIC, RustEBCDIC, CppEBCDIC / RustEBCDIC);
-  std::printf("goff ascii: c++ %.2f ns, rust %.2f ns, speedup %.2fx\n",
-              CppGOFF, RustGOFF, CppGOFF / RustGOFF);
-  std::printf("OK: Rust EBCDIC conversion matches the C++ reference\n");
+  if (BenchBackend == 0) {
+    std::printf("to utf8: c++ %.2f ns\n", CppUTF8);
+    std::printf("to ebcdic: c++ %.2f ns\n", CppEBCDIC);
+    std::printf("goff ascii: c++ %.2f ns\n", CppGOFF);
+  } else if (BenchBackend == 1) {
+    std::printf("to utf8: rust %.2f ns\n", RustUTF8);
+    std::printf("to ebcdic: rust %.2f ns\n", RustEBCDIC);
+    std::printf("goff ascii: rust %.2f ns\n", RustGOFF);
+  } else {
+    std::printf("to utf8: c++ %.2f ns, rust %.2f ns, speedup %.2fx\n", CppUTF8,
+                RustUTF8, CppUTF8 / RustUTF8);
+    std::printf("to ebcdic: c++ %.2f ns, rust %.2f ns, speedup %.2fx\n",
+                CppEBCDIC, RustEBCDIC, CppEBCDIC / RustEBCDIC);
+    std::printf("goff ascii: c++ %.2f ns, rust %.2f ns, speedup %.2fx\n",
+                CppGOFF, RustGOFF, CppGOFF / RustGOFF);
+  }
+  if (RunChecks)
+    std::printf("OK: Rust EBCDIC conversion matches the C++ reference\n");
   return 0;
 }

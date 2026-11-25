@@ -329,24 +329,37 @@ static double measureApiRound(bool Rust,
          (200.0 * Corpus.size());
 }
 
-int main() {
+int main(int argc, char **argv) {
+  bool RunChecks = true;
+  int BenchBackend = -1; // -1 both, 0 C++, 1 Rust.
+  for (int I = 1; I < argc; ++I) {
+    if (std::strcmp(argv[I], "--no-checks") == 0)
+      RunChecks = false;
+    else if (std::strcmp(argv[I], "--bench-backend=cpp") == 0)
+      BenchBackend = 0;
+    else if (std::strcmp(argv[I], "--bench-backend=rust") == 0)
+      BenchBackend = 1;
+  }
+
   std::vector<std::string> Corpus = makeCorpus();
   std::vector<std::string> LongCorpus = makeLongCorpus();
   Corpus.insert(Corpus.end(), LongCorpus.begin(), LongCorpus.end());
   unsigned Failures = 0;
-  for (const std::string &Symbol : Corpus) {
-    if (!check(Symbol))
-      ++Failures;
-  }
+  if (RunChecks) {
+    for (const std::string &Symbol : Corpus) {
+      if (!check(Symbol))
+        ++Failures;
+    }
 
-  if (!checkNulSuffix()) {
-    std::fprintf(stderr, "differential NUL suffix comparison failed\n");
-    return 1;
-  }
+    if (!checkNulSuffix()) {
+      std::fprintf(stderr, "differential NUL suffix comparison failed\n");
+      return 1;
+    }
 
-  if (!checkFuzz()) {
-    std::fprintf(stderr, "differential fuzz failed\n");
-    return 1;
+    if (!checkFuzz()) {
+      std::fprintf(stderr, "differential fuzz failed\n");
+      return 1;
+    }
   }
 
   double Cpp = 1e100;
@@ -356,28 +369,48 @@ int main() {
   double CppLong = 1e100;
   double RustLong = 1e100;
   for (unsigned Round = 0; Round != 5; ++Round) {
-    Cpp = std::min(Cpp, measureRound(false, Corpus));
-    Rust = std::min(Rust, measureRound(true, Corpus));
-    CppApi = std::min(CppApi, measureApiRound(false, Corpus));
-    RustApi = std::min(RustApi, measureApiRound(true, Corpus));
-    CppLong = std::min(CppLong, measureRound(false, LongCorpus));
-    RustLong = std::min(RustLong, measureRound(true, LongCorpus));
+    if (BenchBackend != 1) {
+      Cpp = std::min(Cpp, measureRound(false, Corpus));
+      CppApi = std::min(CppApi, measureApiRound(false, Corpus));
+      CppLong = std::min(CppLong, measureRound(false, LongCorpus));
+    }
+    if (BenchBackend != 0) {
+      Rust = std::min(Rust, measureRound(true, Corpus));
+      RustApi = std::min(RustApi, measureApiRound(true, Corpus));
+      RustLong = std::min(RustLong, measureRound(true, LongCorpus));
+    }
   }
-  std::printf("corpus: %zu symbols, %u mismatches\n", Corpus.size(), Failures);
-  std::printf("fuzz: 300000 inputs, 0 mismatches\n");
-  std::printf("benchmark: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
-              "speedup %.2fx\n",
-              Cpp, Rust, Cpp / Rust);
-  std::printf("api: c++ %.1f ns/symbol, rust %.1f ns/symbol, speedup %.2fx\n",
-              CppApi, RustApi, CppApi / RustApi);
-  std::printf("long qualified: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
-              "speedup %.2fx\n",
-              CppLong, RustLong, CppLong / RustLong);
+  if (RunChecks) {
+    std::printf("corpus: %zu symbols, %u mismatches\n", Corpus.size(),
+                Failures);
+    std::printf("fuzz: 300000 inputs, 0 mismatches\n");
+  }
+  if (BenchBackend == 0) {
+    std::printf("benchmark: c++ %.1f ns/symbol\n", Cpp);
+    std::printf("api: c++ %.1f ns/symbol\n", CppApi);
+    std::printf("long qualified: c++ %.1f ns/symbol\n", CppLong);
+  } else if (BenchBackend == 1) {
+    std::printf("benchmark: rust %.1f ns/symbol\n", Rust);
+    std::printf("api: rust %.1f ns/symbol\n", RustApi);
+    std::printf("long qualified: rust %.1f ns/symbol\n", RustLong);
+  } else {
+    std::printf("benchmark: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
+                "speedup %.2fx\n",
+                Cpp, Rust, Cpp / Rust);
+    std::printf("api: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
+                "speedup %.2fx\n",
+                CppApi, RustApi, CppApi / RustApi);
+    std::printf("long qualified: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
+                "speedup %.2fx\n",
+                CppLong, RustLong, CppLong / RustLong);
+  }
 
-  if (Failures != 0) {
-    std::fprintf(stderr, "%u mismatches\n", Failures);
-    return 1;
+  if (RunChecks) {
+    if (Failures != 0) {
+      std::fprintf(stderr, "%u mismatches\n", Failures);
+      return 1;
+    }
+    std::printf("OK: Rust dlangDemangle matches the C++ reference\n");
   }
-  std::printf("OK: Rust dlangDemangle matches the C++ reference\n");
   return 0;
 }

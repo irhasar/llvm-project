@@ -114,6 +114,33 @@ the public path, which is 3.0x to 4.0x faster across the same range.
 `llvm/lib/Support/rust/base64/test/differential.cpp` carries the reference
 implementations and both the single-pass and public-path throughput rows.
 
+## Measurement policy
+
+Throughput alone is not a migration result. Every new comparison records both
+backends with the same optimization level and corpus:
+
+- Compile: clean and incremental wall time, user/system CPU, peak RSS,
+  object/archive bytes, and final linked binary bytes.
+- Runtime: wall time, user/system CPU, peak RSS, throughput, and code size or
+  instruction counts where relevant.
+- Five or more repetitions, CPU affinity (`taskset -c 0`), warmup, and
+  median/min-max. A large static Rust archive is reported separately from the
+  linked binary because linker garbage collection removes most unused archive
+  members.
+
+`llvm/utils/rust-migration/bench_metrics.py` measures a command with `wait4`:
+
+```sh
+python3 llvm/utils/rust-migration/bench_metrics.py \
+  --label rust-runtime --repeat 5 -- \
+  taskset -c 0 ./build/bin/llvm-rust-convertebcdic-differential \
+  --no-checks --bench-backend=rust
+```
+
+The differential harnesses accept `--no-checks --bench-backend=cpp|rust` so
+process CPU and RSS can be compared without running the fuzz checks in the
+measured process.
+
 Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`, both on the
 generic x86-64 target unless noted:
 
@@ -126,7 +153,7 @@ generic x86-64 target unless noted:
 | Base64 decode   | 3.0x at 12 B, 3.8x at 1 MiB                   |
 | MD5             | 1.03x to 1.13x (LEA asm + BMI1/BMI2 path)     |
 | ConvertUTF      | 4.5x UTF-8 ASCII, 1.2-1.5x mixed; 1.6x UTF-32->UTF-16 ASCII; 12x `isLegalUTF8String` |
-| ConvertEBCDIC   | 1.04-1.07x UTF-8 output, 1.28-1.30x EBCDIC output, 1.40-1.43x on GOFF 129-256 B names |
+| ConvertEBCDIC   | 1.04-1.10x UTF-8 output, 1.28-1.30x EBCDIC output, 1.40-1.43x on GOFF 129-256 B names |
 | xxHash 64-bit   | 0.99x at 12 B, 1.1x at 48 B, 2.5x at 768 B, 3.5x at 1 MiB |
 | xxHash 128-bit  | 1.04x at 12 B, 1.2x at 48 B, 2.3x at 768 B, 3.5x at 1 MiB |
 
@@ -240,8 +267,8 @@ terminator write is checked for every input. It reports 0 mismatches on all
 sequences rather than stopping at the first NUL.
 `llvm-dlang-stable` runs the golden vectors with the option on and off. Measured
 on the same Zen 4 host with `g++ -O3` and `-C opt-level=3` on generic x86-64,
-best of five rounds, the public wrapper is 1.19x to 1.22x faster on the full
-string path (including the caller's std::string copy), 1.26x to 1.31x faster on
+best of five rounds, the public wrapper is 1.17x to 1.20x faster on the full
+string path (including the caller's std::string copy), 1.21x to 1.26x faster on
 the pointer API, and 1.18x to 1.29x faster on long qualified names with repeated
 back references. The first NUL is found once with `memchr` and cached lazily, so
 NUL-free names do not rescan for back references. A successful parse that stops
@@ -775,7 +802,7 @@ for the Rust matrix. Measured on this Zen 4 host with `g++ -O3` and
 
 | Case | Rust vs C++ |
 |------|-------------|
-| EBCDIC -> UTF-8, 16-64 B | 1.04-1.07x |
+| EBCDIC -> UTF-8, 16-64 B | 1.04-1.10x |
 | UTF-8 -> EBCDIC, 16-64 B | 1.28-1.30x |
 | GOFF ASCII names, 129-256 B | 1.40-1.43x |
 
@@ -783,6 +810,39 @@ The option is `LLVM_ENABLE_RUST_CONVERTEBCDIC` (default `OFF`). A local
 configure adds `llvm_convertebcdic` to `LLVM_SYSTEM_LIBS`; the standalone
 tests build without `LLVMSupport`, so no large LLVM target was rebuilt for the
 measurement.
+
+## Resource measurements for EBCDIC and D
+
+Compile rows are medians of five pinned runs (`taskset -c 0`), using the
+CMake Release compile command (`-O3`) and `cargo build --release --locked` with
+`-C opt-level=3`. Rust compile wall/CPU totals sum the crate build and the C++
+wrapper object; the C++ row is the original one-TU object. Object/archive bytes
+are before linking. Linked bytes are the `*-stable` test binaries.
+
+| Port | Backend | Compile wall ms | Compile CPU ms | Peak RSS MiB | Object/archive bytes | Linked bytes |
+|------|---------|-----------------|----------------|--------------|----------------------|--------------|
+| EBCDIC | C++ | 405.15 | 403.24 | 92.70 | 4,192 | 17,960 |
+| EBCDIC | Rust | 561.23 | 560.76 | 117.57 | 5,069,406 | 18,056 |
+| D | C++ | 342.99 | 350.50 | 68.35 | 15,232 | 229,408 |
+| D | Rust | 501.56 | 498.34 | 128.20 | 5,085,446 | 27,168 |
+
+The Rust archive is about 5 MiB because `staticlib` carries
+`compiler_builtins` bitcode; the linked D stable binary is nevertheless 8.4x
+smaller than the C++ one after linker GC. EBCDIC linked size is 0.5% larger.
+Compile wall time is 1.4x to 1.5x slower for the full Rust port, while runtime
+throughput is faster. These are trade-offs, not a claim that Rust wins every
+metric.
+
+Runtime process rows use `--no-checks --bench-backend=cpp|rust`, five pinned
+runs, and include startup plus the five benchmark rounds. Throughput is the
+separate in-process measurement.
+
+| Port | Backend | Wall ms | User ms | Sys ms | Peak RSS MiB | Throughput |
+|------|---------|---------|---------|--------|--------------|------------|
+| EBCDIC | C++ | 825.88 | 824.42 | 3.00 | 15.12 | 1.00x |
+| EBCDIC | Rust | 636.61 | 632.60 | 3.00 | 15.12 | 1.30x |
+| D | C++ | 68.62 | 66.00 | 2.00 | 15.12 | 1.00x |
+| D | Rust | 58.29 | 55.48 | 2.02 | 15.25 | 1.18x |
 
 ## Risks and mitigations
 

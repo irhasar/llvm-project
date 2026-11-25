@@ -179,9 +179,9 @@ an embedded NUL, and calls the public `dlangDemangleViaFFI` wrapper so its
 terminator write is checked for every input. It reports 0 mismatches and
 benchmarks the public wrapper against the C++ reference. Mismatch diagnostics
 print full byte sequences rather than C strings. Measured here with `g++ -O3`
-and `-C opt-level=3` on generic x86-64, best of five rounds: 1.19x to 1.20x
-on the full string path (including the caller's std::string copy), 1.24x to
-1.25x on the pointer API, and 1.18x to 1.29x on long qualified names with
+and `-C opt-level=3` on generic x86-64, best of five rounds: 1.17x to 1.20x
+on the full string path (including the caller's std::string copy), 1.21x to
+1.26x on the pointer API, and 1.18x to 1.29x on long qualified names with
 repeated back references. The first NUL is
 found once with `memchr` and cached lazily, so NUL-free names do not rescan for
 back references. A successful parse that stops at NUL is accepted even when the
@@ -195,8 +195,36 @@ A toolchain-only install omits the companion archive along with `LLVMDemangle`.
 
 ## Benchmarks
 
-- Compare at the same optimization level: `g++ -O3` against
-  `-C opt-level=3`. Do not compare `-O2` C++ with `-O3` Rust.
+Every C++/Rust comparison must measure both sides, not only throughput:
+
+- **Compile:** clean and incremental wall time, user/system CPU, peak RSS,
+  object/archive bytes, and final linked binary bytes. Record compiler flags
+  and Rust flags.
+- **Runtime:** wall time, user/system CPU, peak RSS, throughput, and code size
+  or instruction counts where relevant.
+- Use the same optimization level (`g++ -O3` against `-C opt-level=3`), input
+  corpus, CPU affinity, and warmup. Report at least five repetitions as median
+  and min-max. Never compare `-O2` C++ with `-O3` Rust.
+- Separate process-level CPU/RSS from per-operation timings. Isolate a backend
+  with `--no-checks --bench-backend=cpp|rust` before comparing resources.
+- `llvm/utils/rust-migration/bench_metrics.py` measures wall time, user/system
+  CPU, peak RSS, and artifact bytes for either a compile command or a runtime
+  benchmark:
+
+```sh
+python3 llvm/utils/rust-migration/bench_metrics.py \
+  --label cpp-compile --repeat 5 --artifact /tmp/ebcdic.o \
+  --prepare 'rm -f /tmp/ebcdic.o' -- sh /tmp/compile-ebcdic.sh
+
+python3 llvm/utils/rust-migration/bench_metrics.py \
+  --label rust-runtime --repeat 5 -- \
+  ./build/bin/llvm-rust-convertebcdic-differential --no-checks \
+  --bench-backend=rust
+```
+
+`size`/`nm` report final linked and section sizes. A large static Rust archive
+is not the same as a large linked binary; report both.
+
 - The crates link as a plain static archive, so the differential test can be
   built without CMake:
   `g++ -O3 test/differential.cpp -Ltarget/release -lllvm_sha256 -o /tmp/diff`
