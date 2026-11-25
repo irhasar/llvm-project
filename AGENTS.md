@@ -5,7 +5,7 @@ The migration itself is described in `MIGRATION_TO_RUST.md`; read that first.
 
 ## What this fork is
 
-- Shallow clone on branch `rust-migration-phase6` (`git rev-parse
+- Shallow clone on branch `rust-migration-phase5` (`git rev-parse
   --is-shallow-repository` returns `true`). History before the tip is absent.
 - The Rust migration of `lib/Support` components lives under
   `llvm/lib/Support/rust/<component>/`; demangler ports live under
