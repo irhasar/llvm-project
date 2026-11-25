@@ -682,6 +682,8 @@ option(LLVM_ENABLE_RUST_CONVERTUTF
   "Use the Rust implementation of ConvertUTF in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_XXHASH
   "Use the Rust implementation of xxHash in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_RUSTDEMANGLE
+  "Use the Rust implementation of the Rust v0 demangler in LLVMDemangle (experimental)" OFF)
 set(LLVM_RUST_FLAGS "" CACHE STRING
   "Extra flags passed to rustc via RUSTFLAGS when building Rust components")
 

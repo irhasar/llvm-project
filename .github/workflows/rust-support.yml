@@ -18,6 +18,7 @@ on:
       - 'llvm/lib/Support/ConvertUTFWrapper.cpp'
       - 'llvm/lib/Support/xxhash.cpp'
       - 'llvm/lib/Support/CMakeLists.txt'
+      - 'llvm/lib/Demangle/**'
       - 'llvm/CMakeLists.txt'
       - 'llvm/cmake/modules/AddRustLibrary.cmake'
       - 'llvm/lib/Target/X86/X86FixupLEAs.cpp'
@@ -51,6 +52,12 @@ jobs:
               && cargo test)
             echo "::endgroup::"
           done
+          echo "::group::rustdemangle"
+          (cd llvm/lib/Demangle/rust/rustdemangle \
+            && cargo fmt --check \
+            && cargo clippy --all-targets -- -D warnings \
+            && cargo test)
+          echo "::endgroup::"
   aarch64:
     name: AArch64 NEON (qemu)
     runs-on: ubuntu-24.04
@@ -94,7 +101,7 @@ jobs:
         run: |
           RUST_FLAGS=""
           if [ "${{ matrix.backend }}" = "rust" ]; then
-            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_XXHASH=ON"
+            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON"
           fi
           cmake -G Ninja -S llvm -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -112,7 +119,7 @@ jobs:
         run: |
           ninja -C build llvm-siphash-stable-hash llvm-crc-stable llvm-md5-stable \
             llvm-sha1-stable llvm-sha256-stable llvm-base64-stable \
-            llvm-convertutf-stable llvm-xxhash-stable
+            llvm-convertutf-stable llvm-xxhash-stable llvm-rustdemangle-stable
           ./build/bin/llvm-siphash-stable-hash
           ./build/bin/llvm-crc-stable
           ./build/bin/llvm-md5-stable
@@ -121,13 +128,14 @@ jobs:
           ./build/bin/llvm-base64-stable
           ./build/bin/llvm-convertutf-stable
           ./build/bin/llvm-xxhash-stable
+          ./build/bin/llvm-rustdemangle-stable
       - name: Differential checks
         if: matrix.backend == 'rust'
         run: |
           ninja -C build check-llvm-rust-siphash check-llvm-rust-crc \
             check-llvm-rust-md5 check-llvm-rust-sha1 check-llvm-rust-sha256 \
             check-llvm-rust-base64 check-llvm-rust-convertutf \
-            check-llvm-rust-xxhash
+            check-llvm-rust-xxhash check-llvm-rust-rustdemangle
 
   codegen-lea:
     name: LEA fold (llc)

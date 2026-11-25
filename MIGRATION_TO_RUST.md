@@ -2,8 +2,9 @@
 
 This document describes an experiment in porting LLVM components to Rust one at
 a time, without a flag day and without making the Rust toolchain a hard
-dependency of the build. The first slice, `llvm/lib/Support/SipHash.cpp`, is
-implemented and verified; everything else here is the plan for the next phases.
+dependency of the build. The Phase 1 `lib/Support` slices are implemented and
+verified, and Phase 2 started with `llvm/lib/Demangle/RustDemangle.cpp`; the
+remaining phases below are the plan.
 
 ## Goals and non-goals
 
@@ -150,12 +151,67 @@ The point of this phase is volume: prove that the plumbing works for many small
 crates, and settle conventions (error reporting via return codes, output buffer
 sizes, debug info) before touching anything structural.
 
-### Phase 2 - demanglers
+### Phase 2 - demanglers (in progress)
 
-`llvm/lib/Demangle` is a string-to-string component with no LLVM data
-structures and a clean ownership story: the caller passes a buffer and a
-length. It is large enough to be a real test of the workflow and isolated
-enough to be safe.
+The first Phase 2 port is `llvm/lib/Demangle/RustDemangle.cpp` behind
+`LLVM_ENABLE_RUST_RUSTDEMANGLE` (default `OFF`). The crate lives in
+`llvm/lib/Demangle/rust/rustdemangle` and follows the same rules as the
+`lib/Support` ports: `no_std`, no dependencies, `panic = "abort"`, and a
+committed `Cargo.lock`.
+
+The Rust entry point is
+`llvm_rustdemangle_demangle(input, input_len, uint8_t **output) -> isize`.
+Unlike the byte-buffer ports, it owns the output allocation: it grows a buffer
+with `realloc`, returns its length, and leaves the pointer for the C++ caller to
+release with `std::free`. That matches the existing `llvm::rustDemangle`
+contract, which returns a malloc'd NUL-terminated string. `RustDemangle.cpp`
+becomes a thin wrapper when the option is on; the original C++ implementation
+remains in the `#else` branch and is still the reference used by the
+differential test.
+
+Correctness coverage:
+
+* `cargo test` runs four golden groups, including a punycode identifier and a
+  `.llvm.<hash>` suffix.
+* `llvm-rust-rustdemangle-differential` demangles 205 real `libstd` symbols
+  extracted from the toolchain's `libstd-*.rlib`, then 50,000 random byte
+  strings and 50,000 mutations of the corpus. Both backends must agree on
+  success, failure, and the exact output.
+* `llvm-rustdemangle-stable` contains the same golden vectors and runs with the
+  option on and off, so the C++ and Rust backends are checked against identical
+  expected values.
+
+The corpus and the differential test are the performance harness. The main
+optimization was replacing the branchy ASCII classification in identifier and
+number parsing with three 256-byte lookup tables (`CHAR_CLASS`,
+`BASE62_DIGITS`, `HEX_DIGITS`); this removed enough branches to move the port
+from slightly slower to consistently faster. Output growth keeps the C++
+`OutputBuffer` hysteresis and reserves the terminator only once at the end, so
+the parser pays one capacity compare per append instead of a growth check.
+
+Measured on this Zen 4 host with `g++ -O3` against `-C opt-level=3`, generic
+x86-64 on both sides:
+
+| Corpus                         | Full string path | Pointer API |
+|--------------------------------|------------------|-------------|
+| 205 real `libstd` symbols      | 1.02x - 1.06x    | 1.05x - 1.08x |
+| 50 shortest symbols            | 1.08x - 1.09x    | 0.98x       |
+| 50 longest symbols             | 1.09x - 1.10x    | 1.07x - 1.11x |
+
+Each row is the best of five rounds, alternating the two backends, to keep CPU
+frequency drift out of the comparison. The pointer-API column times
+`llvm::rustDemangle` without constructing a `std::string`; the full path times
+the same call plus the caller's string copy. The shortest-symbol pointer API is
+2% below parity, inside the 5% gate; every other row is faster. Overall the port
+is faster, not merely at parity.
+
+A local configure with only `LLVM_ENABLE_RUST_RUSTDEMANGLE=ON` produced
+`LLVM_SYSTEM_LIBS = "-lrt -ldl -lm -lllvm_rustdemangle"`. The
+`llvm-rust-rustdemangle-differential` and `llvm-rustdemangle-stable` targets
+build without `LLVMSupport`, and `cmake --install --component LLVMDemangle`
+installs both `libLLVMDemangle.a` and `libllvm_rustdemangle.a`. Configuring the
+option `OFF` produces the original system-libs list and the stable test still
+passes against the C++ backend.
 
 ### Phase 3 - object file readers
 
@@ -667,7 +723,8 @@ keeps every step of the migration reversible.
 
 1. Keep the SHA-NI dispatch as the default for SHA-1 and SHA-256. The Phase 1
    candidate list (CRC, MD5, SHA-1, SHA-256, Base64, ConvertUTF, xxHash) is
-   complete; evaluate the Phase 2 demangler work next.
+   complete. Phase 2 started with `RustDemangle`; evaluate the Itanium,
+   Microsoft, and DLang demanglers next.
 2. Decide whether `-x86-fold-add-into-lea` should become default on targets
    where a three-operand LEA is cheap. That requires a CodeGen test suite and
    wider benchmarking; the peephole is opt-in until then.
@@ -680,6 +737,6 @@ keeps every step of the migration reversible.
 5. Keep `rust-toolchain.toml` on a pinned nightly and the CI legs in
    `.github/workflows/rust-support.yml` (lint, C++/Rust golden tests,
    differential checks, and the `codegen-lea` llc job).
-6. Merge the enabled Rust archives into the installed `LLVMSupport`, or
-   install them as companions and list them in `llvm-config`, so downstream
-   static links keep working outside the build tree.
+6. Keep installing enabled Rust archives as companions and listing them in
+   `llvm-config`. `LLVMDemangle` now owns `libllvm_rustdemangle.a`; follow the
+   same per-component install pattern for the remaining ports.
