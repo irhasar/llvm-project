@@ -19,7 +19,7 @@ find_program(LLVM_RUST_CARGO_EXECUTABLE
 mark_as_advanced(LLVM_RUST_CARGO_EXECUTABLE)
 
 function(add_llvm_rust_staticlib name manifest)
-  cmake_parse_arguments(ARG "" "INSTALL_COMPONENT" "INSTALL_WITH_TOOLCHAIN" ${ARGN})
+  cmake_parse_arguments(ARG "INSTALL_WITH_TOOLCHAIN" "INSTALL_COMPONENT" "" ${ARGN})
   if(NOT ARG_INSTALL_COMPONENT)
     set(ARG_INSTALL_COMPONENT LLVMSupport)
   endif()
