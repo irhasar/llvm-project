@@ -27,20 +27,7 @@
 #include "RustDemangleFFI.h"
 
 char *llvm::rustDemangle(std::string_view MangledName) {
-  if (MangledName.size() < 2 || MangledName[0] != '_' || MangledName[1] != 'R')
-    return nullptr;
-
-  uint8_t *Buffer = nullptr;
-  std::intptr_t Need = llvm_rustdemangle_demangle(
-      reinterpret_cast<const uint8_t *>(MangledName.data()), MangledName.size(),
-      &Buffer);
-  if (Need < 0)
-    return nullptr;
-
-  // The Rust side already wrote the terminator; keep the contract explicit.
-  char *Result = reinterpret_cast<char *>(Buffer);
-  Result[static_cast<size_t>(Need)] = '\0';
-  return Result;
+  return llvm::detail::rustDemangleViaFFI(MangledName);
 }
 
 #else

@@ -1346,15 +1346,14 @@ pub unsafe extern "C" fn llvm_rustdemangle_demangle(
         return -1;
     }
 
-    // Reserve the terminator before returning the buffer to C++.
-    demangler.out.push_byte(0);
-    if demangler.out.failed {
+    // Reserve room for the NUL terminator; the C++ caller writes it.
+    if !demangler.out.ensure(1) {
         if !demangler.out.buf.is_null() {
             free(demangler.out.buf.cast());
         }
         return -1;
     }
-    let len = demangler.out.len - 1;
+    let len = demangler.out.len;
     if len > isize::MAX as usize {
         free(demangler.out.buf.cast());
         return -1;

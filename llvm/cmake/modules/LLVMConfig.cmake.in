@@ -142,8 +142,36 @@ set(LLVM_LIBRARY_DIR "@LLVM_CONFIG_LIBRARY_DIR@")
 
 if(LLVM_ENABLE_RUST_RUSTDEMANGLE AND NOT TARGET llvm_rustdemangle)
   add_library(llvm_rustdemangle STATIC IMPORTED GLOBAL)
-  set_target_properties(llvm_rustdemangle PROPERTIES
-    IMPORTED_LOCATION "${LLVM_LIBRARY_DIR}/@LLVM_RUSTDEMANGLE_LIBRARY_NAME@")
+  set(_llvm_rustdemangle_location
+    "@LLVM_CONFIG_RUSTDEMANGLE_IMPORTED_LOCATION@")
+  if(_llvm_rustdemangle_location)
+    set_target_properties(llvm_rustdemangle PROPERTIES
+      IMPORTED_LOCATION "${_llvm_rustdemangle_location}")
+  endif()
+  set(_llvm_rustdemangle_locations
+    "@LLVM_CONFIG_RUSTDEMANGLE_IMPORTED_LOCATIONS@")
+  foreach(_llvm_rustdemangle_entry IN LISTS _llvm_rustdemangle_locations)
+    string(FIND "${_llvm_rustdemangle_entry}" "=" _llvm_rustdemangle_sep)
+    if(_llvm_rustdemangle_sep EQUAL -1)
+      continue()
+    endif()
+    string(SUBSTRING "${_llvm_rustdemangle_entry}" 0
+      ${_llvm_rustdemangle_sep} _llvm_rustdemangle_config)
+    math(EXPR _llvm_rustdemangle_start "${_llvm_rustdemangle_sep} + 1")
+    string(SUBSTRING "${_llvm_rustdemangle_entry}"
+      ${_llvm_rustdemangle_start} -1 _llvm_rustdemangle_path)
+    set_property(TARGET llvm_rustdemangle APPEND PROPERTY
+      IMPORTED_CONFIGURATIONS "${_llvm_rustdemangle_config}")
+    set_target_properties(llvm_rustdemangle PROPERTIES
+      "IMPORTED_LOCATION_${_llvm_rustdemangle_config}"
+      "${_llvm_rustdemangle_path}")
+  endforeach()
+  if(NOT _llvm_rustdemangle_location AND NOT _llvm_rustdemangle_locations)
+    set_target_properties(llvm_rustdemangle PROPERTIES
+      IMPORTED_LOCATION "${LLVM_LIBRARY_DIR}/@LLVM_RUSTDEMANGLE_LIBRARY_NAME@")
+  endif()
+  unset(_llvm_rustdemangle_location)
+  unset(_llvm_rustdemangle_locations)
 endif()
 
 # This is a secondary one for generated files

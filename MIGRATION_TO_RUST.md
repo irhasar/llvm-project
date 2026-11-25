@@ -200,13 +200,14 @@ x86-64 on both sides:
 
 | Corpus                         | Full string path | Pointer API |
 |--------------------------------|------------------|-------------|
-| 205 real `libstd` symbols      | 1.12x - 1.16x    | 1.11x - 1.16x |
-| 50 shortest symbols            | 1.07x - 1.09x    | 1.06x - 1.09x |
-| 50 longest symbols             | 1.13x - 1.16x    | 1.12x - 1.16x |
+| 205 real `libstd` symbols      | 1.07x - 1.10x    | 1.08x - 1.10x |
+| 50 shortest symbols            | 1.05x - 1.11x    | 1.05x - 1.11x |
+| 50 longest symbols             | 1.07x - 1.10x    | 1.07x - 1.10x |
 
 Each row is the best of five rounds, alternating the two backends, to keep CPU
 frequency drift out of the comparison. The pointer-API column times
-`llvm::rustDemangle` without constructing a `std::string`, with `strlen` applied
+`llvm::rustDemangle` without constructing a `std::string`, through the same
+prefix check and terminator write as the public wrapper, with `strlen` applied
 to both backends so both do the same pointer-API work; the full path times the
 same call plus the caller's string copy. Every row is faster, including the
 short-symbol pointer API.

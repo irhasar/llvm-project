@@ -69,14 +69,32 @@ list(REMOVE_DUPLICATES LLVM_CONFIG_LIBRARY_DIRS)
 
 # The Rust archive is an imported target in the build tree. Recreate it in
 # LLVMConfig.cmake so an exported static component can resolve its private
-# link dependency from the installed package.
+# link dependency from the installed package. A multi-config build must expose
+# concrete per-config paths; a downstream generator cannot expand the
+# producer's CMAKE_CFG_INTDIR placeholder.
 set(LLVM_RUSTDEMANGLE_LIBRARY_NAME "")
+set(LLVM_CONFIG_RUSTDEMANGLE_IMPORTED_LOCATION "")
+set(LLVM_CONFIG_RUSTDEMANGLE_IMPORTED_LOCATIONS "")
 if(LLVM_ENABLE_RUST_RUSTDEMANGLE)
   get_property(LLVM_RUSTDEMANGLE_LIBRARY_NAME GLOBAL
     PROPERTY LLVM_RUST_llvm_rustdemangle_LIBRARY_NAME)
   if(NOT LLVM_RUSTDEMANGLE_LIBRARY_NAME)
     set(LLVM_RUSTDEMANGLE_LIBRARY_NAME
       "${CMAKE_STATIC_LIBRARY_PREFIX}llvm_rustdemangle${CMAKE_STATIC_LIBRARY_SUFFIX}")
+  endif()
+  if(CMAKE_CONFIGURATION_TYPES)
+    foreach(llvm_config IN LISTS CMAKE_CONFIGURATION_TYPES)
+      string(TOUPPER "${llvm_config}" llvm_config_upper)
+      set(llvm_rustdemangle_location
+        "${LLVM_LIBRARY_DIR}/${LLVM_RUSTDEMANGLE_LIBRARY_NAME}")
+      string(REPLACE "${CMAKE_CFG_INTDIR}" "${llvm_config}"
+        llvm_rustdemangle_location "${llvm_rustdemangle_location}")
+      list(APPEND LLVM_CONFIG_RUSTDEMANGLE_IMPORTED_LOCATIONS
+        "${llvm_config_upper}=${llvm_rustdemangle_location}")
+    endforeach()
+  else()
+    set(LLVM_CONFIG_RUSTDEMANGLE_IMPORTED_LOCATION
+      "${LLVM_LIBRARY_DIR}/${LLVM_RUSTDEMANGLE_LIBRARY_NAME}")
   endif()
 endif()
 
@@ -151,7 +169,11 @@ set(LLVM_CONFIG_LIBRARY_DIRS
 list(REMOVE_DUPLICATES LLVM_CONFIG_LIBRARY_DIRS)
 
 # Keep the Rust demangler's imported target available to installed consumers.
+# Installed libraries live directly in the install library directory, so a
+# plain IMPORTED_LOCATION works for every generator.
 set(LLVM_RUSTDEMANGLE_LIBRARY_NAME "")
+set(LLVM_CONFIG_RUSTDEMANGLE_IMPORTED_LOCATION "")
+set(LLVM_CONFIG_RUSTDEMANGLE_IMPORTED_LOCATIONS "")
 if(LLVM_ENABLE_RUST_RUSTDEMANGLE)
   get_property(LLVM_RUSTDEMANGLE_LIBRARY_NAME GLOBAL
     PROPERTY LLVM_RUST_llvm_rustdemangle_LIBRARY_NAME)
@@ -159,6 +181,8 @@ if(LLVM_ENABLE_RUST_RUSTDEMANGLE)
     set(LLVM_RUSTDEMANGLE_LIBRARY_NAME
       "${CMAKE_STATIC_LIBRARY_PREFIX}llvm_rustdemangle${CMAKE_STATIC_LIBRARY_SUFFIX}")
   endif()
+  set(LLVM_CONFIG_RUSTDEMANGLE_IMPORTED_LOCATION
+    "${LLVM_LIBRARY_DIR}/${LLVM_RUSTDEMANGLE_LIBRARY_NAME}")
 endif()
 
 set(LLVM_CONFIG_BINARY_DIR "\${LLVM_INSTALL_PREFIX}")

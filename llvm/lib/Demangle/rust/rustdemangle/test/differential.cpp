@@ -19,19 +19,11 @@
 #include <vector>
 
 static bool rustDemangle(std::string_view Mangled, std::string &Result) {
-  uint8_t *Buffer = nullptr;
-  std::intptr_t Need = llvm_rustdemangle_demangle(
-      reinterpret_cast<const uint8_t *>(Mangled.data()), Mangled.size(),
-      &Buffer);
-  if (Need < 0)
+  char *Text = llvm::detail::rustDemangleViaFFI(Mangled);
+  if (!Text)
     return false;
-
-  char *Text = reinterpret_cast<char *>(Buffer);
-  // The public C++ API returns a NUL-terminated string, so callers stop at an
-  // embedded NUL just as they do for the C++ backend.
-  Text[static_cast<size_t>(Need)] = '\0';
   Result.assign(Text);
-  std::free(Buffer);
+  std::free(Text);
   return true;
 }
 
@@ -168,15 +160,12 @@ static double measureApi(bool Rust, const std::vector<std::string> &Corpus,
   for (unsigned I = 0; I != Iterations; ++I) {
     for (const std::string &Symbol : Corpus) {
       if (Rust) {
-        uint8_t *Buffer = nullptr;
-        std::intptr_t Need = llvm_rustdemangle_demangle(
-            reinterpret_cast<const uint8_t *>(Symbol.data()), Symbol.size(),
-            &Buffer);
-        if (Need >= 0) {
+        char *Demangled = llvm::detail::rustDemangleViaFFI(Symbol);
+        if (Demangled) {
           // Match the C++ branch: both measure the public pointer API,
           // including the length scan a C string caller needs.
-          Sink += std::strlen(reinterpret_cast<char *>(Buffer));
-          std::free(Buffer);
+          Sink += std::strlen(Demangled);
+          std::free(Demangled);
         }
       } else {
         char *Demangled = llvm::rustDemangle(Symbol);
