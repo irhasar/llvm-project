@@ -257,6 +257,64 @@ pub unsafe extern "C" fn llvm_convertutf_is_legal_utf8_string(
     }
 }
 
+#[inline(always)]
+fn is_utf16_surrogate(ch: u32) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let tmp: u32;
+        unsafe {
+            core::arch::asm!(
+                "lea {tmp:e}, [{ch:e} - 0xd800]",
+                tmp = out(reg) tmp,
+                ch = in(reg) ch,
+                options(pure, nomem, nostack),
+            );
+        }
+        tmp <= 0x7FF
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        ch.wrapping_sub(UNI_SUR_HIGH_START) <= UNI_SUR_LOW_END - UNI_SUR_HIGH_START
+    }
+}
+
+#[inline(never)]
+unsafe fn convert_ascii_run_utf16(
+    source: &mut *const u32,
+    source_end: *const u32,
+    target: &mut *mut u16,
+    target_end: *mut u16,
+) {
+    unsafe {
+        let mut s = *source;
+        let mut t = *target;
+        #[cfg(target_endian = "little")]
+        {
+            while s.add(3) < source_end && t.add(3) < target_end {
+                let c0 = *s;
+                let c1 = *s.add(1);
+                let c2 = *s.add(2);
+                let c3 = *s.add(3);
+                if (c0 | c1 | c2 | c3) >= 0x80 {
+                    break;
+                }
+                let packed =
+                    (c0 as u64) | ((c1 as u64) << 16) | ((c2 as u64) << 32) | ((c3 as u64) << 48);
+                (t as *mut u64).write_unaligned(packed);
+                s = s.add(4);
+                t = t.add(4);
+            }
+        }
+        while s < source_end && t < target_end && *s < 0x80 {
+            *t = *s as u16;
+            s = s.add(1);
+            t = t.add(1);
+        }
+        *source = s;
+        *target = t;
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_utf32_to_utf16(
     source_start: *mut *const u32,
@@ -269,10 +327,67 @@ pub unsafe extern "C" fn llvm_convertutf_utf32_to_utf16(
     let mut target = unsafe { *target_start };
     let mut result = CONVERSION_OK;
 
-    while source < source_end && target < target_end && unsafe { *source } < 0x80 {
+    let mut ascii_run = false;
+    if unsafe { source.add(1) } < source_end {
+        let c0 = unsafe { *source };
+        let c1 = unsafe { *source.add(1) };
+        ascii_run = (c0 | c1) < 0x80;
+    }
+    if ascii_run {
+        unsafe { convert_ascii_run_utf16(&mut source, source_end, &mut target, target_end) };
+    } else if source < source_end && target < target_end && unsafe { *source } < 0x80 {
         unsafe { *target = *source as u16 };
         source = unsafe { source.add(1) };
         target = unsafe { target.add(1) };
+    }
+    // With two output slots per input code point the worst case cannot
+    // exhaust the target, so the hot loop can skip the capacity checks.
+    let src_len = unsafe { source_end.offset_from(source) } as usize;
+    let dst_len = unsafe { target_end.offset_from(target) } as usize;
+    if dst_len / 2 >= src_len {
+        while source < source_end {
+            let ch = unsafe { *source };
+            source = unsafe { source.add(1) };
+            if ch <= UNI_MAX_BMP {
+                if is_utf16_surrogate(ch) {
+                    if flags == STRICT_CONVERSION {
+                        source = unsafe { source.sub(1) };
+                        result = SOURCE_ILLEGAL;
+                        break;
+                    } else {
+                        unsafe { *target = UNI_REPLACEMENT_CHAR as u16 };
+                        target = unsafe { target.add(1) };
+                    }
+                } else {
+                    unsafe { *target = ch as u16 };
+                    target = unsafe { target.add(1) };
+                }
+            } else if ch > UNI_MAX_LEGAL_UTF32 {
+                if flags == STRICT_CONVERSION {
+                    result = SOURCE_ILLEGAL;
+                } else {
+                    unsafe { *target = UNI_REPLACEMENT_CHAR as u16 };
+                    target = unsafe { target.add(1) };
+                }
+            } else {
+                let ch = ch - HALF_BASE;
+                let hi = ((ch >> HALF_SHIFT) + UNI_SUR_HIGH_START) as u16;
+                let lo = ((ch & HALF_MASK) + UNI_SUR_LOW_START) as u16;
+                #[cfg(target_endian = "little")]
+                unsafe {
+                    (target as *mut u32).write_unaligned((hi as u32) | ((lo as u32) << 16));
+                }
+                #[cfg(not(target_endian = "little"))]
+                unsafe {
+                    *target = hi;
+                    *target.add(1) = lo;
+                }
+                target = unsafe { target.add(2) };
+            }
+        }
+        unsafe { *source_start = source };
+        unsafe { *target_start = target };
+        return result;
     }
     while source < source_end {
         if target >= target_end {
@@ -283,7 +398,7 @@ pub unsafe extern "C" fn llvm_convertutf_utf32_to_utf16(
         let ch = unsafe { *source };
         source = unsafe { source.add(1) };
         if ch <= UNI_MAX_BMP {
-            if ch >= UNI_SUR_HIGH_START && ch <= UNI_SUR_LOW_END {
+            if is_utf16_surrogate(ch) {
                 if flags == STRICT_CONVERSION {
                     source = unsafe { source.sub(1) };
                     result = SOURCE_ILLEGAL;

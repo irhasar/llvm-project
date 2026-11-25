@@ -396,26 +396,38 @@ void benchOne(const char *Name, const std::vector<SrcT> &Src, size_t DstCount,
   DstT *DE = D + DstCount;
   volatile size_t Sink = 0;
   double C = 1e30, R = 1e30;
-  for (int Rep = 0; Rep < 15; ++Rep) {
+  size_t Units = Src.size() ? Src.size() : 1;
+  int Inner = int(std::max<size_t>(1, 65536 / Units));
+  auto RunCpp = [&]() {
     auto T0 = Clock::now();
-    {
+    for (int I = 0; I < Inner; ++I) {
       const SrcT *P = S;
       DstT *Q = D;
       Cpp(&P, SE, &Q, DE);
       Sink += size_t(Q - D);
     }
     auto T1 = Clock::now();
-    C = std::min(C, std::chrono::duration<double, std::nano>(T1 - T0).count());
-
-    T0 = Clock::now();
-    {
+    return std::chrono::duration<double, std::nano>(T1 - T0).count() / Inner;
+  };
+  auto RunRust = [&]() {
+    auto T0 = Clock::now();
+    for (int I = 0; I < Inner; ++I) {
       const SrcT *P = S;
       DstT *Q = D;
       Rust(&P, SE, &Q, DE);
       Sink += size_t(Q - D);
     }
-    T1 = Clock::now();
-    R = std::min(R, std::chrono::duration<double, std::nano>(T1 - T0).count());
+    auto T1 = Clock::now();
+    return std::chrono::duration<double, std::nano>(T1 - T0).count() / Inner;
+  };
+  for (int Rep = 0; Rep < 15; ++Rep) {
+    if (Rep % 2 == 0) {
+      C = std::min(C, RunCpp());
+      R = std::min(R, RunRust());
+    } else {
+      R = std::min(R, RunRust());
+      C = std::min(C, RunCpp());
+    }
   }
   std::printf("%-20s %8zu %10.1f %10.1f %7.2fx\n", Name, Src.size(), C, R,
               C / R);

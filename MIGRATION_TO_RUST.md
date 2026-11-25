@@ -116,7 +116,7 @@ generic x86-64 target unless noted:
 | Base64 encode   | 1.6x at 48 B, 6.2x at 1 MiB                   |
 | Base64 decode   | 3.5x at 12 B, 5.0x at 1 MiB                   |
 | MD5             | 1.03x to 1.13x (LEA asm + BMI1/BMI2 path)     |
-| ConvertUTF      | 4.5x UTF-8 ASCII, 1.2-1.5x mixed; 12x `isLegalUTF8String` |
+| ConvertUTF      | 4.5x UTF-8 ASCII, 1.2-1.5x mixed; 1.6x UTF-32->UTF-16 ASCII; 12x `isLegalUTF8String` |
 
 MD5 initially lost to GCC at the generic target (0.83x). LLVM's reassociation
 moved the round constant to the end of `a + f + x + t`, leaving three register
@@ -511,10 +511,10 @@ The Rust code is a direct translation of the Unicode 6.3 rules, including the
 `sourceExhausted` / `targetExhausted` / `sourceIllegal` pointer positions and
 the maximal-subpart replacement used by `ConvertUTF8toUTF32` in lenient mode.
 On top of that it adds ASCII fast paths: `ConvertUTF8toUTF16` and
-`ConvertUTF8toUTF32` write ASCII directly, and the UTF-16/UTF-32 directions
-consume a leading ASCII run before entering the scalar loop. `isLegalUTF8String`
-scans ASCII eight bytes at a time, which matters for JSON and command-line
-parsing.
+`ConvertUTF8toUTF32` write ASCII directly, the UTF-16/UTF-32 directions consume
+a leading ASCII run before entering the scalar loop, and UTF-32 -> UTF-16
+writes four ASCII units per 64-bit store. `isLegalUTF8String` scans ASCII eight
+bytes at a time, which matters for JSON and command-line parsing.
 
 `test/differential.cpp` compiles the original `ConvertUTF.cpp` (without the
 option define) next to the Rust archive and compares result codes, source and
@@ -535,14 +535,17 @@ Measured on this Zen 4 host, `g++ -O3` against `-C opt-level=3`:
 | UTF-16 -> UTF-8         | 1.5x - 2.0x    | 1.05x          |
 | UTF-32 -> UTF-8         | 1.0x - 1.5x    | 1.0x - 1.1x    |
 | UTF-16 -> UTF-32        | 1.0x - 1.5x    | 1.0x - 1.2x    |
-| UTF-32 -> UTF-16        | 1.0x - 1.4x    | 0.7x - 1.1x    |
+| UTF-32 -> UTF-16        | 1.6x           | 1.0x           |
 | `isLegalUTF8String`     | 6x - 12x       | 2.5x           |
 
-The UTF-32 -> UTF-16 mixed case is the only one that occasionally trails the
-C++ loop (about 0.7x at 256 units, parity from 1 KiB and at 64 KiB); UTF-32
-input is rare in LLVM, and the ASCII and small-input cases are faster. The
-helper functions are bit-identical to the C++ implementation; the exhaustive
-check covers the `findMaximalSubpart` table directly.
+The UTF-32 -> UTF-16 direction now has a guaranteed-capacity loop that skips
+the per-code-point target checks when the caller provided two UTF-16 slots per
+input code point, an out-of-line ASCII block that writes four UTF-16 units per
+64-bit store, and a single 32-bit store for each surrogate pair. ASCII input is
+1.6x faster than C++; mixed BMP/supplementary input is at parity (1.00-1.01x)
+from 256 units upward. The helper functions are bit-identical to the C++
+implementation; the exhaustive check covers the `findMaximalSubpart` table
+directly.
 
 ## Risks and mitigations
 
