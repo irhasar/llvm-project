@@ -164,6 +164,21 @@ struct Reader {
 
 impl Reader {
     fn read_module(&mut self, block: &Block) -> Result<()> {
+        // Attribute groups can appear before the triple record. Scan it first
+        // so AArch64 memory-target upgrades are decoded correctly.
+        if self.module.target_triple.is_none() {
+            for item in &block.items {
+                if let Item::Record(record) = item {
+                    if record.code == MODULE_TRIPLE {
+                        self.module.target_triple =
+                            Some(bytes_to_utf8(&record.operands).ok_or_else(|| {
+                                Error::bitcode("target triple is not valid UTF-8")
+                            })?);
+                        break;
+                    }
+                }
+            }
+        }
         for item in &block.items {
             match item {
                 Item::Record(record) => match record.code {
@@ -215,8 +230,12 @@ impl Reader {
             if record.code != PARAMATTR_GRP_CODE_ENTRY {
                 continue;
             }
-            let (group, index, mut attrs) =
-                decode_attribute_group(record, &self.module.types, &self.types)?;
+            let (group, index, mut attrs) = decode_attribute_group(
+                record,
+                &self.module.types,
+                &self.types,
+                self.module.target_triple.as_deref(),
+            )?;
             deduplicate_attributes(&mut attrs);
             self.attr_budget = self
                 .attr_budget
@@ -1569,6 +1588,38 @@ mod tests {
             operands: groups.to_vec(),
             blob: None,
         }
+    }
+
+    #[test]
+    fn reads_triple_before_decoding_aarch64_memory_groups() {
+        let group = Block {
+            id: PARAMATTR_GROUP_BLOCK,
+            code_len: 0,
+            items: vec![Item::Record(Record {
+                code: PARAMATTR_GRP_CODE_ENTRY,
+                operands: vec![1, u64::from(u32::MAX), 1, 86, (2u64 << 56) | 0x504],
+                blob: None,
+            })],
+        };
+        let triple = Record {
+            code: MODULE_TRIPLE,
+            operands: b"aarch64-unknown-linux-gnu"
+                .iter()
+                .map(|byte| u64::from(*byte))
+                .collect(),
+            blob: None,
+        };
+        let block = Block {
+            id: MODULE_BLOCK,
+            code_len: 0,
+            items: vec![Item::Block(group), Item::Record(triple)],
+        };
+        let mut reader = test_reader(Vec::new());
+        reader.read_module(&block).expect("read module");
+        assert_eq!(
+            reader.attr_groups[&1].1.as_ref(),
+            &[attr("memory(inaccessiblemem: read)")]
+        );
     }
 
     #[test]

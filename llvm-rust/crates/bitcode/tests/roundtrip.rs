@@ -216,6 +216,39 @@ fn rust_bitcode_round_trip_matches_text() {
 }
 
 #[test]
+fn scoped_memory_overrides_are_visible_after_round_trip() {
+    let source = r#"declare void @callee()
+declare void @inline_legacy(ptr) readnone #0
+declare void @inline_modern(ptr) memory(argmem: write) #1
+
+define void @caller() {
+entry:
+  call void @callee() readnone #0
+  ret void
+}
+
+attributes #0 = { memory(argmem: write) }
+attributes #1 = { readnone }
+"#;
+    let mut module = parse_module(source).expect("parse scoped memory");
+    let bytes = write_bitcode(&mut module).expect("write scoped memory");
+    let read = read_bitcode(&bytes).expect("read scoped memory");
+    let text = print_module(&read);
+    assert!(
+        text.contains("declare void @inline_legacy(ptr) memory(argmem: write)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("declare void @inline_modern(ptr) memory(none)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("call void @callee() memory(argmem: write)"),
+        "{text}"
+    );
+}
+
+#[test]
 fn disassemble_assemble_preserves_unnamed_slots() {
     let source = "declare void @0()\n\n@1 = global i32 1\n";
     let mut module = parse_module(source).expect("parse numeric slots");

@@ -93,9 +93,11 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   inline or numbered-group source, then emitted as one modern `memory(...)`
   attribute keyed by the memory kind. Numbered groups apply after inline
   attributes, so a scoped group can override an inline flag. Modern memory
-  uses LLVM 19's three-location encoding. The writer rejects errno and
-  target spellings it cannot represent exactly; the reader folds errno into
-  other memory and errors on target effects that differ from other memory.
+  uses LLVM 19's three-location encoding. An explicit errno clause is
+  accepted only when it matches the final other-memory effect; target
+  spellings are rejected. The reader folds errno into other memory and
+  validates version-2 target fields against inaccessible memory on AArch64
+  (other memory elsewhere), matching LLVM's downgrade path.
   Parameter and return `readnone`/`readonly`/`writeonly` remain distinct
   flags.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
@@ -182,21 +184,21 @@ five runs:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 36.1 ms | 35.8-36.6 ms | 55.7 MiB |
-| `llvm-as-rust` | 23.5 ms | 23.3-23.6 ms | 14.8 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 29.9 ms | 29.6-30.1 ms | 55.0 MiB |
-| `llvm-dis-rust` on C++ bitcode | 18.8 ms | 18.5-19.8 ms | 14.8 MiB |
+| `llvm-as` (C++) | 37.2 ms | 36.2-37.4 ms | 55.7 MiB |
+| `llvm-as-rust` | 23.8 ms | 23.4-24.5 ms | 14.7 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 30.8 ms | 30.7-31.8 ms | 54.5 MiB |
+| `llvm-dis-rust` on C++ bitcode | 19.4 ms | 18.8-20.4 ms | 14.7 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer-only
-corpus, Rust throughput was about 1.5x the C++ assembler and 1.6x the C++
-disassembler, and peak RSS was about 3.7x lower. Each tool gets one discarded
+corpus, Rust throughput was about 1.6x both C++ tools, and peak RSS was
+about 3.7x lower. Each tool gets one discarded
 warmup run before the five measured runs. These are throughput and memory
 measurements, not a generated-code performance claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.3 MiB
 (`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 A clean release build of the two Rust tools, using a separate target
-directory, took 9.6 s wall, 31.6 s user, and 2.0 s system time. This is a
+directory, took 9.5 s wall, 31.5 s user, and 1.9 s system time. This is a
 Rust-only observation, not a cross-toolchain build-time result. A C++ compile
 baseline is not available in this workspace: only the installed LLVM 19.1.7
 tools and `libLLVM.so` are present, without LLVM development headers or a

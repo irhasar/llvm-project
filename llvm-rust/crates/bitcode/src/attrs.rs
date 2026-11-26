@@ -471,7 +471,7 @@ impl MemoryEffects {
             .fold(0, |acc, location| acc | self.get(location))
     }
 
-    fn from_int(value: u64) -> Result<Self> {
+    fn from_int(value: u64, is_aarch64: bool) -> Result<Self> {
         let version = value >> 56;
         let payload = value & 0x00FF_FFFF_FFFF_FFFF;
         match version {
@@ -497,11 +497,13 @@ impl MemoryEffects {
                 if payload & !0xFFF != 0 {
                     return Err(Error::bitcode("unsupported version 2 memory layout"));
                 }
+                let inaccessible = ((payload >> 2) & 3) as u8;
                 let other = (((payload >> 6) | (payload >> 4)) & 3) as u8;
+                let reference = if is_aarch64 { inaccessible } else { other };
                 let target0 = (payload >> 8) & 3;
                 let target1 = (payload >> 10) & 3;
-                if (target0 != 0 && target0 != u64::from(other))
-                    || (target1 != 0 && target1 != u64::from(other))
+                if (target0 != 0 && target0 != u64::from(reference))
+                    || (target1 != 0 && target1 != u64::from(reference))
                 {
                     return Err(Error::bitcode(
                         "target memory effects cannot be represented",
@@ -509,7 +511,7 @@ impl MemoryEffects {
                 }
                 let mut effects = Self::none();
                 effects.set(MEM_ARG, (payload & 3) as u8);
-                effects.set(MEM_INACCESSIBLE, ((payload >> 2) & 3) as u8);
+                effects.set(MEM_INACCESSIBLE, inaccessible);
                 effects.set(MEM_OTHER, other);
                 Ok(effects)
             }
@@ -584,19 +586,21 @@ fn parse_modref(text: &str) -> Option<u8> {
     }
 }
 
-fn parse_memory_attribute(text: &str) -> Option<MemoryEffects> {
+fn parse_memory_attribute_parts(text: &str) -> Option<(MemoryEffects, Option<u8>)> {
     let inner = text.strip_prefix("memory(")?.strip_suffix(')')?;
     let mut effects = MemoryEffects::none();
+    let mut errno = None;
     let mut seen_location = false;
     for part in inner.split(',') {
         let part = part.trim();
         if let Some((location, modref)) = part.split_once(':') {
-            let location = match location.trim() {
-                "argmem" => MEM_ARG,
-                "inaccessiblemem" => MEM_INACCESSIBLE,
+            let modref = parse_modref(modref.trim())?;
+            match location.trim() {
+                "argmem" => effects.set(MEM_ARG, modref),
+                "inaccessiblemem" => effects.set(MEM_INACCESSIBLE, modref),
+                "errnomem" => errno = Some(modref),
                 _ => return None,
-            };
-            effects.set(location, parse_modref(modref.trim())?);
+            }
             seen_location = true;
         } else {
             if seen_location {
@@ -605,7 +609,26 @@ fn parse_memory_attribute(text: &str) -> Option<MemoryEffects> {
             effects = MemoryEffects::all(parse_modref(part)?);
         }
     }
+    Some((effects, errno))
+}
+
+fn parse_memory_attribute(text: &str) -> Option<MemoryEffects> {
+    let (effects, errno) = parse_memory_attribute_parts(text)?;
+    if let Some(errno) = errno {
+        if errno != effects.get(MEM_OTHER) {
+            return None;
+        }
+    }
     Some(effects)
+}
+
+fn is_aarch64_triple(triple: Option<&str>) -> bool {
+    triple.is_some_and(|triple| {
+        triple
+            .split('-')
+            .next()
+            .is_some_and(|arch| arch.starts_with("aarch64") || arch.starts_with("arm64"))
+    })
 }
 
 fn resolve_function_attributes(attrs: Vec<Attribute>) -> Result<Vec<Attribute>> {
@@ -670,6 +693,7 @@ pub(crate) fn decode_attribute_group(
     record: &Record,
     types: &TypeTable,
     type_ids: &[TypeId],
+    target_triple: Option<&str>,
 ) -> Result<(u64, u32, Vec<Attribute>)> {
     if record.operands.len() < 3 {
         return Err(Error::bitcode("invalid parameter attribute group"));
@@ -677,6 +701,7 @@ pub(crate) fn decode_attribute_group(
     let group_id = record.operands[0];
     let index = u32::try_from(record.operands[1])
         .map_err(|_| Error::bitcode("parameter attribute index overflow"))?;
+    let is_aarch64 = is_aarch64_triple(target_triple);
     let mut attrs = Vec::new();
     let mut legacy_memory = MemoryEffects::unknown();
     let mut legacy_memory_seen = false;
@@ -710,7 +735,7 @@ pub(crate) fn decode_attribute_group(
                     .get(cursor + 2)
                     .ok_or_else(|| Error::bitcode("truncated integer attribute"))?;
                 if code == 86 {
-                    let effects = MemoryEffects::from_int(value)?;
+                    let effects = MemoryEffects::from_int(value, is_aarch64)?;
                     if index == FUNCTION_INDEX {
                         modern_memory = Some(effects);
                     } else {
@@ -829,7 +854,6 @@ fn decode_int_attribute(code: u64, value: u64) -> Result<Attribute> {
         25 => format!("alignstack({value})"),
         41 => format!("dereferenceable({value})"),
         42 => format!("dereferenceable_or_null({value})"),
-        86 => MemoryEffects::from_int(value)?.text(),
         _ => {
             return Err(Error::bitcode(format!(
                 "unsupported integer attribute code {code}"
@@ -932,7 +956,7 @@ mod tests {
             blob: None,
         };
         let (_, index, attrs) =
-            decode_attribute_group(&record, &TypeTable::new(), &[]).expect("decode");
+            decode_attribute_group(&record, &TypeTable::new(), &[], None).expect("decode");
         assert_eq!(index, u32::MAX);
         assert_eq!(attrs, vec![Attribute("memory(none)".to_string())]);
     }
@@ -946,17 +970,23 @@ mod tests {
             encode("memory(argmem: read, inaccessiblemem: write)"),
             vec![1, 86, 9]
         );
-        assert_eq!(MemoryEffects::from_int(21).unwrap().text(), "memory(read)");
         assert_eq!(
-            MemoryEffects::from_int((2u64 << 56) | 0x45).unwrap().text(),
+            MemoryEffects::from_int(21, false).unwrap().text(),
             "memory(read)"
         );
         assert_eq!(
-            MemoryEffects::from_int((2u64 << 56) | 0x555)
+            MemoryEffects::from_int((2u64 << 56) | 0x45, false)
                 .unwrap()
                 .text(),
             "memory(read)"
         );
+        assert_eq!(
+            MemoryEffects::from_int((2u64 << 56) | 0x555, false)
+                .unwrap()
+                .text(),
+            "memory(read)"
+        );
+        assert_eq!(encode("memory(read, errnomem: read)"), vec![1, 86, 21]);
     }
 
     #[test]
@@ -964,12 +994,19 @@ mod tests {
         assert!(parse_memory_attribute("memory(errnomem: read)").is_none());
         assert!(parse_memory_attribute("memory(target_mem0: write)").is_none());
         assert_eq!(
-            MemoryEffects::from_int((1u64 << 56) | (1 << 4))
+            MemoryEffects::from_int((1u64 << 56) | (1 << 4), false)
                 .unwrap()
                 .text(),
             "memory(read, argmem: none, inaccessiblemem: none)"
         );
-        assert!(MemoryEffects::from_int((2u64 << 56) | (1 << 9)).is_err());
+        assert!(MemoryEffects::from_int((2u64 << 56) | (1 << 9), false).is_err());
+        assert_eq!(
+            parse_memory_attribute("memory(read, errnomem: read)")
+                .unwrap()
+                .text(),
+            "memory(read)"
+        );
+        assert!(parse_memory_attribute("memory(read, errnomem: none)").is_none());
     }
 
     #[test]
@@ -980,12 +1017,43 @@ mod tests {
             blob: None,
         };
         let (_, _, attrs) =
-            decode_attribute_group(&record((2u64 << 56) | 0x555), &TypeTable::new(), &[])
+            decode_attribute_group(&record((2u64 << 56) | 0x555), &TypeTable::new(), &[], None)
                 .expect("version 2 read");
         assert_eq!(attrs, vec![Attribute("memory(read)".to_string())]);
         assert!(
-            decode_attribute_group(&record((2u64 << 56) | (1 << 9)), &TypeTable::new(), &[])
-                .is_err()
+            decode_attribute_group(
+                &record((2u64 << 56) | (1 << 9)),
+                &TypeTable::new(),
+                &[],
+                None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn aarch64_target_memory_matches_inaccessible() {
+        let encoded = (2u64 << 56) | 0x504;
+        assert_eq!(
+            MemoryEffects::from_int(encoded, true).unwrap().text(),
+            "memory(inaccessiblemem: read)"
+        );
+        assert!(MemoryEffects::from_int(encoded, false).is_err());
+        let record = Record {
+            code: PARAMATTR_GRP_CODE_ENTRY,
+            operands: vec![1, u64::from(u32::MAX), 1, 86, encoded],
+            blob: None,
+        };
+        let (_, _, attrs) = decode_attribute_group(
+            &record,
+            &TypeTable::new(),
+            &[],
+            Some("aarch64-unknown-linux-gnu"),
+        )
+        .expect("aarch64 target memory");
+        assert_eq!(
+            attrs,
+            vec![Attribute("memory(inaccessiblemem: read)".to_string())]
         );
     }
 
