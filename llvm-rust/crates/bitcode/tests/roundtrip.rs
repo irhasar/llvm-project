@@ -22,19 +22,57 @@ fn corpus() -> Vec<PathBuf> {
 /// Rewrites group-only spellings (`alignstack=16`) to the inline spelling
 /// (`alignstack(16)`) used after groups are expanded.
 fn normalize_group_body(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(index) = rest.find("alignstack=") {
-        out.push_str(&rest[..index]);
-        let tail = &rest[index + "alignstack=".len()..];
-        let digits = tail.chars().take_while(|ch| ch.is_ascii_digit()).count();
-        out.push_str("alignstack(");
-        out.push_str(&tail[..digits]);
-        out.push(')');
-        rest = &tail[digits..];
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let ch = text[index..]
+            .chars()
+            .next()
+            .expect("index is a char boundary");
+        if quoted {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+            index += ch.len_utf8();
+            continue;
+        }
+        if ch == '"' {
+            quoted = true;
+            out.push('"');
+            index += 1;
+            continue;
+        }
+        if text[index..].starts_with("alignstack=") {
+            let value_start = index + "alignstack=".len();
+            let mut value_end = value_start;
+            while value_end < bytes.len() && bytes[value_end].is_ascii_digit() {
+                value_end += 1;
+            }
+            if value_end > value_start {
+                out.push_str("alignstack(");
+                out.push_str(&text[value_start..value_end]);
+                out.push(')');
+                index = value_end;
+                continue;
+            }
+        }
+        if text[index..].starts_with("align=") {
+            out.push_str("align ");
+            index += "align=".len();
+            continue;
+        }
+        out.push(ch);
+        index += ch.len_utf8();
     }
-    out.push_str(rest);
-    out.replace("align=", "align ")
+    out
 }
 
 fn inline_attr_groups(text: &str) -> String {
@@ -54,25 +92,56 @@ fn inline_attr_groups(text: &str) -> String {
     result.trim_end().to_string()
 }
 
-fn collapse_alignments(mut text: String) -> String {
-    let mut search = 0;
-    while let Some(relative) = text[search..].find("align ") {
-        let start = search + relative;
-        let value_start = start + "align ".len();
-        let value_end = text[value_start..]
-            .find(|ch: char| !ch.is_ascii_digit())
-            .map(|offset| value_start + offset)
-            .unwrap_or(text.len());
-        let tail_start =
-            value_end + (text[value_end..].len() - text[value_end..].trim_start().len());
-        if text[tail_start..].starts_with("align ") {
-            text.replace_range(start..tail_start, "");
-            search = start;
-        } else {
-            search = value_end;
+fn collapse_alignments(text: String) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0;
+    let mut quoted = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let ch = text[index..]
+            .chars()
+            .next()
+            .expect("index is a char boundary");
+        if quoted {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+            index += ch.len_utf8();
+            continue;
         }
+        if ch == '"' {
+            quoted = true;
+            out.push('"');
+            index += 1;
+            continue;
+        }
+        if text[index..].starts_with("align ") {
+            let value_start = index + "align ".len();
+            let mut value_end = value_start;
+            while value_end < bytes.len() && bytes[value_end].is_ascii_digit() {
+                value_end += 1;
+            }
+            if value_end > value_start {
+                let mut tail_start = value_end;
+                while tail_start < bytes.len() && bytes[tail_start].is_ascii_whitespace() {
+                    tail_start += 1;
+                }
+                if text[tail_start..].starts_with("align ") {
+                    index = tail_start;
+                    continue;
+                }
+            }
+        }
+        out.push(ch);
+        index += ch.len_utf8();
     }
-    text
+    out
 }
 
 fn replace_group_refs(text: &str, groups: &HashMap<String, String>) -> String {
@@ -136,4 +205,68 @@ fn rust_bitcode_round_trip_matches_text() {
             path.display()
         );
     }
+}
+
+#[test]
+fn disassemble_assemble_preserves_unnamed_slots() {
+    let source = "declare void @0()\n\n@1 = global i32 1\n";
+    let mut module = parse_module(source).expect("parse numeric slots");
+    let text = print_module(&module);
+    assert!(text.contains("@0 = global i32 1"), "{text}");
+    assert!(text.contains("declare void @1()"), "{text}");
+
+    let bytes = write_bitcode(&mut module).expect("write bitcode");
+    let read = read_bitcode(&bytes).expect("read bitcode");
+    let after = print_module(&read);
+    assert_eq!(text, after);
+    assert!(
+        !after.contains("@\"0\""),
+        "slot became a quoted name: {after}"
+    );
+
+    let mut reparsed = parse_module(&after).expect("reparse disassembly");
+    let second = write_bitcode(&mut reparsed).expect("rewrite bitcode");
+    let second_read = read_bitcode(&second).expect("reread bitcode");
+    assert_eq!(after, print_module(&second_read));
+}
+
+#[test]
+fn explicit_numeric_names_stay_quoted() {
+    let source = "declare void @\"0\"()\n";
+    let module = parse_module(source).expect("parse quoted numeric name");
+    let text = print_module(&module);
+    assert!(text.contains("declare void @\"0\"()"), "{text}");
+}
+
+#[test]
+fn shared_attribute_lists_are_not_charged_per_declaration() {
+    let params = (0..128)
+        .map(|index| {
+            format!("ptr noalias nocapture nonnull readonly align 8 dereferenceable(8) %p{index}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = (0..100)
+        .map(|index| format!("declare void @f{index}({params})"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut module = parse_module(&source).expect("parse shared attribute corpus");
+    let bytes = write_bitcode(&mut module).expect("write shared attribute corpus");
+    assert!(
+        bytes.len() < 100_000,
+        "writer did not share attribute lists"
+    );
+    let read = read_bitcode(&bytes).expect("read shared attribute corpus");
+    assert_eq!(read.functions.len(), 100);
+}
+
+#[test]
+fn collapse_alignments_ignores_quoted_strings() {
+    let quoted = "declare void @f() \"align 16 align 32\"";
+    assert_eq!(collapse_alignments(quoted.to_string()), quoted);
+    assert_eq!(
+        collapse_alignments("declare void @f() align 16 align 32".to_string()),
+        "declare void @f() align 32"
+    );
 }

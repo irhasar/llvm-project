@@ -135,7 +135,9 @@ struct Writer<'a> {
     function_aligns: HashMap<FuncId, u64>,
     call_attr_lists: HashMap<(FuncId, InstId), u32>,
     paramattr_groups: Vec<(u32, Vec<Attribute>)>,
+    paramattr_group_ids: HashMap<(u32, Vec<Attribute>), u64>,
     paramattr_lists: Vec<Vec<u64>>,
+    paramattr_list_ids: HashMap<Vec<u64>, u32>,
     local_values: HashMap<LocalId, u32>,
 }
 
@@ -196,7 +198,9 @@ impl<'a> Writer<'a> {
             function_aligns: HashMap::new(),
             call_attr_lists: HashMap::new(),
             paramattr_groups: Vec::new(),
+            paramattr_group_ids: HashMap::new(),
             paramattr_lists: Vec::new(),
+            paramattr_list_ids: HashMap::new(),
             local_values: HashMap::new(),
         };
         for id in module.ordered_globals() {
@@ -525,14 +529,27 @@ impl<'a> Writer<'a> {
             if attrs.is_empty() {
                 continue;
             }
-            self.paramattr_groups.push((index, attrs));
-            groups.push(self.paramattr_groups.len() as u64);
+            let key = (index, attrs);
+            let group = if let Some(id) = self.paramattr_group_ids.get(&key) {
+                *id
+            } else {
+                self.paramattr_groups.push(key.clone());
+                let id = self.paramattr_groups.len() as u64;
+                self.paramattr_group_ids.insert(key, id);
+                id
+            };
+            groups.push(group);
         }
         if groups.is_empty() {
             return 0;
         }
-        self.paramattr_lists.push(groups);
-        self.paramattr_lists.len() as u32
+        if let Some(id) = self.paramattr_list_ids.get(&groups) {
+            return *id;
+        }
+        self.paramattr_lists.push(groups.clone());
+        let id = self.paramattr_lists.len() as u32;
+        self.paramattr_list_ids.insert(groups, id);
+        id
     }
 
     fn write_globals(&mut self) -> Result<()> {

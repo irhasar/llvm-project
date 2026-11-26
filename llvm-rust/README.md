@@ -51,15 +51,20 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
   functions. Forward global/function constants and instruction operands are
   resolved after parsing, and globals/functions are emitted in definition
-  order. Empty symbol names are canonicalized to LLVM unnamed slots (`@0`,
-  `@1`, ...). Nonzero global and pointer address spaces are rejected
+  order. Empty and unquoted numeric symbol names are canonicalized to LLVM
+  unnamed slots (`@0`, `@1`, ...); quoted numeric names such as `@"0"` stay
+  named, and slots are renumbered in the printer's global-then-function
+  emission order. Nonzero global and pointer address spaces are rejected
   explicitly instead of being dropped. Half and bfloat literals round
   directly from binary64 without narrowing through `f32`; tiny half inputs
   return signed zero instead of shifting by more than 63 bits.
 - `bitcode`: LLVM bitstream writer and reader covering the module, type,
   constants, function, value-symbol-table, string-table, and
   `PARAMATTR`/`PARAMATTR_GROUP` blocks. The reader handles abbreviations and
-  block-info abbreviations emitted by LLVM 19.
+  block-info abbreviations emitted by LLVM 19. The writer deduplicates
+  attribute groups and lists. The reader interns a default pointer type when
+  the on-disk type table has none, so direct calls do not require a pointer
+  type record.
 - `bitcode` attributes: return, parameter, function, call-site, and
   argument-indexed call-site attributes; `#N` group references; common enum
   attributes (`noundef`, `signext`, `zeroext`, `nonnull`, `noalias`, `inreg`,
@@ -78,9 +83,10 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   to `memory(none|read|write)` only at function scope; parameter and return
   attributes keep `readnone`/`readonly`/`writeonly`, which LLVM accepts there.
   Multiple function alignment groups are merged in order, with the last value
-  winning and no `align` left in the function attribute list. Attribute-list
-  expansion is bounded by the input size to avoid repeated-reference memory
-  amplification.
+  winning and no `align` left in the function attribute list. Attribute
+  groups and lists are shared through `Arc`, so declarations that reference
+  the same list do not copy it; the memory budget is charged once for the
+  stored group, not once per referencing declaration.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
 
 Half and bfloat conversion handles subnormals, infinities, quiet NaNs, and
@@ -131,7 +137,7 @@ python3 tests/bench.py --runs 5
 
 ## M1 results
 
-Differential harness: all 22 modules in `tests/corpus/` match the C++ LLVM
+Differential harness: all 25 modules in `tests/corpus/` match the C++ LLVM
 19.1.7 oracle in both directions after normalizing `source_filename` and
 `ModuleID`. The corpus covers TLS models, sections, opaque types, `i128`
 constants, hexadecimal floats and subnormal/signaling-NaN cases, float and
@@ -140,8 +146,9 @@ attributes with quoted names, raw non-UTF-8 attribute strings, parameter
 memory attributes, argument-indexed call-site attributes,
 `local_unnamed_addr`, forward references in constants and instructions,
 UTF-8 section names, unnamed globals/functions, explicit quoted numeric
-global/function names, unnamed value/block
-numbering, exact shift/divide flags, and `phi` self references.
+global/function names, unnamed/global slot ordering, unnamed/name collisions,
+direct calls without pointer type records, unnamed value/block numbering,
+exact shift/divide flags, and `phi` self references.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -152,23 +159,24 @@ Benchmark on a synthetic corpus of 1000 functions, 10 instructions each
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 34.8 ms | 33.4-35.0 ms | 55.2 MiB |
-| `llvm-as-rust` | 21.2 ms | 21.1-21.4 ms | 14.6 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 29.5 ms | 29.1-30.2 ms | 54.5 MiB |
-| `llvm-dis-rust` on C++ bitcode | 18.8 ms | 18.5-19.3 ms | 14.6 MiB |
+| `llvm-as` (C++) | 34.0 ms | 33.5-34.2 ms | 55.7 MiB |
+| `llvm-as-rust` | 21.5 ms | 21.2-21.6 ms | 15.0 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 32.8 ms | 30.2-40.2 ms | 54.8 MiB |
+| `llvm-dis-rust` on C++ bitcode | 19.9 ms | 19.6-20.2 ms | 15.0 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
-isolates decoder work from writer record layout. The Rust tools are about
-1.6x faster and use about 3.8x less peak memory on this corpus. The Rust
-binaries are 5.3 MiB (`llvm-as-rust`) and 4.3 MiB (`llvm-dis-rust`); the C++
-tools need the 124 MiB `libLLVM.so.19.1`.
+isolates decoder work from writer record layout. On this parser/printer-only
+corpus, Rust throughput was about 1.6x the C++ tools and peak RSS was about
+3.7x lower. These are throughput and memory measurements, not a generated-code
+performance claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.3 MiB
+(`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 A clean release build of the two Rust tools, using a separate target
-directory, took 7.3 s wall, 23.2 s user, and 1.6 s system time. The C++ LLVM
+directory, took 7.3 s wall, 23.8 s user, and 1.6 s system time. The C++ LLVM
 build is not repeated here: the oracle is the installed LLVM 19.1.7, and
 building LLVM is deliberately avoided in this workspace. Generated-code
-quality is not measured because M1 has no codegen; the required compile-time
-and generated-code comparisons remain open for the M1 gate.
+quality is not measured because M1 has no codegen; the required generated-code
+comparison remains open for the M1 gate.
 
 These numbers are a slice result, not an LLVM parity claim. The upstream
 `llvm/test` suite is still required before any parity gate, and the synthetic

@@ -1,6 +1,7 @@
 //! Functions, parameters, basic blocks, and local value slots.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use llvm_rust_support::{Arena, Idx, Symbol};
 
@@ -31,7 +32,7 @@ pub struct Local {
 pub struct Param {
     pub name: Option<Symbol>,
     pub ty: TypeId,
-    pub attrs: Vec<Attribute>,
+    pub attrs: Arc<Vec<Attribute>>,
 }
 
 /// A basic block.
@@ -53,8 +54,8 @@ pub struct Function {
     pub local_unnamed_addr: bool,
     pub align: Option<u64>,
     pub is_declaration: bool,
-    pub ret_attrs: Vec<Attribute>,
-    pub attrs: Vec<Attribute>,
+    pub ret_attrs: Arc<Vec<Attribute>>,
+    pub attrs: Arc<Vec<Attribute>>,
     pub params: Vec<Param>,
     pub locals: Vec<Local>,
     pub blocks: Arena<Block>,
@@ -77,8 +78,8 @@ impl Function {
             local_unnamed_addr: false,
             align: None,
             is_declaration: true,
-            ret_attrs: Vec::new(),
-            attrs: Vec::new(),
+            ret_attrs: Arc::new(Vec::new()),
+            attrs: Arc::new(Vec::new()),
             params: Vec::new(),
             locals: Vec::new(),
             blocks: Arena::new(),
@@ -94,7 +95,7 @@ impl Function {
         &mut self,
         name: Option<Symbol>,
         ty: TypeId,
-        attrs: Vec<Attribute>,
+        attrs: impl Into<Arc<Vec<Attribute>>>,
     ) -> LocalId {
         let id = u32::try_from(self.locals.len()).expect("too many locals");
         self.locals.push(Local {
@@ -103,7 +104,11 @@ impl Function {
             def: None,
             is_param: true,
         });
-        self.params.push(Param { name, ty, attrs });
+        self.params.push(Param {
+            name,
+            ty,
+            attrs: attrs.into(),
+        });
         id
     }
 

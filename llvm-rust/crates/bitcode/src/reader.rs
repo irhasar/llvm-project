@@ -1,6 +1,7 @@
 //! LLVM bitcode reader for the Track B IR subset.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use llvm_rust_ir::{
     Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath, FcmpPred, FuncId,
@@ -139,6 +140,7 @@ pub fn read_bitcode(bytes: &[u8]) -> Result<Module> {
     };
     reader.read_module(module_block)?;
     reader.resolve_globals()?;
+    reader.module.assign_unnamed_slots();
     Ok(reader.module)
 }
 
@@ -151,8 +153,8 @@ struct Reader {
     pending_globals: Vec<(GlobalId, u32)>,
     defined_functions: Vec<FuncId>,
     next_body: usize,
-    attr_groups: HashMap<u64, (u32, Vec<Attribute>)>,
-    attr_lists: Vec<Vec<(u32, Vec<Attribute>)>>,
+    attr_groups: HashMap<u64, (u32, Arc<Vec<Attribute>>)>,
+    attr_lists: Vec<Arc<Vec<(u32, Arc<Vec<Attribute>>)>>>,
     attr_budget: usize,
     next_unnamed: u32,
 }
@@ -212,7 +214,11 @@ impl Reader {
             }
             let (group, index, attrs) =
                 decode_attribute_group(record, &self.module.types, &self.types)?;
-            self.attr_groups.insert(group, (index, attrs));
+            self.attr_budget = self
+                .attr_budget
+                .checked_sub(attrs.len())
+                .ok_or_else(|| Error::bitcode("attribute groups exceed the input size budget"))?;
+            self.attr_groups.insert(group, (index, Arc::new(attrs)));
         }
         Ok(())
     }
@@ -228,25 +234,22 @@ impl Reader {
                     self.attr_groups.get(group).cloned().ok_or_else(|| {
                         Error::bitcode(format!("unknown attribute group {group}"))
                     })?;
-                self.attr_budget = self.attr_budget.checked_sub(attrs.len()).ok_or_else(|| {
-                    Error::bitcode("attribute lists exceed the input size budget")
-                })?;
                 list.push((index, attrs));
             }
-            self.attr_lists.push(list);
+            self.attr_lists.push(Arc::new(list));
         }
         Ok(())
     }
 
-    fn attribute_list(&self, id: u64) -> Result<&[(u32, Vec<Attribute>)]> {
+    fn attribute_list(&self, id: u64) -> Result<Arc<Vec<(u32, Arc<Vec<Attribute>>)>>> {
         if id == 0 {
-            return Ok(&[]);
+            return Ok(Arc::new(Vec::new()));
         }
         let index =
             usize::try_from(id - 1).map_err(|_| Error::bitcode("attribute list index overflow"))?;
         self.attr_lists
             .get(index)
-            .map(Vec::as_slice)
+            .cloned()
             .ok_or_else(|| Error::bitcode(format!("unknown attribute list {id}")))
     }
 
@@ -459,26 +462,18 @@ impl Reader {
                 function.add_param(None, param, Vec::new());
             }
         }
-        let (attr_count, attr_list) = {
-            let attr_list = self.attribute_list(record.operands.get(6).copied().unwrap_or(0))?;
-            let attr_count = attr_list.iter().map(|(_, attrs)| attrs.len()).sum();
-            (attr_count, attr_list.to_vec())
-        };
-        self.attr_budget = self
-            .attr_budget
-            .checked_sub(attr_count)
-            .ok_or_else(|| Error::bitcode("function attributes exceed the input size budget"))?;
-        for (index, attrs) in attr_list {
-            match index {
-                0 => function.ret_attrs.extend(attrs),
-                u32::MAX => function.attrs.extend(attrs),
+        let attr_list = self.attribute_list(record.operands.get(6).copied().unwrap_or(0))?;
+        for (index, attrs) in attr_list.iter() {
+            match *index {
+                0 => merge_attrs(&mut function.ret_attrs, attrs),
+                u32::MAX => merge_attrs(&mut function.attrs, attrs),
                 _ => {
-                    let Some(param) = function.params.get_mut(index as usize - 1) else {
+                    let Some(param) = function.params.get_mut(*index as usize - 1) else {
                         return Err(Error::bitcode(format!(
                             "attribute index {index} is out of range"
                         )));
                     };
-                    param.attrs.extend(attrs);
+                    merge_attrs(&mut param.attrs, attrs);
                 }
             }
         }
@@ -637,16 +632,9 @@ impl Reader {
     }
 
     fn unnamed_name(&mut self) -> String {
-        loop {
-            let candidate = self.next_unnamed.to_string();
-            self.next_unnamed += 1;
-            let symbol = self.module.intern(&candidate);
-            if self.module.global_named(symbol).is_none()
-                && self.module.function_named(symbol).is_none()
-            {
-                return candidate;
-            }
-        }
+        let slot = self.next_unnamed;
+        self.next_unnamed += 1;
+        format!("\0unnamed{slot}")
     }
 
     fn name_from(&self, offset: u64, size: u64) -> Result<String> {
@@ -821,7 +809,7 @@ impl Reader {
         Ok(())
     }
 
-    fn resolve_value(&self, state: &FuncState, value: u32) -> Result<Operand> {
+    fn resolve_value(&mut self, state: &FuncState, value: u32) -> Result<Operand> {
         if (value as usize) < self.values.len() {
             return Ok(match self.values[value as usize] {
                 ValueRef::Global(id) => {
@@ -856,7 +844,7 @@ impl Reader {
     }
 
     fn decode_value(
-        &self,
+        &mut self,
         record: &Record,
         index: usize,
         inst_id: u32,
@@ -868,7 +856,7 @@ impl Reader {
     }
 
     fn decode_typed_value(
-        &self,
+        &mut self,
         record: &Record,
         index: usize,
         inst_id: u32,
@@ -1146,13 +1134,14 @@ impl Reader {
                 let mut ret_attrs = Vec::new();
                 let mut call_attrs = Vec::new();
                 let mut arg_attr_entries = Vec::new();
-                for (index, attrs) in
-                    self.attribute_list(record.operands.first().copied().unwrap_or(0))?
+                for (index, attrs) in self
+                    .attribute_list(record.operands.first().copied().unwrap_or(0))?
+                    .iter()
                 {
                     match *index {
                         0 => ret_attrs.extend(attrs.iter().cloned()),
                         u32::MAX => call_attrs.extend(attrs.iter().cloned()),
-                        _ => arg_attr_entries.push((*index, attrs.clone())),
+                        _ => arg_attr_entries.push((*index, attrs.as_ref().clone())),
                     }
                 }
                 let mut index = 1;
@@ -1366,15 +1355,19 @@ impl Reader {
             .ok_or_else(|| Error::bitcode("module has no i1 type"))
     }
 
-    fn ptr_type(&self) -> Result<TypeId> {
-        self.module
-            .types
-            .iter()
-            .find_map(|(id, ty)| match ty {
-                Type::Pointer => Some(id),
-                _ => None,
-            })
-            .ok_or_else(|| Error::bitcode("module has no pointer type"))
+    fn ptr_type(&mut self) -> Result<TypeId> {
+        Ok(self.module.types.pointer())
+    }
+}
+
+fn merge_attrs(target: &mut Arc<Vec<Attribute>>, attrs: &Arc<Vec<Attribute>>) {
+    if attrs.is_empty() {
+        return;
+    }
+    if target.is_empty() {
+        *target = attrs.clone();
+    } else if !Arc::ptr_eq(target, attrs) {
+        Arc::make_mut(target).extend(attrs.iter().cloned());
     }
 }
 

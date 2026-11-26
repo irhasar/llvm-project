@@ -98,6 +98,8 @@ pub struct Module {
     next_order: u32,
     unnamed_globals: HashSet<GlobalId>,
     unnamed_functions: HashSet<FuncId>,
+    unnamed_global_slots: HashMap<GlobalId, u32>,
+    unnamed_function_slots: HashMap<FuncId, u32>,
 }
 
 impl Module {
@@ -294,6 +296,70 @@ impl Module {
     /// Returns true when the function was written as an unnamed slot.
     pub fn is_unnamed_function(&self, id: FuncId) -> bool {
         self.unnamed_functions.contains(&id)
+    }
+
+    /// Returns the emitted slot number for an unnamed global.
+    pub fn unnamed_global_slot(&self, id: GlobalId) -> Option<u32> {
+        if let Some(slot) = self.unnamed_global_slots.get(&id) {
+            return Some(*slot);
+        }
+        if !self.is_unnamed_global(id) {
+            return None;
+        }
+        let mut slot = 0;
+        for global in self.ordered_globals() {
+            if self.is_unnamed_global(global) {
+                if global == id {
+                    return Some(slot);
+                }
+                slot += 1;
+            }
+        }
+        None
+    }
+
+    /// Returns the emitted slot number for an unnamed function.
+    pub fn unnamed_function_slot(&self, id: FuncId) -> Option<u32> {
+        if let Some(slot) = self.unnamed_function_slots.get(&id) {
+            return Some(*slot);
+        }
+        if !self.is_unnamed_function(id) {
+            return None;
+        }
+        let mut slot = self
+            .ordered_globals()
+            .into_iter()
+            .filter(|global| self.is_unnamed_global(*global))
+            .count() as u32;
+        for function in self.ordered_functions() {
+            if self.is_unnamed_function(function) {
+                if function == id {
+                    return Some(slot);
+                }
+                slot += 1;
+            }
+        }
+        None
+    }
+
+    /// Assigns unnamed slots in the order the printer and bitcode writer emit
+    /// definitions: all globals first, then all functions.
+    pub fn assign_unnamed_slots(&mut self) {
+        self.unnamed_global_slots.clear();
+        self.unnamed_function_slots.clear();
+        let mut slot = 0;
+        for id in self.ordered_globals() {
+            if self.is_unnamed_global(id) {
+                self.unnamed_global_slots.insert(id, slot);
+                slot += 1;
+            }
+        }
+        for id in self.ordered_functions() {
+            if self.is_unnamed_function(id) {
+                self.unnamed_function_slots.insert(id, slot);
+                slot += 1;
+            }
+        }
     }
 
     fn record_global_order(&mut self, id: GlobalId) {

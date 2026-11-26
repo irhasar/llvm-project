@@ -99,21 +99,23 @@ fn quote_declared_name(name: &str) -> String {
 }
 
 fn global_name(module: &Module, id: GlobalId) -> String {
-    let name = module.name(module.globals[id].name);
     if module.is_unnamed_global(id) {
-        name.to_string()
-    } else {
-        quote_declared_name(name)
+        return module
+            .unnamed_global_slot(id)
+            .map(|slot| slot.to_string())
+            .unwrap_or_else(|| module.name(module.globals[id].name).to_string());
     }
+    quote_declared_name(module.name(module.globals[id].name))
 }
 
 fn function_name(module: &Module, id: FuncId) -> String {
-    let name = module.name(module.functions[id].name);
     if module.is_unnamed_function(id) {
-        name.to_string()
-    } else {
-        quote_declared_name(name)
+        return module
+            .unnamed_function_slot(id)
+            .map(|slot| slot.to_string())
+            .unwrap_or_else(|| module.name(module.functions[id].name).to_string());
     }
+    quote_declared_name(module.name(module.functions[id].name))
 }
 
 fn print_global(module: &Module, id: GlobalId, global: &Global, out: &mut String) {
@@ -175,7 +177,7 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
     if function.dso_local {
         out.push_str("dso_local ");
     }
-    for attr in &function.ret_attrs {
+    for attr in function.ret_attrs.iter() {
         let _ = write!(out, "{attr} ");
     }
     let _ = write!(
@@ -189,7 +191,7 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
             out.push_str(", ");
         }
         let _ = write!(out, "{}", module.display_type(param.ty));
-        for attr in &param.attrs {
+        for attr in param.attrs.iter() {
             let _ = write!(out, " {attr}");
         }
         if let Some(name) = param.name {
@@ -211,7 +213,7 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
     if let Some(align) = function.align {
         let _ = write!(out, " align {align}");
     }
-    for attr in &function.attrs {
+    for attr in function.attrs.iter() {
         let _ = write!(out, " {attr}");
     }
     if function.is_declaration {

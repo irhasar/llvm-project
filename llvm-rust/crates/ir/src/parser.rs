@@ -31,6 +31,7 @@ pub fn parse_module(source: &str) -> core::result::Result<Module, ParseError> {
     parser.parse_top_level()?;
     parser.module.resolve_forward_references();
     parser.module.resolve_forward_operands();
+    parser.module.assign_unnamed_slots();
     Ok(parser.module)
 }
 
@@ -55,6 +56,7 @@ enum TokenKind {
 struct Token {
     kind: TokenKind,
     span: Span,
+    quoted: bool,
 }
 
 struct Lexer<'a> {
@@ -159,9 +161,12 @@ impl<'a> Lexer<'a> {
     }
 
     fn push(&mut self, kind: TokenKind, start: usize) {
+        let quoted = matches!(kind, TokenKind::Global(_) | TokenKind::Local(_))
+            && self.bytes.get(start + 1) == Some(&b'"');
         self.tokens.push(Token {
             kind,
             span: Span::new(start, self.pos),
+            quoted,
         });
     }
 
@@ -472,6 +477,11 @@ fn f64_to_half_bits(bits: u64) -> u16 {
     }
 }
 
+fn is_unnamed_symbol(name: &str, quoted: bool) -> bool {
+    name.is_empty()
+        || (!quoted && !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
 fn is_type_attribute(name: &str) -> bool {
     matches!(
         name,
@@ -621,6 +631,7 @@ struct Parser<'a> {
     local_names: HashMap<Symbol, LocalId>,
     next_value: u32,
     next_unnamed: u32,
+    unnamed_symbols: HashMap<u32, Symbol>,
 }
 
 impl<'a> Parser<'a> {
@@ -633,6 +644,7 @@ impl<'a> Parser<'a> {
             local_names: HashMap::new(),
             next_value: 0,
             next_unnamed: 0,
+            unnamed_symbols: HashMap::new(),
         }
     }
 
@@ -755,8 +767,9 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_global(&mut self) -> Result<()> {
-        let (name, _) = self.expect_global()?;
-        let symbol = self.symbol_for_name(&name);
+        let (name, _, quoted) = self.expect_global()?;
+        let symbol = self.global_symbol(&name, quoted);
+        let unnamed = is_unnamed_symbol(&name, quoted);
         self.expect_punct('=')?;
         let mut linkage = Linkage::External;
         let mut visibility = Visibility::Default;
@@ -888,7 +901,7 @@ impl<'a> Parser<'a> {
         };
         let id = self.module.global_or_insert(symbol);
         self.module.define_global(id, global);
-        if name.is_empty() {
+        if unnamed {
             self.module.mark_unnamed_global(id);
         }
         Ok(())
@@ -943,8 +956,9 @@ impl<'a> Parser<'a> {
             }
         }
         let ret_ty = self.parse_type()?;
-        let (name, _) = self.expect_global()?;
-        let symbol = self.symbol_for_name(&name);
+        let (name, _, quoted) = self.expect_global()?;
+        let symbol = self.global_symbol(&name, quoted);
+        let unnamed = is_unnamed_symbol(&name, quoted);
         let mut function = Function::new(symbol, 0);
         function.linkage = linkage;
         function.visibility = visibility;
@@ -952,7 +966,7 @@ impl<'a> Parser<'a> {
         function.unnamed_addr = unnamed_addr;
         function.local_unnamed_addr = local_unnamed_addr;
         function.is_declaration = is_declaration;
-        function.ret_attrs = attrs;
+        function.ret_attrs = attrs.into();
         self.expect_punct('(')?;
         let mut param_types = Vec::new();
         let mut varargs = false;
@@ -989,25 +1003,24 @@ impl<'a> Parser<'a> {
         }
         self.expect_punct(')')?;
         function.ty = self.module.types.function(ret_ty, param_types, varargs);
-        self.parse_trailing_attrs(&mut function.attrs, !is_declaration)?;
-        if let Some(index) = function
-            .attrs
+        let mut function_attrs = Vec::new();
+        self.parse_trailing_attrs(&mut function_attrs, !is_declaration)?;
+        if let Some(index) = function_attrs
             .iter()
             .position(|attr| attr.0 == "local_unnamed_addr")
         {
-            function.attrs.remove(index);
+            function_attrs.remove(index);
             function.local_unnamed_addr = true;
         }
-        if let Some(index) = function
-            .attrs
+        if let Some(index) = function_attrs
             .iter()
             .position(|attr| attr.0 == "unnamed_addr")
         {
-            function.attrs.remove(index);
+            function_attrs.remove(index);
             function.unnamed_addr = true;
         }
         let mut align = None;
-        function.attrs.retain(|attr| {
+        function_attrs.retain(|attr| {
             if let Some(value) = attr.0.strip_prefix("align ") {
                 align = value.trim().parse().ok();
                 false
@@ -1016,6 +1029,7 @@ impl<'a> Parser<'a> {
             }
         });
         function.align = align;
+        function.attrs = function_attrs.into();
         if is_declaration {
             if self.at_eol() {
                 self.advance();
@@ -1036,7 +1050,7 @@ impl<'a> Parser<'a> {
             return Err(self.error(format!("redefinition of function @{name}")));
         }
         self.module.define_function(id, function);
-        if name.is_empty() {
+        if unnamed {
             self.module.mark_unnamed_function(id);
         }
         Ok(())
@@ -1105,7 +1119,7 @@ impl<'a> Parser<'a> {
                             "comdat" => {
                                 let mut text = String::from("comdat");
                                 if self.eat_punct('(') {
-                                    let (name, _) = self.expect_global()?;
+                                    let (name, _, _) = self.expect_global()?;
                                     self.expect_punct(')')?;
                                     text.push_str(&format!("(@{name})"));
                                 }
@@ -1513,8 +1527,9 @@ impl<'a> Parser<'a> {
                     .add_constant(Constant::new(ty, ConstKind::MetadataString(name))))
             }
             TokenKind::Global(name) => {
+                let quoted = self.peek().quoted;
                 self.advance();
-                let symbol = self.module.intern(&name);
+                let symbol = self.global_symbol(&name, quoted);
                 let kind = if let Some(id) = self.module.function_named(symbol) {
                     ConstKind::Function(id)
                 } else if let Some(id) = self.module.global_named(symbol) {
@@ -1630,8 +1645,9 @@ impl<'a> Parser<'a> {
                 Ok(Operand::local(function.local_type(local), local))
             }
             TokenKind::Global(name) => {
+                let quoted = self.peek().quoted;
                 self.advance();
-                let symbol = self.module.intern(&name);
+                let symbol = self.global_symbol(&name, quoted);
                 if let Some(id) = self.module.function_named(symbol) {
                     Ok(Operand::function(ty, id))
                 } else {
@@ -1691,8 +1707,9 @@ impl<'a> Parser<'a> {
     fn parse_callee(&mut self, function: &mut Function) -> Result<Operand> {
         match self.peek_kind().clone() {
             TokenKind::Global(name) => {
+                let quoted = self.peek().quoted;
                 self.advance();
-                let symbol = self.module.intern(&name);
+                let symbol = self.global_symbol(&name, quoted);
                 if let Some(id) = self.module.function_named(symbol) {
                     Ok(Operand::function(self.module.functions[id].ty, id))
                 } else if let Some(id) = self.module.global_named(symbol) {
@@ -2266,28 +2283,36 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn symbol_for_name(&mut self, name: &str) -> Symbol {
-        if !name.is_empty() {
+    fn global_symbol(&mut self, name: &str, quoted: bool) -> Symbol {
+        if !is_unnamed_symbol(name, quoted) {
             return self.module.intern(name);
         }
-        loop {
-            let candidate = self.next_unnamed.to_string();
-            self.next_unnamed += 1;
-            let symbol = self.module.intern(&candidate);
-            if self.module.global_named(symbol).is_none()
-                && self.module.function_named(symbol).is_none()
-            {
-                return symbol;
+        let mut slot = if name.is_empty() {
+            self.next_unnamed
+        } else {
+            name.parse().unwrap_or(self.next_unnamed)
+        };
+        if name.is_empty() {
+            while self.unnamed_symbols.contains_key(&slot) {
+                slot = slot.saturating_add(1);
             }
         }
+        self.next_unnamed = self.next_unnamed.max(slot.saturating_add(1));
+        if let Some(symbol) = self.unnamed_symbols.get(&slot) {
+            return *symbol;
+        }
+        let symbol = self.module.intern(&format!("\0unnamed{slot}"));
+        self.unnamed_symbols.insert(slot, symbol);
+        symbol
     }
 
-    fn expect_global(&mut self) -> Result<(String, Span)> {
+    fn expect_global(&mut self) -> Result<(String, Span, bool)> {
         match self.peek_kind().clone() {
             TokenKind::Global(name) => {
                 let span = self.peek().span;
+                let quoted = self.peek().quoted;
                 self.advance();
-                Ok((name, span))
+                Ok((name, span, quoted))
             }
             other => Err(self.error(format!("expected a global name, found {other:?}"))),
         }
