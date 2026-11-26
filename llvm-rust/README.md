@@ -145,6 +145,8 @@ builds LLVM):
 ```sh
 ./tests/differential.sh
 # or: LLVM_BIN=/path/to/llvm/bin ./tests/differential.sh
+# custom LLVM 19 install without a default /usr/lib/llvm-19:
+LLVM_BIN=/path/to/llvm-19/bin ./tests/differential.sh
 
 # Version-2 AArch64 memory comparison (LLVM 23 or newer)
 LLVM_V2_BIN=/usr/lib/llvm-23/bin ./tests/differential.sh
@@ -158,9 +160,12 @@ an incomplete LLVM 24 install does not mask a usable LLVM 23.
 The base corpus runs against `LLVM_BIN` in the default target-aware mode.
 Its textual comparison ignores `target_mem` spelling because Rust still
 emits the LLVM 19 three-location encoding. The AArch64 fixture is checked
-separately against `LLVM19_BIN` (default `/usr/lib/llvm-19/bin`) with
-`--llvm19`, which omits target clauses and accepts legacy AArch64 memory
-text. The version-2 fixture keeps target-aware output.
+separately against `LLVM19_BIN` with `--llvm19`, which omits target clauses
+and accepts legacy AArch64 memory text. If `LLVM19_BIN` is unset, the
+harness uses `LLVM_BIN` when it reports LLVM 19, then falls back to
+`/usr/lib/llvm-19/bin`. The harness fails if no LLVM 19 oracle is available,
+so legacy coverage cannot be skipped accidentally. The version-2 fixture
+keeps target-aware output.
 
 Reproducible benchmark (5 runs, `taskset -c 0`, median and min/max):
 
