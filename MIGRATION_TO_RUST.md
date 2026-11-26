@@ -250,17 +250,18 @@ The process-level rows are the sum of the per-operation medians: C++ 464.60 ms
 wall (461.50-486.73), 461.07 ms user, 2.01 ms sys; Rust 245.26 ms wall
 (239.64-254.23), 241.84 ms user, 3.00 ms sys; peak RSS was 3.62 MiB for both.
 
-Compile rows are five pinned runs. C++ is the fallback build (option `OFF`);
+Compile rows are five pinned runs. C++ is the fallback build (option `OFF`)
+and has no incremental cache, so its incremental row repeats the full compile;
 the Rust total sums the crate build and the C++ wrapper compiled with the
 option `ON`:
 
 | Backend | Mode | Wall ms | User ms | Sys ms | Peak RSS MiB | Object/archive bytes |
 |---------|------|---------|---------|--------|--------------|----------------------|
-| C++ | clean | 632.69 (629.96-649.06) | 548.93 | 88.11 | 128.13 | 13,208 |
-| C++ | incremental | 635.61 (632.57-655.84) | 539.80 | 101.21 | 128.02 | 13,208 |
-| Rust crate | clean | 205.67 (203.22-207.72) | 130.18 | 78.50 | 115.60 | 5,056,024 |
-| Rust crate | incremental | 177.63 (175.60-181.72) | 125.39 | 53.94 | 115.59 | 5,056,024 |
-| C++ wrapper (Rust ON) | clean | 622.39 (611.92-626.95) | 527.30 | 89.43 | 126.44 | 13,352 |
+| C++ | clean | 632.69 (629.96-649.06) | 548.93 (541.49-555.87) | 88.11 (80.95-100.14) | 128.13 | 13,208 |
+| C++ | incremental | 635.61 (632.57-655.84) | 539.80 (529.35-550.82) | 101.21 (90.17-104.91) | 128.02 | 13,208 |
+| Rust crate | clean | 205.67 (203.22-207.72) | 130.18 (123.39-135.19) | 78.50 (72.41-83.55) | 115.60 | 5,056,024 |
+| Rust crate | incremental | 177.63 (175.60-181.72) | 125.39 (121.52-131.89) | 53.94 (52.01-59.65) | 115.59 | 5,056,024 |
+| C++ wrapper (Rust ON) | clean | 622.39 (611.92-626.95) | 527.30 (516.38-535.37) | 89.43 (85.81-106.91) | 126.44 | 13,352 |
 | Rust total | clean | 828.06 | 657.48 | 167.93 | 126.44 | 5,056,024 + 13,352 |
 | Rust total | incremental | 800.02 | 652.69 | 143.36 | 126.44 | 5,056,024 + 13,352 |
 
