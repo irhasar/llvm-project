@@ -3,6 +3,10 @@ if(NOT DEFINED SRC OR NOT DEFINED DST OR NOT DEFINED STAMP)
 endif()
 
 if(NOT EXISTS "${SRC}")
+  if(EXISTS "${DST}")
+    file(TOUCH "${STAMP}")
+    return()
+  endif()
   message(FATAL_ERROR "Rust archive does not exist: ${SRC}")
 endif()
 

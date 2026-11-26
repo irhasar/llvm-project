@@ -2,14 +2,13 @@ if(NOT DEFINED SRC OR NOT DEFINED DST)
   message(FATAL_ERROR "RustEnsureStaged.cmake requires SRC and DST")
 endif()
 
-if(NOT EXISTS "${SRC}")
-  message(FATAL_ERROR "Rust archive does not exist: ${SRC}")
-endif()
-
 set(copy FALSE)
 if(NOT EXISTS "${DST}")
+  if(NOT EXISTS "${SRC}")
+    message(FATAL_ERROR "Rust archive does not exist: ${SRC}")
+  endif()
   set(copy TRUE)
-else()
+elseif(EXISTS "${SRC}")
   # An interrupted copy leaves a short file. Replace it through a temporary
   # file so the next build cannot link a partial archive.
   file(SIZE "${SRC}" src_size)

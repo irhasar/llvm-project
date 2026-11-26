@@ -150,7 +150,7 @@ function(add_llvm_rust_staticlib name manifest)
     COMMAND "${CMAKE_COMMAND}" "-DSRC=${staging_source}" "-DDST=${staged}"
             "-DSTAMP=${staged_stamp}" -P "${stage_archive_script}"
     BYPRODUCTS "${staged}"
-    DEPENDS "${content_stamp}"
+    DEPENDS "${content_stamp}" "${stage_archive_script}"
     COMMENT "Staging Rust archive ${name}"
     VERBATIM)
 
