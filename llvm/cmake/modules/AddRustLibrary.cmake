@@ -107,21 +107,44 @@ function(add_llvm_rust_staticlib name manifest)
       COMMAND "${CMAKE_STRIP}" ${strip_args} "${staging_source}")
   endif()
 
-  # The stamp is the primary output so Makefiles do not rerun Cargo forever
-  # when copy_if_different intentionally preserves the archive timestamp.
-  set(stamp "${target_dir}/staged.stamp")
-  add_custom_command(OUTPUT "${stamp}"
-    BYPRODUCTS "${staged}"
+  # Separate the Cargo build, content check, and staging stamps. The build
+  # stamp is per configuration so Debug cannot mark a stale Release archive
+  # up to date. The content stamp only changes when the stripped archive does,
+  # which keeps an unchanged archive from relinking dependents. Staging is its
+  # own output so Make can recreate a deleted archive.
+  set(build_stamp "${target_dir}/build-$<CONFIG>.stamp")
+  set(content_stamp "${target_dir}/content.stamp")
+  if(CMAKE_CURRENT_FUNCTION_LIST_DIR)
+    set(archive_stamp_script "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RustArchiveStamp.cmake")
+  else()
+    set(archive_stamp_script "${CMAKE_CURRENT_LIST_DIR}/RustArchiveStamp.cmake")
+  endif()
+
+  add_custom_command(OUTPUT "${build_stamp}"
+    BYPRODUCTS "${staging_source}"
     COMMAND ${cargo_env} "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
             --manifest-path "${manifest}" --target-dir "${target_dir}"
     ${strip_command}
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${staging_source}" "${staged}"
-    COMMAND "${CMAKE_COMMAND}" -E touch "${stamp}"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${build_stamp}"
     DEPENDS ${crate_sources}
     COMMENT "Building Rust crate ${name}"
     VERBATIM)
 
-  add_custom_target(${name}-rust DEPENDS "${stamp}")
+  add_custom_command(OUTPUT "${content_stamp}"
+    COMMAND "${CMAKE_COMMAND}"
+            "-DSRC=${staging_source}" "-DSTAMP=${content_stamp}"
+            -P "${archive_stamp_script}"
+    DEPENDS "${build_stamp}"
+    COMMENT "Checking Rust archive ${name}"
+    VERBATIM)
+
+  add_custom_command(OUTPUT "${staged}"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${staging_source}" "${staged}"
+    DEPENDS "${content_stamp}"
+    COMMENT "Staging Rust archive ${name}"
+    VERBATIM)
+
+  add_custom_target(${name}-rust DEPENDS "${build_stamp}" "${content_stamp}" "${staged}")
   add_library(${name} STATIC IMPORTED GLOBAL)
   set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${staged}")
   add_dependencies(${name} ${name}-rust)
