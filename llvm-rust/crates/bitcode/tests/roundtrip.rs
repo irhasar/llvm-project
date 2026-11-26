@@ -196,7 +196,7 @@ fn rust_bitcode_round_trip_matches_text() {
         // bitcode decoding; the differential harness checks that against LLVM.
         if path
             .file_name()
-            .is_some_and(|name| name == "memory_effects.ll")
+            .is_some_and(|name| name == "memory_effects.ll" || name == "memory_groups.ll")
         {
             continue;
         }

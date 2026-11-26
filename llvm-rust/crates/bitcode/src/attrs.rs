@@ -277,7 +277,7 @@ pub(crate) fn encode_attribute(attr: &Attribute) -> Result<Vec<u64>> {
     if text.starts_with("memory(") {
         let effects = parse_memory_attribute(text)
             .ok_or_else(|| Error::bitcode(format!("unsupported memory attribute `{text}`")))?;
-        return Ok(vec![1, 86, (1u64 << 56) | u64::from(effects.0)]);
+        return Ok(vec![1, 86, u64::from(effects.0)]);
     }
 
     if let Some(code) = enum_attribute_code(text) {
@@ -422,14 +422,13 @@ fn enum_attribute_code(text: &str) -> Option<u64> {
         .find_map(|(name, code)| (*name == text).then_some(*code))
 }
 
-/// Memory effects as a 2-bit mod/ref mask for each LLVM memory location.
+/// Memory effects as a 2-bit mod/ref mask for each LLVM 19 location.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MemoryEffects(u8);
 
 const MEM_ARG: u8 = 0;
 const MEM_INACCESSIBLE: u8 = 2;
-const MEM_ERRNO: u8 = 4;
-const MEM_OTHER: u8 = 6;
+const MEM_OTHER: u8 = 4;
 
 impl MemoryEffects {
     const fn none() -> Self {
@@ -437,12 +436,12 @@ impl MemoryEffects {
     }
 
     const fn unknown() -> Self {
-        Self(0xFF)
+        Self(0x3F)
     }
 
     fn all(modref: u8) -> Self {
         let mut effects = Self::none();
-        for location in [MEM_ARG, MEM_INACCESSIBLE, MEM_ERRNO, MEM_OTHER] {
+        for location in [MEM_ARG, MEM_INACCESSIBLE, MEM_OTHER] {
             effects.set(location, modref);
         }
         effects
@@ -467,24 +466,56 @@ impl MemoryEffects {
     }
 
     fn union_modref(self) -> u8 {
-        [MEM_ARG, MEM_INACCESSIBLE, MEM_ERRNO, MEM_OTHER]
+        [MEM_ARG, MEM_INACCESSIBLE, MEM_OTHER]
             .into_iter()
             .fold(0, |acc, location| acc | self.get(location))
     }
 
-    fn from_int(value: u64) -> Self {
-        if value >> 56 == 0 {
-            let arg = ((value >> MEM_ARG) & 3) as u8;
-            let inaccessible = ((value >> MEM_INACCESSIBLE) & 3) as u8;
-            let other = ((value >> 4) & 3) as u8;
-            let mut effects = Self::none();
-            effects.set(MEM_ARG, arg);
-            effects.set(MEM_INACCESSIBLE, inaccessible);
-            effects.set(MEM_ERRNO, other);
-            effects.set(MEM_OTHER, other);
-            effects
-        } else {
-            Self((value & 0xFF) as u8)
+    fn from_int(value: u64) -> Result<Self> {
+        let version = value >> 56;
+        let payload = value & 0x00FF_FFFF_FFFF_FFFF;
+        match version {
+            0 => {
+                if payload & !0x3F != 0 {
+                    return Err(Error::bitcode(
+                        "unsupported unversioned memory attribute layout",
+                    ));
+                }
+                Ok(Self(payload as u8))
+            }
+            1 => {
+                if payload & !0xFF != 0 {
+                    return Err(Error::bitcode("unsupported version 1 memory layout"));
+                }
+                let mut effects = Self::none();
+                effects.set(MEM_ARG, (payload & 3) as u8);
+                effects.set(MEM_INACCESSIBLE, ((payload >> 2) & 3) as u8);
+                effects.set(MEM_OTHER, (((payload >> 6) | (payload >> 4)) & 3) as u8);
+                Ok(effects)
+            }
+            2 => {
+                if payload & !0xFFF != 0 {
+                    return Err(Error::bitcode("unsupported version 2 memory layout"));
+                }
+                let other = (((payload >> 6) | (payload >> 4)) & 3) as u8;
+                let target0 = (payload >> 8) & 3;
+                let target1 = (payload >> 10) & 3;
+                if (target0 != 0 && target0 != u64::from(other))
+                    || (target1 != 0 && target1 != u64::from(other))
+                {
+                    return Err(Error::bitcode(
+                        "target memory effects cannot be represented",
+                    ));
+                }
+                let mut effects = Self::none();
+                effects.set(MEM_ARG, (payload & 3) as u8);
+                effects.set(MEM_INACCESSIBLE, ((payload >> 2) & 3) as u8);
+                effects.set(MEM_OTHER, other);
+                Ok(effects)
+            }
+            _ => Err(Error::bitcode(format!(
+                "unsupported memory attribute version {version}"
+            ))),
         }
     }
 
@@ -495,11 +526,7 @@ impl MemoryEffects {
         if other != 0 || union == other {
             parts.push(modref_name(other).to_string());
         }
-        for (location, name) in [
-            (MEM_ARG, "argmem"),
-            (MEM_INACCESSIBLE, "inaccessiblemem"),
-            (MEM_ERRNO, "errnomem"),
-        ] {
+        for (location, name) in [(MEM_ARG, "argmem"), (MEM_INACCESSIBLE, "inaccessiblemem")] {
             let modref = self.get(location);
             if modref != other {
                 parts.push(format!("{name}: {}", modref_name(modref)));
@@ -534,6 +561,19 @@ fn legacy_memory_effect(code: u64) -> Option<MemoryEffects> {
     }
 }
 
+fn legacy_memory_effect_name(text: &str) -> Option<MemoryEffects> {
+    let code = match text {
+        "readnone" => 20,
+        "readonly" => 21,
+        "writeonly" => 52,
+        "argmemonly" => 45,
+        "inaccessiblememonly" => 49,
+        "inaccessiblemem_or_argmemonly" => 50,
+        _ => return None,
+    };
+    legacy_memory_effect(code)
+}
+
 fn parse_modref(text: &str) -> Option<u8> {
     match text {
         "none" => Some(0),
@@ -554,7 +594,6 @@ fn parse_memory_attribute(text: &str) -> Option<MemoryEffects> {
             let location = match location.trim() {
                 "argmem" => MEM_ARG,
                 "inaccessiblemem" => MEM_INACCESSIBLE,
-                "errnomem" => MEM_ERRNO,
                 _ => return None,
             };
             effects.set(location, parse_modref(modref.trim())?);
@@ -567,6 +606,63 @@ fn parse_memory_attribute(text: &str) -> Option<MemoryEffects> {
         }
     }
     Some(effects)
+}
+
+fn resolve_function_attributes(attrs: Vec<Attribute>) -> Result<Vec<Attribute>> {
+    let mut resolved = Vec::new();
+    let mut legacy_memory = MemoryEffects::unknown();
+    let mut legacy_memory_seen = false;
+    let mut modern_memory = None;
+    for attr in attrs {
+        let text = attr.0.trim();
+        if text.starts_with("memory(") {
+            modern_memory =
+                Some(parse_memory_attribute(text).ok_or_else(|| {
+                    Error::bitcode(format!("unsupported memory attribute `{text}`"))
+                })?);
+        } else if let Some(effect) = legacy_memory_effect_name(text) {
+            legacy_memory = legacy_memory.intersect(effect);
+            legacy_memory_seen = true;
+        } else {
+            resolved.push(Attribute(text.to_string()));
+        }
+    }
+    if legacy_memory_seen {
+        modern_memory = Some(legacy_memory);
+    }
+    if let Some(effects) = modern_memory {
+        insert_memory_attribute(&mut resolved, Attribute(effects.text()));
+    }
+    Ok(resolved)
+}
+
+/// Expands function or call-site attributes while keeping inline and numbered
+/// groups as separate memory-effect sources. Numbered groups apply after inline
+/// attributes, and the last resolved memory attribute wins.
+pub(crate) fn expand_function_attributes(
+    module: &Module,
+    attrs: &[Attribute],
+) -> Result<Vec<Attribute>> {
+    let mut expanded = Vec::new();
+    let inline: Vec<Attribute> = attrs
+        .iter()
+        .filter(|attr| !attr.0.trim_start().starts_with('#'))
+        .map(|attr| Attribute(attr.0.trim().to_string()))
+        .collect();
+    if !inline.is_empty() {
+        let resolved = resolve_function_attributes(inline)?;
+        merge_attributes(&mut expanded, &resolved);
+    }
+    for attr in attrs {
+        if !attr.0.trim_start().starts_with('#') {
+            continue;
+        }
+        let mut group_attrs = Vec::new();
+        expand_attribute(module, attr, 0, &mut group_attrs)?;
+        let resolved = resolve_function_attributes(group_attrs)?;
+        merge_attributes(&mut expanded, &resolved);
+    }
+    Ok(expanded)
 }
 
 /// Decodes one PARAMATTR group entry.
@@ -614,7 +710,7 @@ pub(crate) fn decode_attribute_group(
                     .get(cursor + 2)
                     .ok_or_else(|| Error::bitcode("truncated integer attribute"))?;
                 if code == 86 {
-                    let effects = MemoryEffects::from_int(value);
+                    let effects = MemoryEffects::from_int(value)?;
                     if index == FUNCTION_INDEX {
                         modern_memory = Some(effects);
                     } else {
@@ -733,7 +829,7 @@ fn decode_int_attribute(code: u64, value: u64) -> Result<Attribute> {
         25 => format!("alignstack({value})"),
         41 => format!("dereferenceable({value})"),
         42 => format!("dereferenceable_or_null({value})"),
-        86 => MemoryEffects::from_int(value).text(),
+        86 => MemoryEffects::from_int(value)?.text(),
         _ => {
             return Err(Error::bitcode(format!(
                 "unsupported integer attribute code {code}"
@@ -839,6 +935,58 @@ mod tests {
             decode_attribute_group(&record, &TypeTable::new(), &[]).expect("decode");
         assert_eq!(index, u32::MAX);
         assert_eq!(attrs, vec![Attribute("memory(none)".to_string())]);
+    }
+
+    #[test]
+    fn llvm19_memory_encoding_uses_three_locations() {
+        let encode = |text: &str| encode_attribute(&Attribute(text.to_string())).unwrap();
+        assert_eq!(encode("memory(read)"), vec![1, 86, 21]);
+        assert_eq!(encode("memory(write)"), vec![1, 86, 42]);
+        assert_eq!(
+            encode("memory(argmem: read, inaccessiblemem: write)"),
+            vec![1, 86, 9]
+        );
+        assert_eq!(MemoryEffects::from_int(21).unwrap().text(), "memory(read)");
+        assert_eq!(
+            MemoryEffects::from_int((2u64 << 56) | 0x45).unwrap().text(),
+            "memory(read)"
+        );
+        assert_eq!(
+            MemoryEffects::from_int((2u64 << 56) | 0x555)
+                .unwrap()
+                .text(),
+            "memory(read)"
+        );
+    }
+
+    #[test]
+    fn rejects_unrepresentable_memory_locations() {
+        assert!(parse_memory_attribute("memory(errnomem: read)").is_none());
+        assert!(parse_memory_attribute("memory(target_mem0: write)").is_none());
+        assert_eq!(
+            MemoryEffects::from_int((1u64 << 56) | (1 << 4))
+                .unwrap()
+                .text(),
+            "memory(read, argmem: none, inaccessiblemem: none)"
+        );
+        assert!(MemoryEffects::from_int((2u64 << 56) | (1 << 9)).is_err());
+    }
+
+    #[test]
+    fn decodes_version_two_memory_but_rejects_target_effects() {
+        let record = |value| Record {
+            code: PARAMATTR_GRP_CODE_ENTRY,
+            operands: vec![1, u64::from(u32::MAX), 1, 86, value],
+            blob: None,
+        };
+        let (_, _, attrs) =
+            decode_attribute_group(&record((2u64 << 56) | 0x555), &TypeTable::new(), &[])
+                .expect("version 2 read");
+        assert_eq!(attrs, vec![Attribute("memory(read)".to_string())]);
+        assert!(
+            decode_attribute_group(&record((2u64 << 56) | (1 << 9)), &TypeTable::new(), &[])
+                .is_err()
+        );
     }
 
     #[test]

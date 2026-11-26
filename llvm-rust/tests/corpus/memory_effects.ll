@@ -5,3 +5,5 @@ declare void @conflict() memory(read) memory(write)
 declare void @arg_read() memory(argmem: read)
 declare void @mixed() memory(argmem: read, inaccessiblemem: write)
 declare void @inacc() inaccessiblememonly memory(read)
+declare void @modern_read() memory(read)
+declare void @legacy_read() readonly

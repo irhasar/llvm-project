@@ -41,6 +41,17 @@ for input in tests/corpus/*.ll tests/corpus/*.bc; do
             cat "$TMP/$name-reader-canon.diff"
             status=1
         fi
+        ./target/debug/llvm-as-rust "$rust_ll" -o "$rust_bc"
+        if ! "$LLVM_BIN/llvm-bcanalyzer" "$rust_bc" >/dev/null 2>&1; then
+            echo "FAIL bcanalyzer fixture round trip: $name"
+            status=1
+        fi
+        "$LLVM_BIN/llvm-dis" "$rust_bc" -o "$read_canon"
+        if ! diff -u <(normalize "$cpp_ll") <(normalize "$read_canon") >"$TMP/$name-writer-fixture.diff"; then
+            echo "FAIL writer fixture: $name"
+            cat "$TMP/$name-writer-fixture.diff"
+            status=1
+        fi
         if [ "$status" -eq 0 ]; then
             echo "PASS $name"
         fi

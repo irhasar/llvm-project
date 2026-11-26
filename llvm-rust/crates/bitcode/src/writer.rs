@@ -11,7 +11,7 @@ use llvm_rust_support::{Error, Result};
 
 use crate::attrs::{
     PARAMATTR_CODE_ENTRY, PARAMATTR_GRP_CODE_ENTRY, encode_attribute, expand_attributes,
-    function_attr_index,
+    expand_function_attributes, function_attr_index,
 };
 use crate::bitstream::{AbbrevOp, BitWriter};
 
@@ -412,7 +412,7 @@ impl<'a> Writer<'a> {
                     entries.push((index as u32 + 1, attrs));
                 }
             }
-            let mut function_attrs = expand_attributes(self.module, &function.attrs)?;
+            let mut function_attrs = expand_function_attributes(self.module, &function.attrs)?;
             let mut function_align = None;
             function_attrs.retain(|attr| {
                 if let Some(value) = parse_align_attribute(&attr.0) {
@@ -454,7 +454,7 @@ impl<'a> Writer<'a> {
                         entries.push((index as u32 + 1, attrs));
                     }
                 }
-                let attrs = expand_attributes(self.module, attrs)?;
+                let attrs = expand_function_attributes(self.module, attrs)?;
                 if !attrs.is_empty() {
                     entries.push((function_attr_index(), attrs));
                 }
