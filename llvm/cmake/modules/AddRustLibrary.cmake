@@ -148,7 +148,8 @@ function(add_llvm_rust_staticlib name manifest)
   set(staged_stamp "${target_dir}/staged-$<CONFIG>.stamp")
   add_custom_command(OUTPUT "${staged_stamp}"
     COMMAND "${CMAKE_COMMAND}" "-DSRC=${staging_source}" "-DDST=${staged}"
-            "-DSTAMP=${staged_stamp}" -P "${stage_archive_script}"
+            "-DSTAMP=${staged_stamp}" "-DEXPECTED=${content_stamp}"
+            -P "${stage_archive_script}"
     BYPRODUCTS "${staged}"
     DEPENDS "${content_stamp}" "${stage_archive_script}"
     COMMENT "Staging Rust archive ${name}"
@@ -162,7 +163,7 @@ function(add_llvm_rust_staticlib name manifest)
     # command restores it without hashing or copying an existing archive.
     add_custom_target(${name}-rust
       COMMAND "${CMAKE_COMMAND}" "-DSRC=${staging_source}" "-DDST=${staged}"
-              -P "${ensure_staged_script}"
+              "-DEXPECTED=${content_stamp}" -P "${ensure_staged_script}"
       DEPENDS "${build_stamp}" "${content_stamp}" "${staged_stamp}"
       VERBATIM)
   endif()

@@ -68,7 +68,9 @@ Non-goals (for now):
   and is renamed only after it completes, so an interrupted restore cannot
   leave a partial archive. A staging stamp records the copy run, so a
   byte-identical Cargo rebuild does not recopy on later builds; a Make target
-  restores a deleted or truncated staged archive without rerunning Cargo.
+  restores a deleted or truncated staged archive without rerunning Cargo. If
+  the Cargo output is gone, the staged archive is accepted only when its hash
+  matches the content stamp.
 * exposes the archive as a `STATIC IMPORTED` target that components link,
 * on Ninja, records the archive in `INTERFACE_LINK_DEPENDS` instead of adding a
   target-level dependency. CMake otherwise makes every C++ object in a

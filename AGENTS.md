@@ -88,7 +88,9 @@ Every crate under `llvm/lib/*/rust/` follows the same rules:
   after a byte-identical Cargo rebuild. Staging and Make restores write a
   temporary file and rename it, so an interrupted copy cannot leave a partial
   archive that the next build accepts. Keep `RustStageArchive.cmake` in the
-  staging rule's dependencies so editing the script restages.
+  staging rule's dependencies so editing the script restages. The Make fallback
+  for a missing Cargo archive verifies the staged archive against the content
+  stamp before using it.
 - Release staticlibs use fat LTO and one codegen unit. Small standalone Rust
   binaries use LTO off; larger ones try thin LTO first. Development and test
   builds use the incremental dev profile. See `MIGRATION_TO_RUST.md` for the

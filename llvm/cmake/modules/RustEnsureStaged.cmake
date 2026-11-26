@@ -16,6 +16,18 @@ elseif(EXISTS "${SRC}")
   if(NOT src_size EQUAL dst_size)
     set(copy TRUE)
   endif()
+else()
+  # The Cargo output is gone; the staged archive is only usable if it matches
+  # the hash recorded before that output disappeared.
+  if(NOT DEFINED EXPECTED OR NOT EXISTS "${EXPECTED}")
+    message(FATAL_ERROR "Cannot verify staged Rust archive without ${EXPECTED}")
+  endif()
+  file(READ "${EXPECTED}" expected_hash)
+  string(STRIP "${expected_hash}" expected_hash)
+  file(SHA256 "${DST}" dst_hash)
+  if(NOT expected_hash STREQUAL dst_hash)
+    message(FATAL_ERROR "Staged Rust archive does not match its recorded hash: ${DST}")
+  endif()
 endif()
 
 if(copy)
