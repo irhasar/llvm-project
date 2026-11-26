@@ -90,6 +90,10 @@ function(add_llvm_rust_staticlib name manifest)
     set(cargo_env "")
   endif()
 
+  # Strip a separate copy so the Cargo cache stays untouched, and stage the
+  # stripped copy with copy_if_different so an unchanged archive does not
+  # rewrite the output and force dependents to relink.
+  set(staging_source "${archive}")
   set(strip_command "")
   if(ARG_STRIP_DEBUG AND CMAKE_STRIP AND NOT MSVC)
     if(APPLE)
@@ -97,14 +101,17 @@ function(add_llvm_rust_staticlib name manifest)
     else()
       set(strip_args --strip-debug)
     endif()
-    set(strip_command COMMAND "${CMAKE_STRIP}" ${strip_args} "${staged}")
+    set(staging_source "${target_dir}/release/${rust_lib_name}.stripped")
+    set(strip_command
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${archive}" "${staging_source}"
+      COMMAND "${CMAKE_STRIP}" ${strip_args} "${staging_source}")
   endif()
 
   add_custom_command(OUTPUT "${staged}"
     COMMAND ${cargo_env} "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
             --manifest-path "${manifest}" --target-dir "${target_dir}"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${archive}" "${staged}"
     ${strip_command}
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${staging_source}" "${staged}"
     DEPENDS ${crate_sources}
     COMMENT "Building Rust crate ${name}"
     VERBATIM)

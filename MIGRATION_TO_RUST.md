@@ -242,13 +242,17 @@ full-width 64-bit values through the public C++ API, median (min-max) ns/op:
 
 | Operation | C++ | Rust | Rust speedup |
 |-----------|-----|------|--------------|
-| Decimal integer | 34.52 (34.44-36.84) | 22.77 (21.63-24.29) | 1.52x |
-| Grouped integer | 68.43 (67.80-71.32) | 27.24 (27.04-27.56) | 2.51x |
-| Hex, width 16 | 13.20 (13.14-13.53) | 11.31 (11.24-11.71) | 1.17x |
+| Decimal integer | 34.65 (34.41-34.76) | 21.88 (21.53-24.07) | 1.58x |
+| Grouped integer | 68.26 (68.06-72.83) | 27.50 (27.20-28.55) | 2.48x |
+| Hex, width 16 | 13.14 (13.01-13.65) | 11.28 (11.26-11.80) | 1.17x |
 
-The process-level rows are the sum of the per-operation medians: C++ 464.60 ms
-wall (461.50-486.73), 461.07 ms user, 2.01 ms sys; Rust 245.26 ms wall
-(239.64-254.23), 241.84 ms user, 3.00 ms sys; peak RSS was 3.62 MiB for both.
+The process-level rows sum the per-operation medians; ranges sum the
+per-operation minima and maxima:
+
+| Backend | Wall ms | User ms | Sys ms | Peak RSS MiB |
+|---------|---------|---------|--------|--------------|
+| C++ | 464.17 (461.95-484.96) | 462.26 (458.68-482.02) | 3.00 (0.00-4.01) | 3.62 (3.50-3.75) |
+| Rust | 242.63 (239.93-257.65) | 240.56 (236.64-252.89) | 2.03 (1.00-5.00) | 3.75 (3.50-3.75) |
 
 Compile rows are five pinned runs. C++ is the fallback build (option `OFF`)
 and has no incremental cache, so its incremental row repeats the full compile;
@@ -257,13 +261,13 @@ option `ON`:
 
 | Backend | Mode | Wall ms | User ms | Sys ms | Peak RSS MiB | Object/archive bytes |
 |---------|------|---------|---------|--------|--------------|----------------------|
-| C++ | clean | 632.69 (629.96-649.06) | 548.93 (541.49-555.87) | 88.11 (80.95-100.14) | 128.13 | 13,208 |
-| C++ | incremental | 635.61 (632.57-655.84) | 539.80 (529.35-550.82) | 101.21 (90.17-104.91) | 128.02 | 13,208 |
-| Rust crate | clean | 205.67 (203.22-207.72) | 130.18 (123.39-135.19) | 78.50 (72.41-83.55) | 115.60 | 5,056,024 |
-| Rust crate | incremental | 177.63 (175.60-181.72) | 125.39 (121.52-131.89) | 53.94 (52.01-59.65) | 115.59 | 5,056,024 |
-| C++ wrapper (Rust ON) | clean | 622.39 (611.92-626.95) | 527.30 (516.38-535.37) | 89.43 (85.81-106.91) | 126.44 | 13,352 |
-| Rust total | clean | 828.06 | 657.48 | 167.93 | 126.44 | 5,056,024 + 13,352 |
-| Rust total | incremental | 800.02 | 652.69 | 143.36 | 126.44 | 5,056,024 + 13,352 |
+| C++ | clean | 632.69 (629.96-649.06) | 548.93 (541.49-555.87) | 88.11 (80.95-100.14) | 128.13 (127.98-128.21) | 13,208 |
+| C++ | incremental | 635.61 (632.57-655.84) | 539.80 (529.35-550.82) | 101.21 (90.17-104.91) | 128.02 (127.81-128.11) | 13,208 |
+| Rust crate | clean | 205.67 (203.22-207.72) | 130.18 (123.39-135.19) | 78.50 (72.41-83.55) | 115.60 (115.56-115.68) | 5,056,024 |
+| Rust crate | incremental | 177.63 (175.60-181.72) | 125.39 (121.52-131.89) | 53.94 (52.01-59.65) | 115.59 (115.51-115.68) | 5,056,024 |
+| C++ wrapper (Rust ON) | clean | 622.39 (611.92-626.95) | 527.30 (516.38-535.37) | 89.43 (85.81-106.91) | 126.44 (126.28-126.50) | 13,352 |
+| Rust total | clean | 828.06 (815.14-834.67) | 657.48 | 167.93 | 126.44 (126.28-126.50) | 5,056,024 + 13,352 |
+| Rust total | incremental | 800.02 (787.52-808.67) | 652.69 | 143.36 | 126.44 (126.28-126.50) | 5,056,024 + 13,352 |
 
 `AddRustLibrary` strips debug sections from the staged copy with
 `strip --strip-debug`, reducing the 5,056,024-byte archive to 2,522,592 bytes.
