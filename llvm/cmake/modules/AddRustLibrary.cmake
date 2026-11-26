@@ -107,16 +107,21 @@ function(add_llvm_rust_staticlib name manifest)
       COMMAND "${CMAKE_STRIP}" ${strip_args} "${staging_source}")
   endif()
 
-  add_custom_command(OUTPUT "${staged}"
+  # The stamp is the primary output so Makefiles do not rerun Cargo forever
+  # when copy_if_different intentionally preserves the archive timestamp.
+  set(stamp "${target_dir}/staged.stamp")
+  add_custom_command(OUTPUT "${stamp}"
+    BYPRODUCTS "${staged}"
     COMMAND ${cargo_env} "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
             --manifest-path "${manifest}" --target-dir "${target_dir}"
     ${strip_command}
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${staging_source}" "${staged}"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${stamp}"
     DEPENDS ${crate_sources}
     COMMENT "Building Rust crate ${name}"
     VERBATIM)
 
-  add_custom_target(${name}-rust DEPENDS "${staged}")
+  add_custom_target(${name}-rust DEPENDS "${stamp}")
   add_library(${name} STATIC IMPORTED GLOBAL)
   set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${staged}")
   add_dependencies(${name} ${name}-rust)

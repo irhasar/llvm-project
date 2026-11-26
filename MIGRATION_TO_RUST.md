@@ -246,8 +246,9 @@ full-width 64-bit values through the public C++ API, median (min-max) ns/op:
 | Grouped integer | 68.26 (68.06-72.83) | 27.50 (27.20-28.55) | 2.48x |
 | Hex, width 16 | 13.14 (13.01-13.65) | 11.28 (11.26-11.80) | 1.17x |
 
-The process-level rows sum the per-operation medians; ranges sum the
-per-operation minima and maxima:
+The wall/user/sys columns sum the per-operation medians, and their ranges sum
+the per-operation minima and maxima. Peak RSS is the maximum per-operation
+peak, not a sum; sequential processes do not share a peak:
 
 | Backend | Wall ms | User ms | Sys ms | Peak RSS MiB |
 |---------|---------|---------|--------|--------------|
@@ -257,7 +258,8 @@ per-operation minima and maxima:
 Compile rows are five pinned runs. C++ is the fallback build (option `OFF`)
 and has no incremental cache, so its incremental row repeats the full compile;
 the Rust total sums the crate build and the C++ wrapper compiled with the
-option `ON`:
+option `ON`. Peak RSS in the total rows is the larger component peak, not a
+sum:
 
 | Backend | Mode | Wall ms | User ms | Sys ms | Peak RSS MiB | Object/archive bytes |
 |---------|------|---------|---------|--------|--------------|----------------------|
