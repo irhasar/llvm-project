@@ -292,9 +292,12 @@ temporaries and the out-of-line `compare_insensitive` call.
 option on, `UnicodeCaseFoldRust.cpp` replaces it and `foldCharSimple` is a
 C-ABI call to `llvm_unicode_fold_char_simple`. The Rust implementation uses
 691 sorted ranges and a binary search instead of the generated comparison
-chain, with an ASCII fast path. Starts are stored as `u16` offsets from
-16-entry block bases, lengths are `u8`, and deltas are `i16`; the 14 deltas
-outside `i16` are selected by rank from a sparse `i32` table.
+chain, with an ASCII fast path. Starts are stored as `u8` offsets from
+256-code-point block bases selected by a packed 5-bit block index; lengths are
+`u8`. Delta 1 is a bit in a bitset, and the other 146 deltas are selected by
+rank from a sparse `i32` table. `PRUNE_ARCHIVE` removes unused
+`compiler_builtins` members, so the staged archive is 6,136 bytes instead of
+5 MiB.
 
 ```sh
 (cd llvm/lib/Support/rust/unicode &&
@@ -309,7 +312,7 @@ ninja -C build llvm-rust-unicode-differential llvm-unicode-stable
 The differential target compiles the C++ fallback and compares every code
 point from -1 through 0x110000; the stable target exercises the public API
 with the option on and is built in both configurations. Five pinned runs over
-five million random code points: C++ 40.22 ns, Rust 12.66 ns, 3.18x faster.
+five million random code points: C++ 40.38 ns, Rust 18.62 ns, 2.17x faster.
 The public CMake package must import the Rust archive, not leave a bare
 `llvm_unicode` name in `LLVMSupport`'s interface:
 
@@ -319,15 +322,11 @@ cmake -S /tmp/unicode-consumer -B /tmp/unicode-consumer-build -G Ninja \
 ninja -C /tmp/unicode-consumer-build
 ```
 
-The resource gate is not cleared. The C++ one-TU compile is 419 ms and
-96 MiB peak RSS; the Rust crate plus wrapper is 515 ms and 110 MiB peak RSS,
-so wall time is 1.23x higher and peak RSS 14% higher. `llvm-min-tblgen` grows
-by 136 bytes; most of that is the rustc `.comment` section and
-`compiler_builtins` fallbacks pulled from the archive, not the fold table.
-`llvm-unicode-stable` is 20,288 bytes with C++ and 21,088 bytes with Rust
-(+800); after `strip --strip-all` it is 18,616 bytes versus 18,576 for C++.
-Pruning the unused archive members closes that stripped gap, but the cleanup
-is not enabled by default. The option stays opt-in.
+The resource gate is cleared. The C++ one-TU compile is 419 ms and 95.9 MiB
+peak RSS; the Rust crate plus wrapper is 139.9 ms and 94.0 MiB peak RSS
+(0.33x wall, -2.1% RSS). `llvm-min-tblgen` is byte-identical (1,796,632
+bytes). `llvm-unicode-stable` is 20,288 bytes with C++ and 16,368 bytes with
+Rust (-3,920). The option stays opt-in by policy.
 
 ## Demangler port
 

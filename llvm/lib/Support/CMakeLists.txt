@@ -682,7 +682,7 @@ if(LLVM_ENABLE_RUST_UNICODE)
   include(AddRustLibrary)
   add_llvm_rust_staticlib(llvm_unicode
     "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.toml"
-    STRIP_DEBUG)
+    STRIP_DEBUG PRUNE_ARCHIVE)
   target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_UNICODE)
   target_link_libraries(LLVMSupport PRIVATE llvm_unicode)
 

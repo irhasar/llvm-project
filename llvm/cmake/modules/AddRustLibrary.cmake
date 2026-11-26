@@ -20,7 +20,7 @@ find_program(LLVM_RUST_CARGO_EXECUTABLE
 mark_as_advanced(LLVM_RUST_CARGO_EXECUTABLE)
 
 function(add_llvm_rust_staticlib name manifest)
-  cmake_parse_arguments(ARG "INSTALL_WITH_TOOLCHAIN;STRIP_DEBUG"
+  cmake_parse_arguments(ARG "INSTALL_WITH_TOOLCHAIN;STRIP_DEBUG;PRUNE_ARCHIVE"
     "INSTALL_COMPONENT" "" ${ARGN})
   if(NOT ARG_INSTALL_COMPONENT)
     set(ARG_INSTALL_COMPONENT LLVMSupport)
@@ -90,21 +90,45 @@ function(add_llvm_rust_staticlib name manifest)
     set(cargo_env "")
   endif()
 
-  # Strip a separate copy so the Cargo cache stays untouched, and stage the
-  # stripped copy with copy_if_different so an unchanged archive does not
-  # rewrite the output and force dependents to relink.
+  # Strip and/or prune a separate copy so the Cargo cache stays untouched, and
+  # stage the processed copy with copy_if_different so an unchanged archive
+  # does not rewrite the output and force dependents to relink.
   set(staging_source "${archive}")
   set(strip_command "")
-  if(ARG_STRIP_DEBUG AND CMAKE_STRIP AND NOT MSVC)
-    if(APPLE)
-      set(strip_args -S)
-    else()
-      set(strip_args --strip-debug)
-    endif()
+  if((ARG_STRIP_DEBUG OR ARG_PRUNE_ARCHIVE) AND NOT MSVC)
     set(staging_source "${target_dir}/release/${rust_lib_name}.stripped")
     set(strip_command
-      COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${archive}" "${staging_source}"
-      COMMAND "${CMAKE_STRIP}" ${strip_args} "${staging_source}")
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${archive}" "${staging_source}")
+    if(ARG_STRIP_DEBUG AND CMAKE_STRIP)
+      if(APPLE)
+        set(strip_args -S)
+      elseif(ARG_PRUNE_ARCHIVE)
+        set(strip_args --strip-unneeded --remove-section=.comment)
+      else()
+        set(strip_args --strip-debug)
+      endif()
+      list(APPEND strip_command
+        COMMAND "${CMAKE_STRIP}" ${strip_args} "${staging_source}")
+    endif()
+  endif()
+
+  set(prune_command "")
+  if(ARG_PRUNE_ARCHIVE AND NOT MSVC)
+    if(NOT CMAKE_AR)
+      message(FATAL_ERROR
+        "PRUNE_ARCHIVE for ${name} requires CMAKE_AR.")
+    endif()
+    if(CMAKE_CURRENT_FUNCTION_LIST_DIR)
+      set(prune_archive_script
+        "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RustPruneArchive.cmake")
+    else()
+      set(prune_archive_script
+        "${CMAKE_CURRENT_LIST_DIR}/RustPruneArchive.cmake")
+    endif()
+    set(prune_command
+      COMMAND "${CMAKE_COMMAND}"
+              "-DARCHIVE=${staging_source}" "-DCRATE=${name}" "-DAR=${CMAKE_AR}"
+              -P "${prune_archive_script}")
   endif()
 
   # Separate the Cargo build, content check, and staging stamps. The build
@@ -129,6 +153,7 @@ function(add_llvm_rust_staticlib name manifest)
     COMMAND ${cargo_env} "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
             --manifest-path "${manifest}" --target-dir "${target_dir}"
     ${strip_command}
+    ${prune_command}
     COMMAND "${CMAKE_COMMAND}" -E touch "${build_stamp}"
     DEPENDS ${crate_sources}
     COMMENT "Building Rust crate ${name}"
