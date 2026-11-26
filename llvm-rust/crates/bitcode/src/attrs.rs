@@ -522,7 +522,16 @@ impl MemoryEffects {
     }
 
     fn text(self) -> String {
+        self.format(false)
+    }
+
+    fn text_for_aarch64(self) -> String {
+        self.format(true)
+    }
+
+    fn format(self, is_aarch64: bool) -> String {
         let other = self.get(MEM_OTHER);
+        let inaccessible = self.get(MEM_INACCESSIBLE);
         let union = self.union_modref();
         let mut parts = Vec::new();
         if other != 0 || union == other {
@@ -533,6 +542,12 @@ impl MemoryEffects {
             if modref != other {
                 parts.push(format!("{name}: {}", modref_name(modref)));
             }
+        }
+        // AArch64 readers reconstruct both target effects from inaccessible
+        // memory. Make that explicit when the default access kind would imply
+        // different target effects on reassembly.
+        if is_aarch64 && other != 0 && inaccessible != other {
+            parts.push(format!("target_mem: {}", modref_name(inaccessible)));
         }
         format!("memory({})", parts.join(", "))
     }
@@ -861,7 +876,12 @@ pub(crate) fn decode_attribute_group(
         modern_memory = Some(legacy_memory);
     }
     if let Some(effects) = modern_memory {
-        insert_memory_attribute(&mut attrs, Attribute(effects.text()));
+        let text = if is_aarch64 && index == FUNCTION_INDEX {
+            effects.text_for_aarch64()
+        } else {
+            effects.text()
+        };
+        insert_memory_attribute(&mut attrs, Attribute(text));
     }
     Ok((group_id, index, attrs))
 }

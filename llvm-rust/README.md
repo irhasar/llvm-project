@@ -102,8 +102,11 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   it. Target clauses on non-AArch64 targets are rejected. The reader folds
   errno into other memory and validates version-2 target fields against
   inaccessible memory on AArch64 (other memory elsewhere), matching LLVM's
-  downgrade path. Parameter and return `readnone`/`readonly`/`writeonly`
-  remain distinct flags.
+  downgrade path. On AArch64, decoded function and call-site memory
+  attributes emit an explicit target clause when the default access kind
+  would otherwise imply different target effects, so Rust disassembly can
+  be reassembled without changing the target contract. Parameter and return
+  `readnone`/`readonly`/`writeonly` remain distinct flags.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
 
 Half and bfloat conversion handles subnormals, infinities, quiet NaNs, and
@@ -147,6 +150,10 @@ builds LLVM):
 LLVM_V2_BIN=/usr/lib/llvm-23/bin ./tests/differential.sh
 ```
 
+When `LLVM_V2_BIN` is set explicitly, the directory must contain `llvm-as`,
+`llvm-dis`, and `llvm-bcanalyzer`; an incomplete oracle fails the harness
+instead of being skipped.
+
 Reproducible benchmark (5 runs, `taskset -c 0`, median and min/max):
 
 ```sh
@@ -173,8 +180,9 @@ forward numbered references that must not consume definition slots, direct
 calls without pointer type records, repeated function memory effects,
 modern/legacy memory equivalence, inline legacy flags overridden by numbered
 scoped-memory groups, modern `memory(argmem: ...)`/
-`memory(inaccessiblemem: ...)` forms, AArch64 target-memory validation and
-version-2 decoding, duplicate attribute groups in a checked-in bitcode
+`memory(inaccessiblemem: ...)` forms, AArch64 target-memory validation,
+version-2 decoding, and disassemble/reassemble preservation of conflicting
+default and target access, duplicate attribute groups in a checked-in bitcode
 fixture that is read and reassembled with both Rust tools, unnamed
 value/block numbering, exact shift/divide flags, and `phi` self references.
 
@@ -193,21 +201,21 @@ five runs:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 37.5 ms | 36.4-38.5 ms | 55.4 MiB |
-| `llvm-as-rust` | 23.8 ms | 23.5-24.7 ms | 14.6 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 30.8 ms | 30.0-33.6 ms | 54.5 MiB |
-| `llvm-dis-rust` on C++ bitcode | 19.0 ms | 18.8-21.0 ms | 14.6 MiB |
+| `llvm-as` (C++) | 36.4 ms | 35.9-37.3 ms | 55.8 MiB |
+| `llvm-as-rust` | 23.8 ms | 23.2-24.7 ms | 14.3 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 30.1 ms | 29.8-30.4 ms | 54.7 MiB |
+| `llvm-dis-rust` on C++ bitcode | 19.0 ms | 18.7-19.2 ms | 14.3 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer-only
-corpus, Rust throughput was about 1.6x both C++ tools, and peak RSS was
-about 3.7x lower. Each tool gets one discarded
+corpus, Rust throughput was about 1.5x the C++ assembler and 1.6x the C++
+disassembler, and peak RSS was about 3.8x lower. Each tool gets one discarded
 warmup run before the five measured runs. These are throughput and memory
 measurements, not a generated-code performance claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.3 MiB
 (`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 A clean release build of the two Rust tools, using a separate target
-directory, took 9.8 s wall, 31.5 s user, and 2.0 s system time. This is a
+directory, took 9.7 s wall, 31.6 s user, and 1.9 s system time. This is a
 Rust-only observation, not a cross-toolchain build-time result. A C++ compile
 baseline is not available in this workspace: only the installed LLVM 19.1.7
 tools and `libLLVM.so` are present, without LLVM development headers or a

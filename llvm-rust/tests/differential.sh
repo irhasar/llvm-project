@@ -5,6 +5,10 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 LLVM_BIN=${LLVM_BIN:-/usr/lib/llvm-19/bin}
 V2_BIN=${LLVM_V2_BIN:-}
+V2_REQUIRED=0
+if [ -n "$V2_BIN" ]; then
+    V2_REQUIRED=1
+fi
 if [ -z "$V2_BIN" ]; then
     for candidate in /usr/lib/llvm-24/bin /usr/lib/llvm-23/bin; do
         if [ -x "$candidate/llvm-as" ]; then
@@ -101,7 +105,21 @@ for input in tests/corpus/*.ll tests/corpus/*.bc; do
     fi
 done
 
-if [ -n "$V2_BIN" ] && [ -x "$V2_BIN/llvm-as" ] && [ -x "$V2_BIN/llvm-dis" ]; then
+v2_ready=0
+if [ -n "$V2_BIN" ]; then
+    v2_ready=1
+    for tool in llvm-as llvm-dis llvm-bcanalyzer; do
+        if [ ! -x "$V2_BIN/$tool" ]; then
+            v2_ready=0
+        fi
+    done
+fi
+if [ "$V2_REQUIRED" -eq 1 ] && [ "$v2_ready" -ne 1 ]; then
+    echo "FAIL v2 oracle: LLVM_V2_BIN must contain llvm-as, llvm-dis, and llvm-bcanalyzer: $V2_BIN"
+    status=1
+fi
+
+if [ "$v2_ready" -eq 1 ]; then
     for input in tests/corpus/v2/*.ll; do
         [ -e "$input" ] || continue
         name="v2-$(basename "$input")"
@@ -141,7 +159,7 @@ if [ -n "$V2_BIN" ] && [ -x "$V2_BIN/llvm-as" ] && [ -x "$V2_BIN/llvm-dis" ]; th
             echo "PASS $name"
         fi
     done
-else
+elif [ "$V2_REQUIRED" -eq 0 ]; then
     echo "SKIP v2 oracle (set LLVM_V2_BIN to an LLVM 23+ bin directory)"
 fi
 

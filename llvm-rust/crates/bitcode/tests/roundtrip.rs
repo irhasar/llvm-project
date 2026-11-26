@@ -249,6 +249,41 @@ attributes #1 = { readnone }
 }
 
 #[test]
+fn aarch64_target_memory_survives_disassemble_assemble() {
+    let source = r#"target triple = "aarch64-unknown-linux-gnu"
+declare void @callee()
+declare void @read_default_write_inaccessible() memory(read, inaccessiblemem: write, target_mem: write)
+
+define void @caller() {
+entry:
+  call void @callee() memory(read, inaccessiblemem: write, target_mem: write)
+  ret void
+}
+"#;
+    let mut module = parse_module(source).expect("parse AArch64 memory");
+    let bytes = write_bitcode(&mut module).expect("write AArch64 memory");
+    let read = read_bitcode(&bytes).expect("read AArch64 memory");
+    let text = print_module(&read);
+    assert!(
+        text.contains(
+            "declare void @read_default_write_inaccessible() memory(read, inaccessiblemem: write, target_mem: write)"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "call void @callee() memory(read, inaccessiblemem: write, target_mem: write)"
+        ),
+        "{text}"
+    );
+
+    let mut reparsed = parse_module(&text).expect("reparse AArch64 disassembly");
+    let second = write_bitcode(&mut reparsed).expect("rewrite AArch64 memory");
+    let second_read = read_bitcode(&second).expect("reread AArch64 memory");
+    assert_eq!(text, print_module(&second_read));
+}
+
+#[test]
 fn disassemble_assemble_preserves_unnamed_slots() {
     let source = "declare void @0()\n\n@1 = global i32 1\n";
     let mut module = parse_module(source).expect("parse numeric slots");
