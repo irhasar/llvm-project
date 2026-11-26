@@ -5,15 +5,20 @@ the default LLVM CMake build and is not wired into `LLVM_ENABLE_RUST_*`.
 
 Read `../RUST_LLVM_TRACK_B.md` and `../AGENTS.md` before adding code.
 
-## First slice
+## M1 scope
 
-1. Add a Cargo workspace and a `support` crate with arena, error, and
-   diagnostic primitives.
-2. Add an `ir` crate that parses, represents, and prints a small textual IR
-   module.
-3. Add a `bitcode` reader that round-trips the same corpus.
-4. Add a differential harness against C++ `llvm-as`/`llvm-dis`.
-5. Record build and runtime metrics, then hold the M1 feasibility review.
+The M1 slice is implemented; it is not an empty workspace proposal. It
+contains a Cargo workspace, the `support`, `ir`, `bitcode`, and `tools`
+crates, and runnable `llvm-as-rust`/`llvm-dis-rust` binaries. The M1
+feasibility review is still open because generated-code evidence and the
+upstream test suite are not available yet.
+
+The remaining M1 steps are:
+
+1. Keep the textual IR parser/printer and bitcode reader/writer in
+   differential agreement with the C++ oracle.
+2. Expand the corpus until the unsupported-feature list is the only gap.
+3. Record build and runtime metrics, then hold the M1 feasibility review.
 
 Do not start with MC, CodeGen, or the target backends.
 
@@ -31,7 +36,7 @@ crates/
 tests/
 ```
 
-## Status: first vertical slice
+## Status: M1 vertical slice
 
 The M1 spike is implemented and differential-tested against LLVM 19.1.7.
 
@@ -44,9 +49,13 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   `condbr`, `switch`, `unreachable`. Unnamed values and blocks share one
   numbering sequence, and `phi` accepts forward and self references.
   `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
-  functions. Forward global/function references are resolved after parsing.
-  Nonzero global and pointer address spaces are rejected explicitly instead
-  of being dropped.
+  functions. Forward global/function constants and instruction operands are
+  resolved after parsing, and globals/functions are emitted in definition
+  order. Empty symbol names are canonicalized to LLVM unnamed slots (`@0`,
+  `@1`, ...). Nonzero global and pointer address spaces are rejected
+  explicitly instead of being dropped. Half and bfloat literals round
+  directly from binary64 without narrowing through `f32`; tiny half inputs
+  return signed zero instead of shifting by more than 63 bits.
 - `bitcode`: LLVM bitstream writer and reader covering the module, type,
   constants, function, value-symbol-table, string-table, and
   `PARAMATTR`/`PARAMATTR_GROUP` blocks. The reader handles abbreviations and
@@ -59,20 +68,28 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   rest of the legacy enum table); integer attributes (`align`, `alignstack`,
   `dereferenceable`, `dereferenceable_or_null`); type attributes (`byval`,
   `byref`, `sret`, `inalloca`, `preallocated`, `elementtype`); string
-  attributes such as `"frame-pointer"="all"`; and `memory(none|read|write)`
-  plus the legacy `readnone`/`readonly`/`writeonly` spellings. Type attributes
-  are parsed as real types, so quoted names such as `byval(%"a b")` and
-  type-only arguments such as `byval([8 x i8])` resolve correctly. Group-only
-  spellings such as `alignstack=16` are accepted and written back inline. The
-  reader canonicalizes the legacy memory enum values to
-  `memory(none|read|write)`.
+  attributes such as `"frame-pointer"="all"` with raw non-UTF-8 bytes; and
+  `memory(none|read|write)` plus the legacy
+  `readnone`/`readonly`/`writeonly` spellings. Type attributes are parsed as
+  real types, so quoted names such as `byval(%"a b")` and type-only arguments
+  such as `byval([8 x i8])` resolve correctly. Group-only spellings such as
+  `align=16` and `alignstack=16` are preserved in printed groups and expanded
+  for bitcode encoding. The reader canonicalizes the legacy memory enum values
+  to `memory(none|read|write)` only at function scope; parameter and return
+  attributes keep `readnone`/`readonly`/`writeonly`, which LLVM accepts there.
+  Multiple function alignment groups are merged in order, with the last value
+  winning and no `align` left in the function attribute list. Attribute-list
+  expansion is bounded by the input size to avoid repeated-reference memory
+  amplification.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
 
 Half and bfloat conversion handles subnormals, infinities, quiet NaNs, and
 signaling NaNs with round-to-nearest-even; float printing preserves signaling
-NaN payloads. Section, source filename, triple, data layout, and symbol names
-must be valid UTF-8 in bitcode and are rejected otherwise instead of being
-lossily rewritten.
+NaN payloads. `CST_DATA` records use float constants when their element type
+is floating-point, and function addresses in operands and constants use
+pointer type rather than the function signature. Section, source filename,
+triple, data layout, and symbol names must be valid UTF-8 in bitcode and are
+rejected otherwise instead of being lossily rewritten.
 
 This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
@@ -112,15 +129,19 @@ CARGO_TARGET_DIR=/tmp/llvm-rust-target cargo build --release \
 python3 tests/bench.py --runs 5
 ```
 
-## First-slice results
+## M1 results
 
-Differential harness: all fifteen modules in `tests/corpus/` match the C++
-LLVM 19.1.7 oracle in both directions after normalizing `source_filename` and
+Differential harness: all 22 modules in `tests/corpus/` match the C++ LLVM
+19.1.7 oracle in both directions after normalizing `source_filename` and
 `ModuleID`. The corpus covers TLS models, sections, opaque types, `i128`
-constants, hexadecimal floats and subnormal/signaling-NaN cases, function
-alignment, type attributes with quoted names, argument-indexed call-site
-attributes, `local_unnamed_addr`, forward references, UTF-8 section names,
-unnamed value/block numbering, and `phi` self references.
+constants, hexadecimal floats and subnormal/signaling-NaN cases, float and
+double `CST_DATA` arrays, function and multiple-group alignment, type
+attributes with quoted names, raw non-UTF-8 attribute strings, parameter
+memory attributes, argument-indexed call-site attributes,
+`local_unnamed_addr`, forward references in constants and instructions,
+UTF-8 section names, unnamed globals/functions, explicit quoted numeric
+global/function names, unnamed value/block
+numbering, exact shift/divide flags, and `phi` self references.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -131,14 +152,23 @@ Benchmark on a synthetic corpus of 1000 functions, 10 instructions each
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 35.8 ms | 35.1-43.7 ms | 55.7 MiB |
-| `llvm-as-rust` | 22.7 ms | 21.4-25.3 ms | 14.6 MiB |
-| `llvm-dis` (C++) on Rust bitcode | 30.3 ms | 29.9-31.3 ms | 54.7 MiB |
-| `llvm-dis-rust` on C++ bitcode | 19.2 ms | 18.9-19.6 ms | 14.6 MiB |
+| `llvm-as` (C++) | 34.8 ms | 33.4-35.0 ms | 55.2 MiB |
+| `llvm-as-rust` | 21.2 ms | 21.1-21.4 ms | 14.6 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 29.5 ms | 29.1-30.2 ms | 54.5 MiB |
+| `llvm-dis-rust` on C++ bitcode | 18.8 ms | 18.5-19.3 ms | 14.6 MiB |
 
-The Rust tools are about 1.6x faster and use about 3.8x less peak memory on
-this corpus. The Rust binaries are 4.5 MiB (`llvm-as-rust`) and 3.7 MiB
-(`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
+Both disassemblers read the same C++-produced bitcode, so the comparison
+isolates decoder work from writer record layout. The Rust tools are about
+1.6x faster and use about 3.8x less peak memory on this corpus. The Rust
+binaries are 5.3 MiB (`llvm-as-rust`) and 4.3 MiB (`llvm-dis-rust`); the C++
+tools need the 124 MiB `libLLVM.so.19.1`.
+
+A clean release build of the two Rust tools, using a separate target
+directory, took 7.3 s wall, 23.2 s user, and 1.6 s system time. The C++ LLVM
+build is not repeated here: the oracle is the installed LLVM 19.1.7, and
+building LLVM is deliberately avoided in this workspace. Generated-code
+quality is not measured because M1 has no codegen; the required compile-time
+and generated-code comparisons remain open for the M1 gate.
 
 These numbers are a slice result, not an LLVM parity claim. The upstream
 `llvm/test` suite is still required before any parity gate, and the synthetic

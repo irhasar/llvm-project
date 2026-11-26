@@ -34,7 +34,7 @@ fn normalize_group_body(text: &str) -> String {
         rest = &tail[digits..];
     }
     out.push_str(rest);
-    out
+    out.replace("align=", "align ")
 }
 
 fn inline_attr_groups(text: &str) -> String {
@@ -50,11 +50,72 @@ fn inline_attr_groups(text: &str) -> String {
         }
         body.push(line);
     }
-    let mut result = body.join("\n");
-    for (reference, expansion) in groups {
-        result = result.replace(&reference, &expansion);
-    }
+    let result = collapse_alignments(replace_group_refs(&body.join("\n"), &groups));
     result.trim_end().to_string()
+}
+
+fn collapse_alignments(mut text: String) -> String {
+    let mut search = 0;
+    while let Some(relative) = text[search..].find("align ") {
+        let start = search + relative;
+        let value_start = start + "align ".len();
+        let value_end = text[value_start..]
+            .find(|ch: char| !ch.is_ascii_digit())
+            .map(|offset| value_start + offset)
+            .unwrap_or(text.len());
+        let tail_start =
+            value_end + (text[value_end..].len() - text[value_end..].trim_start().len());
+        if text[tail_start..].starts_with("align ") {
+            text.replace_range(start..tail_start, "");
+            search = start;
+        } else {
+            search = value_end;
+        }
+    }
+    text
+}
+
+fn replace_group_refs(text: &str, groups: &HashMap<String, String>) -> String {
+    let mut out = String::new();
+    let mut chars = text.char_indices().peekable();
+    let mut quoted = false;
+    while let Some((index, ch)) = chars.next() {
+        if ch == '"' {
+            quoted = !quoted;
+            out.push(ch);
+            continue;
+        }
+        if ch == '\\' && quoted {
+            out.push(ch);
+            if let Some((_, next)) = chars.next() {
+                out.push(next);
+            }
+            continue;
+        }
+        if ch == '#' && !quoted {
+            let mut end = index + 1;
+            for (offset, next) in text[index + 1..].char_indices() {
+                if !next.is_ascii_digit() {
+                    break;
+                }
+                end = index + 1 + offset + next.len_utf8();
+            }
+            let reference = &text[index..end];
+            if let Some(expansion) = groups.get(reference) {
+                out.push_str(expansion);
+                while let Some((next_index, _)) = chars.peek() {
+                    if *next_index < end {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(ch);
+    }
+    out
 }
 
 #[test]

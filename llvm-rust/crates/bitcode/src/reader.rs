@@ -134,6 +134,8 @@ pub fn read_bitcode(bytes: &[u8]) -> Result<Module> {
         next_body: 0,
         attr_groups: HashMap::new(),
         attr_lists: Vec::new(),
+        attr_budget: bytes.len().saturating_mul(8).saturating_add(4096),
+        next_unnamed: 0,
     };
     reader.read_module(module_block)?;
     reader.resolve_globals()?;
@@ -151,6 +153,8 @@ struct Reader {
     next_body: usize,
     attr_groups: HashMap<u64, (u32, Vec<Attribute>)>,
     attr_lists: Vec<Vec<(u32, Vec<Attribute>)>>,
+    attr_budget: usize,
+    next_unnamed: u32,
 }
 
 impl Reader {
@@ -224,6 +228,9 @@ impl Reader {
                     self.attr_groups.get(group).cloned().ok_or_else(|| {
                         Error::bitcode(format!("unknown attribute group {group}"))
                     })?;
+                self.attr_budget = self.attr_budget.checked_sub(attrs.len()).ok_or_else(|| {
+                    Error::bitcode("attribute lists exceed the input size budget")
+                })?;
                 list.push((index, attrs));
             }
             self.attr_lists.push(list);
@@ -373,6 +380,8 @@ impl Reader {
             record.operands.first().copied().unwrap_or(0),
             record.operands.get(1).copied().unwrap_or(0),
         )?;
+        let unnamed = name.is_empty();
+        let name = if unnamed { self.unnamed_name() } else { name };
         let ty = self.type_at(record.operands.get(2).copied().unwrap_or(0))?;
         let flags = record.operands.get(3).copied().unwrap_or(0);
         if flags >> 2 != 0 {
@@ -410,6 +419,9 @@ impl Reader {
                 section,
             },
         );
+        if unnamed {
+            self.module.mark_unnamed_global(id);
+        }
         self.values.push(ValueRef::Global(id));
         if init != 0 {
             self.pending_globals.push((id, (init - 1) as u32));
@@ -422,6 +434,8 @@ impl Reader {
             record.operands.first().copied().unwrap_or(0),
             record.operands.get(1).copied().unwrap_or(0),
         )?;
+        let unnamed = name.is_empty();
+        let name = if unnamed { self.unnamed_name() } else { name };
         let ty = self.type_at(record.operands.get(2).copied().unwrap_or(0))?;
         let is_declaration = record.operands.get(4).copied().unwrap_or(0) != 0;
         let linkage = decode_linkage(record.operands.get(5).copied().unwrap_or(0));
@@ -445,9 +459,15 @@ impl Reader {
                 function.add_param(None, param, Vec::new());
             }
         }
-        let attr_list = self
-            .attribute_list(record.operands.get(6).copied().unwrap_or(0))?
-            .to_vec();
+        let (attr_count, attr_list) = {
+            let attr_list = self.attribute_list(record.operands.get(6).copied().unwrap_or(0))?;
+            let attr_count = attr_list.iter().map(|(_, attrs)| attrs.len()).sum();
+            (attr_count, attr_list.to_vec())
+        };
+        self.attr_budget = self
+            .attr_budget
+            .checked_sub(attr_count)
+            .ok_or_else(|| Error::bitcode("function attributes exceed the input size budget"))?;
         for (index, attrs) in attr_list {
             match index {
                 0 => function.ret_attrs.extend(attrs),
@@ -464,6 +484,9 @@ impl Reader {
         }
         let id = self.module.function_or_insert(symbol);
         self.module.define_function(id, function);
+        if unnamed {
+            self.module.mark_unnamed_function(id);
+        }
         self.values.push(ValueRef::Function(id));
         if !is_declaration {
             self.defined_functions.push(id);
@@ -569,8 +592,14 @@ impl Reader {
                     Type::Vector { elem, .. } => *elem,
                     _ => return Err(Error::bitcode("data constant without an aggregate type")),
                 };
+                let is_float = matches!(self.module.types.get(elem_ty), Type::Float(_));
                 for operand in &record.operands {
-                    let constant = Constant::new(elem_ty, ConstKind::Int(*operand as u128));
+                    let kind = if is_float {
+                        ConstKind::Float(*operand)
+                    } else {
+                        ConstKind::Int(*operand as u128)
+                    };
+                    let constant = Constant::new(elem_ty, kind);
                     elements.push(self.module.add_constant(constant));
                 }
                 ConstKind::Aggregate(elements)
@@ -598,12 +627,25 @@ impl Reader {
                     .add_constant(Constant::new(ptr, ConstKind::Global(id))))
             }
             Some(ValueRef::Function(id)) => {
-                let ty = self.module.functions[id].ty;
+                let ty = self.ptr_type()?;
                 Ok(self
                     .module
                     .add_constant(Constant::new(ty, ConstKind::Function(id))))
             }
             None => Err(Error::bitcode(format!("unknown constant value {value}"))),
+        }
+    }
+
+    fn unnamed_name(&mut self) -> String {
+        loop {
+            let candidate = self.next_unnamed.to_string();
+            self.next_unnamed += 1;
+            let symbol = self.module.intern(&candidate);
+            if self.module.global_named(symbol).is_none()
+                && self.module.function_named(symbol).is_none()
+            {
+                return candidate;
+            }
         }
     }
 
@@ -787,7 +829,7 @@ impl Reader {
                     Operand::global(ty, id)
                 }
                 ValueRef::Function(id) => {
-                    let ty = self.module.functions[id].ty;
+                    let ty = self.ptr_type()?;
                     Operand::function(ty, id)
                 }
                 ValueRef::Constant(id) => {
@@ -882,6 +924,7 @@ impl Reader {
                     kind: InstKind::Unreachable,
                 },
             );
+            function.define_local(local, ty, inst);
             state
                 .deferred_phis
                 .push((inst, record.clone(), inst_id, ty));

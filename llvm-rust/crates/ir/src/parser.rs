@@ -30,6 +30,7 @@ pub fn parse_module(source: &str) -> core::result::Result<Module, ParseError> {
     let mut parser = Parser::new(source, tokens);
     parser.parse_top_level()?;
     parser.module.resolve_forward_references();
+    parser.module.resolve_forward_operands();
     Ok(parser.module)
 }
 
@@ -357,6 +358,9 @@ fn round_shift(value: u64, shift: u32) -> u64 {
     if shift == 0 {
         return value;
     }
+    if shift >= 64 {
+        return 0;
+    }
     let truncated = value >> shift;
     let mask = (1u64 << shift) - 1;
     let remainder = value & mask;
@@ -382,100 +386,90 @@ fn f64_to_f32_bits(bits: u64) -> u32 {
     (f64::from_bits(bits) as f32).to_bits()
 }
 
-fn f32_to_bfloat_bits(bits: u32) -> u16 {
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xff) as u32;
-    let mant = bits & 0x007f_ffff;
-    if exp == 0xff {
-        if mant == 0 {
-            return sign | 0x7f80;
-        }
-        let payload = ((mant >> 16) as u16) & 0x007f;
-        return sign | 0x7f80 | payload.max(1);
-    }
-    if exp == 0 {
-        if mant == 0 {
-            return sign;
-        }
-        let rounded = round_shift(mant as u64, 16) as u32;
-        return if rounded >= 0x80 {
-            sign | 0x0080
-        } else {
-            sign | rounded as u16
-        };
-    }
-    let mut mantissa = round_shift(mant as u64, 16) as u32;
-    let mut exponent = exp;
-    if mantissa == 0x80 {
-        mantissa = 0;
-        exponent += 1;
-        if exponent >= 0xff {
-            return sign | 0x7f80;
-        }
-    }
-    sign | ((exponent as u16) << 7) | mantissa as u16
-}
-
 fn f64_to_bfloat_bits(bits: u64) -> u16 {
+    let sign = ((bits >> 48) & 0x8000) as u16;
     let exp = ((bits >> 52) & 0x7ff) as u32;
     let frac = bits & 0x000f_ffff_ffff_ffff;
-    if exp == 0x7ff && frac != 0 {
-        let sign = ((bits >> 48) & 0x8000) as u16;
+    if exp == 0x7ff {
+        if frac == 0 {
+            return sign | 0x7f80;
+        }
         let payload = ((frac >> 45) as u16) & 0x007f;
         return sign | 0x7f80 | payload.max(1);
-    }
-    f32_to_bfloat_bits(f64_to_f32_bits(bits))
-}
-
-fn f32_to_half_bits(bits: u32) -> u16 {
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xff) as i32;
-    let mant = bits & 0x007f_ffff;
-    if exp == 0xff {
-        if mant == 0 {
-            return sign | 0x7c00;
-        }
-        let payload = ((mant >> 13) as u16) & 0x03ff;
-        return sign | 0x7c00 | payload.max(1);
     }
     if exp == 0 {
         return sign;
     }
-    let unbiased = exp - 127;
-    if unbiased > 15 {
-        return sign | 0x7c00;
+    let unbiased = exp as i32 - 1023;
+    if unbiased > 127 {
+        return sign | 0x7f80;
     }
-    if unbiased >= -14 {
-        let mut mantissa = round_shift(mant as u64, 13) as u32;
-        let mut exponent = unbiased + 15;
-        if mantissa == 0x400 {
-            mantissa = 0;
+    let significand = 0x0010_0000_0000_0000u64 | frac;
+    if unbiased >= -126 {
+        let mut rounded = round_shift(significand, 45) as u32;
+        let mut exponent = unbiased + 127;
+        if rounded >= 0x100 {
+            rounded = 0;
             exponent += 1;
         }
-        if exponent >= 0x1f {
-            return sign | 0x7c00;
+        if exponent >= 0xff {
+            return sign | 0x7f80;
         }
-        return sign | ((exponent as u16) << 10) | mantissa as u16;
+        return sign | ((exponent as u16) << 7) | (rounded as u16 & 0x007f);
     }
-    let shift = (-unbiased - 1) as u32;
-    let significand = 0x0080_0000u64 | mant as u64;
+    if unbiased < -134 {
+        return sign;
+    }
+    let shift = (-unbiased - 81) as u32;
     let rounded = round_shift(significand, shift);
-    if rounded >= 0x400 {
-        sign | 0x0400
+    if rounded >= 0x80 {
+        sign | 0x0080
     } else {
         sign | rounded as u16
     }
 }
 
 fn f64_to_half_bits(bits: u64) -> u16 {
+    let sign = ((bits >> 48) & 0x8000) as u16;
     let exp = ((bits >> 52) & 0x7ff) as u32;
     let frac = bits & 0x000f_ffff_ffff_ffff;
-    if exp == 0x7ff && frac != 0 {
-        let sign = ((bits >> 48) & 0x8000) as u16;
+    if exp == 0x7ff {
+        if frac == 0 {
+            return sign | 0x7c00;
+        }
         let payload = ((frac >> 42) as u16) & 0x03ff;
         return sign | 0x7c00 | payload.max(1);
     }
-    f32_to_half_bits(f64_to_f32_bits(bits))
+    if exp == 0 {
+        return sign;
+    }
+    let unbiased = exp as i32 - 1023;
+    if unbiased > 15 {
+        return sign | 0x7c00;
+    }
+    let significand = 0x0010_0000_0000_0000u64 | frac;
+    if unbiased >= -14 {
+        let mut rounded = round_shift(significand, 42) as u32;
+        let mut exponent = unbiased + 15;
+        if rounded >= 0x800 {
+            rounded = 0;
+            exponent += 1;
+        }
+        if exponent >= 0x1f {
+            return sign | 0x7c00;
+        }
+        return sign | ((exponent as u16) << 10) | (rounded as u16 & 0x03ff);
+    }
+    if unbiased < -25 {
+        return sign;
+    }
+    let shift = (28 - unbiased) as u32;
+    let rounded = round_shift(significand, shift);
+    if rounded >= 0x400 {
+        sign | 0x0400
+    } else {
+        sign | rounded as u16
+    }
 }
 
 fn is_type_attribute(name: &str) -> bool {
@@ -492,6 +486,15 @@ fn normalize_group_attribute(attr: Attribute) -> Attribute {
         .and_then(|value| value.strip_suffix(')'))
     {
         return Attribute(format!("alignstack={value}"));
+    }
+    if let Some(value) = text.strip_prefix("align ") {
+        return Attribute(format!("align={value}"));
+    }
+    if let Some(value) = text
+        .strip_prefix("align(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return Attribute(format!("align={value}"));
     }
     Attribute(text)
 }
@@ -617,6 +620,7 @@ struct Parser<'a> {
     module: Module,
     local_names: HashMap<Symbol, LocalId>,
     next_value: u32,
+    next_unnamed: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -628,6 +632,7 @@ impl<'a> Parser<'a> {
             module: Module::new(),
             local_names: HashMap::new(),
             next_value: 0,
+            next_unnamed: 0,
         }
     }
 
@@ -751,7 +756,7 @@ impl<'a> Parser<'a> {
 
     fn parse_global(&mut self) -> Result<()> {
         let (name, _) = self.expect_global()?;
-        let symbol = self.module.intern(&name);
+        let symbol = self.symbol_for_name(&name);
         self.expect_punct('=')?;
         let mut linkage = Linkage::External;
         let mut visibility = Visibility::Default;
@@ -883,6 +888,9 @@ impl<'a> Parser<'a> {
         };
         let id = self.module.global_or_insert(symbol);
         self.module.define_global(id, global);
+        if name.is_empty() {
+            self.module.mark_unnamed_global(id);
+        }
         Ok(())
     }
 
@@ -936,7 +944,7 @@ impl<'a> Parser<'a> {
         }
         let ret_ty = self.parse_type()?;
         let (name, _) = self.expect_global()?;
-        let symbol = self.module.intern(&name);
+        let symbol = self.symbol_for_name(&name);
         let mut function = Function::new(symbol, 0);
         function.linkage = linkage;
         function.visibility = visibility;
@@ -998,14 +1006,16 @@ impl<'a> Parser<'a> {
             function.attrs.remove(index);
             function.unnamed_addr = true;
         }
-        if let Some(index) = function
-            .attrs
-            .iter()
-            .position(|attr| attr.0.starts_with("align "))
-        {
-            let attr = function.attrs.remove(index);
-            function.align = attr.0["align ".len()..].trim().parse().ok();
-        }
+        let mut align = None;
+        function.attrs.retain(|attr| {
+            if let Some(value) = attr.0.strip_prefix("align ") {
+                align = value.trim().parse().ok();
+                false
+            } else {
+                true
+            }
+        });
+        function.align = align;
         if is_declaration {
             if self.at_eol() {
                 self.advance();
@@ -1026,6 +1036,9 @@ impl<'a> Parser<'a> {
             return Err(self.error(format!("redefinition of function @{name}")));
         }
         self.module.define_function(id, function);
+        if name.is_empty() {
+            self.module.mark_unnamed_function(id);
+        }
         Ok(())
     }
 
@@ -1124,11 +1137,16 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let key = quote_bytes(&key);
                 if self.eat_punct('=') {
-                    let value = self.expect_string()?;
-                    Ok(Attribute(format!(
-                        "{key}={}",
-                        quote_bytes(value.as_bytes())
-                    )))
+                    let value = match self.peek_kind().clone() {
+                        TokenKind::Str(bytes) => {
+                            self.advance();
+                            bytes
+                        }
+                        other => {
+                            return Err(self.error(format!("expected a string, found {other:?}")));
+                        }
+                    };
+                    Ok(Attribute(format!("{key}={}", quote_bytes(&value))))
                 } else {
                     Ok(Attribute(key))
                 }
@@ -2248,6 +2266,22 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn symbol_for_name(&mut self, name: &str) -> Symbol {
+        if !name.is_empty() {
+            return self.module.intern(name);
+        }
+        loop {
+            let candidate = self.next_unnamed.to_string();
+            self.next_unnamed += 1;
+            let symbol = self.module.intern(&candidate);
+            if self.module.global_named(symbol).is_none()
+                && self.module.function_named(symbol).is_none()
+            {
+                return symbol;
+            }
+        }
+    }
+
     fn expect_global(&mut self) -> Result<(String, Span)> {
         match self.peek_kind().clone() {
             TokenKind::Global(name) => {
@@ -2372,6 +2406,86 @@ attributes #0 = { memory(none) alignstack=16 }
         let printed = print_module(&module);
         assert!(printed.contains("@g = global ptr @later"));
         assert!(printed.contains("@later = global i32 7"));
+    }
+
+    #[test]
+    fn resolves_forward_function_operand() {
+        let source = r#"
+define ptr @ret_fn() {
+entry:
+  ret ptr @f
+}
+
+define void @f() {
+entry:
+  ret void
+}
+"#;
+        let module = parse_module(source).expect("parse");
+        assert!(verify_module(&module).is_ok());
+        let printed = print_module(&module);
+        assert!(printed.contains("ret ptr @f"), "{printed}");
+    }
+
+    #[test]
+    fn preserves_group_align_and_raw_attribute_bytes() {
+        let source = r#"
+attributes #0 = { align=16 "key"="\FF" }
+
+declare void @f() #0
+"#;
+        let module = parse_module(source).expect("parse");
+        let printed = print_module(&module);
+        assert!(printed.contains("align=16"), "{printed}");
+        assert!(printed.contains(r#""key"="\FF""#), "{printed}");
+    }
+
+    #[test]
+    fn rounds_half_and_bfloat_literals() {
+        let source = r#"
+@tiny_h = global half 1.0e-20
+@below_h = global half 1.0014648437499998
+@mid_h = global half 1.00146484375
+@above_h = global half 1.0014648437500002
+@tiny_b = global bfloat 1.0e-50
+@below_b = global bfloat 1.0039062499999998
+@mid_b = global bfloat 1.00390625
+@above_b = global bfloat 1.0039062500000002
+"#;
+        let module = parse_module(source).expect("parse");
+        let printed = print_module(&module);
+        assert!(
+            printed.contains("@tiny_h = global half 0xH0000"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("@below_h = global half 0xH3C01"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("@mid_h = global half 0xH3C02"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("@above_h = global half 0xH3C02"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("@tiny_b = global bfloat 0xR0000"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("@below_b = global bfloat 0xR3F80"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("@mid_b = global bfloat 0xR3F80"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("@above_b = global bfloat 0xR3F81"),
+            "{printed}"
+        );
     }
 
     #[test]

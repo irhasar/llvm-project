@@ -146,18 +146,14 @@ impl<'a> Writer<'a> {
             type_ids.insert(id, index as u32);
         }
         let mut globals = HashMap::new();
-        for (id, global) in module.globals.iter() {
-            if module.types.is_valid(global.ty) {
-                let index = globals.len() as u32;
-                globals.insert(id, index);
-            }
+        for id in module.ordered_globals() {
+            let index = globals.len() as u32;
+            globals.insert(id, index);
         }
         let mut functions = HashMap::new();
-        for (id, function) in module.functions.iter() {
-            if module.types.is_valid(function.ty) {
-                let index = functions.len() as u32;
-                functions.insert(id, globals.len() as u32 + index);
-            }
+        for id in module.ordered_functions() {
+            let index = functions.len() as u32;
+            functions.insert(id, globals.len() as u32 + index);
         }
         let mut constants = Vec::new();
         for (id, constant) in module.constants.iter() {
@@ -203,20 +199,21 @@ impl<'a> Writer<'a> {
             paramattr_lists: Vec::new(),
             local_values: HashMap::new(),
         };
-        for (_, global) in module.globals.iter() {
-            if module.types.is_valid(global.ty) {
+        for id in module.ordered_globals() {
+            let global = &module.globals[id];
+            if !module.is_unnamed_global(id) {
                 writer.add_string(module.name(global.name));
             }
         }
-        for (_, function) in module.functions.iter() {
-            if module.types.is_valid(function.ty) {
+        for id in module.ordered_functions() {
+            let function = &module.functions[id];
+            if !module.is_unnamed_function(id) {
                 writer.add_string(module.name(function.name));
             }
         }
-        for (_, global) in module.globals.iter() {
-            if module.types.is_valid(global.ty)
-                && let Some(section) = &global.section
-            {
+        for id in module.ordered_globals() {
+            let global = &module.globals[id];
+            if let Some(section) = &global.section {
                 writer.section_id(section);
             }
         }
@@ -408,21 +405,17 @@ impl<'a> Writer<'a> {
                 }
             }
             let mut function_attrs = expand_attributes(self.module, &function.attrs)?;
-            if let Some(index) = function_attrs
-                .iter()
-                .position(|attr| attr.0.starts_with("align ") || attr.0.starts_with("align("))
-            {
-                let attr = function_attrs.remove(index);
-                let value = attr
-                    .0
-                    .trim_start_matches("align")
-                    .trim()
-                    .trim_start_matches('(')
-                    .trim_end_matches(')')
-                    .trim();
-                if let Ok(value) = value.parse::<u64>() {
-                    self.function_aligns.insert(*function_id, value);
+            let mut function_align = None;
+            function_attrs.retain(|attr| {
+                if let Some(value) = parse_align_attribute(&attr.0) {
+                    function_align = Some(value);
+                    false
+                } else {
+                    true
                 }
+            });
+            if let Some(value) = function_align {
+                self.function_aligns.insert(*function_id, value);
             }
             if !function_attrs.is_empty() {
                 entries.push((function_attr_index(), function_attrs));
@@ -545,16 +538,17 @@ impl<'a> Writer<'a> {
     fn write_globals(&mut self) -> Result<()> {
         let globals: Vec<(GlobalId, llvm_rust_ir::Global)> = self
             .module
-            .globals
-            .iter()
-            .map(|(id, global)| (id, global.clone()))
+            .ordered_globals()
+            .into_iter()
+            .map(|id| (id, self.module.globals[id].clone()))
             .collect();
-        for (_, global) in globals {
-            if !self.module.types.is_valid(global.ty) {
-                continue;
-            }
+        for (global_id, global) in globals {
             let name = self.module.name(global.name);
-            let name_offset = self.add_string(name) as u64;
+            let (name_offset, name_len) = if self.module.is_unnamed_global(global_id) {
+                (0, 0)
+            } else {
+                (self.add_string(name) as u64, name.len() as u64)
+            };
             let type_id = self.type_index(global.ty)? as u64;
             let flags = 2 | global.is_const as u64;
             let init = match global.init {
@@ -563,7 +557,7 @@ impl<'a> Writer<'a> {
             };
             let operands = vec![
                 name_offset,
-                name.len() as u64,
+                name_len,
                 type_id,
                 flags,
                 init,
@@ -595,16 +589,17 @@ impl<'a> Writer<'a> {
     fn write_functions(&mut self) -> Result<()> {
         let functions: Vec<(FuncId, Function)> = self
             .module
-            .functions
-            .iter()
-            .map(|(id, function)| (id, function.clone()))
+            .ordered_functions()
+            .into_iter()
+            .map(|id| (id, self.module.functions[id].clone()))
             .collect();
         for (function_id, function) in functions {
-            if !self.module.types.is_valid(function.ty) {
-                continue;
-            }
             let name = self.module.name(function.name);
-            let name_offset = self.add_string(name) as u64;
+            let (name_offset, name_len) = if self.module.is_unnamed_function(function_id) {
+                (0, 0)
+            } else {
+                (self.add_string(name) as u64, name.len() as u64)
+            };
             let type_id = self.type_index(function.ty)? as u64;
             let attr_list = self
                 .function_attr_lists
@@ -613,7 +608,7 @@ impl<'a> Writer<'a> {
                 .unwrap_or(0) as u64;
             let operands = vec![
                 name_offset,
-                name.len() as u64,
+                name_len,
                 type_id,
                 0,
                 function.is_declaration as u64,
@@ -733,12 +728,12 @@ impl<'a> Writer<'a> {
     fn write_bodies(&mut self) -> Result<()> {
         let functions: Vec<(FuncId, Function)> = self
             .module
-            .functions
-            .iter()
-            .map(|(id, function)| (id, function.clone()))
+            .ordered_functions()
+            .into_iter()
+            .map(|id| (id, self.module.functions[id].clone()))
             .collect();
         for (function_id, function) in functions {
-            if function.is_declaration || !self.module.types.is_valid(function.ty) {
+            if function.is_declaration {
                 continue;
             }
             self.write_body(function_id, &function)?;
@@ -1342,6 +1337,15 @@ fn fcmp_code(pred: FcmpPred) -> u32 {
         FcmpPred::Une => 14,
         FcmpPred::True => 15,
     }
+}
+
+fn parse_align_attribute(text: &str) -> Option<u64> {
+    let value = text
+        .strip_prefix("align ")
+        .or_else(|| text.strip_prefix("align("))?
+        .trim_end_matches(')')
+        .trim();
+    value.parse().ok()
 }
 
 fn binary_flags(op: BinOp, flags: IntFlags, fastmath: FastMath) -> u64 {

@@ -1,13 +1,15 @@
 //! The IR module: types, globals, functions, and constants.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use llvm_rust_support::{Arena, Idx, Interner, Symbol};
 
 use crate::constant::{ConstId, ConstKind, Constant, ConstantPool};
 use crate::function::{FuncId, Function};
+use crate::inst::InstKind;
 use crate::linkage::{Linkage, Visibility};
 use crate::ty::{FloatKind, INVALID_TYPE, Type, TypeId, TypeTable};
+use crate::value::{Operand, OperandKind};
 
 /// Handle to a global variable.
 pub type GlobalId = Idx<Global>;
@@ -91,6 +93,11 @@ pub struct Module {
     pub attr_groups: Vec<(u32, String)>,
     global_names: HashMap<Symbol, GlobalId>,
     function_names: HashMap<Symbol, FuncId>,
+    global_order: HashMap<GlobalId, u32>,
+    function_order: HashMap<FuncId, u32>,
+    next_order: u32,
+    unnamed_globals: HashSet<GlobalId>,
+    unnamed_functions: HashSet<FuncId>,
 }
 
 impl Module {
@@ -114,6 +121,7 @@ impl Module {
         let name = global.name;
         let id = self.globals.alloc(global);
         self.global_names.insert(name, id);
+        self.record_global_order(id);
         id
     }
 
@@ -148,6 +156,7 @@ impl Module {
     /// Replaces a placeholder global with its definition.
     pub fn define_global(&mut self, id: GlobalId, global: Global) {
         self.globals[id] = global;
+        self.record_global_order(id);
     }
 
     /// Adds a function.
@@ -155,6 +164,7 @@ impl Module {
         let name = function.name;
         let id = self.functions.alloc(function);
         self.function_names.insert(name, id);
+        self.record_function_order(id);
         id
     }
 
@@ -204,9 +214,124 @@ impl Module {
         }
     }
 
+    /// Retargets instruction operands that named a symbol before its kind was
+    /// known, mirroring [`Self::resolve_forward_references`] for constants.
+    pub fn resolve_forward_operands(&mut self) {
+        let mut global_to_function = HashMap::new();
+        let mut invalid_globals = HashMap::new();
+        for (id, global) in self.globals.iter() {
+            if !self.types.is_valid(global.ty) {
+                invalid_globals.insert(id, global.name);
+                if let Some(function) = self.function_named(global.name) {
+                    global_to_function.insert(global.name, function);
+                }
+            }
+        }
+        let mut function_to_global = HashMap::new();
+        let mut invalid_functions = HashMap::new();
+        for (id, function) in self.functions.iter() {
+            if !self.types.is_valid(function.ty) {
+                invalid_functions.insert(id, function.name);
+                if let Some(global) = self.global_named(function.name) {
+                    function_to_global.insert(function.name, global);
+                }
+            }
+        }
+        let pointer = self.types.pointer();
+        let functions: Vec<FuncId> = self.functions.iter().map(|(id, _)| id).collect();
+        for function_id in functions {
+            let insts: Vec<_> = self.functions[function_id]
+                .insts
+                .iter()
+                .map(|(id, _)| id)
+                .collect();
+            for inst_id in insts {
+                let inst = &mut self.functions[function_id].insts[inst_id];
+                for_each_operand_mut(&mut inst.kind, |operand| match operand.kind {
+                    OperandKind::Global(global) => {
+                        if let Some(name) = invalid_globals.get(&global)
+                            && let Some(function) = global_to_function.get(name).copied()
+                        {
+                            operand.kind = OperandKind::Function(function);
+                            operand.ty = pointer;
+                        }
+                    }
+                    OperandKind::Function(function) => {
+                        if let Some(name) = invalid_functions.get(&function)
+                            && let Some(global) = function_to_global.get(name).copied()
+                        {
+                            operand.kind = OperandKind::Global(global);
+                            operand.ty = pointer;
+                        }
+                    }
+                    _ => {}
+                });
+            }
+        }
+    }
+
     /// Replaces a placeholder function with its definition.
     pub fn define_function(&mut self, id: FuncId, function: Function) {
         self.functions[id] = function;
+        self.record_function_order(id);
+    }
+
+    /// Marks a global that used an LLVM unnamed slot instead of a quoted name.
+    pub fn mark_unnamed_global(&mut self, id: GlobalId) {
+        self.unnamed_globals.insert(id);
+    }
+
+    /// Marks a function that used an LLVM unnamed slot instead of a quoted name.
+    pub fn mark_unnamed_function(&mut self, id: FuncId) {
+        self.unnamed_functions.insert(id);
+    }
+
+    /// Returns true when the global was written as an unnamed slot.
+    pub fn is_unnamed_global(&self, id: GlobalId) -> bool {
+        self.unnamed_globals.contains(&id)
+    }
+
+    /// Returns true when the function was written as an unnamed slot.
+    pub fn is_unnamed_function(&self, id: FuncId) -> bool {
+        self.unnamed_functions.contains(&id)
+    }
+
+    fn record_global_order(&mut self, id: GlobalId) {
+        if !self.global_order.contains_key(&id) {
+            self.global_order.insert(id, self.next_order);
+            self.next_order += 1;
+        }
+    }
+
+    fn record_function_order(&mut self, id: FuncId) {
+        if !self.function_order.contains_key(&id) {
+            self.function_order.insert(id, self.next_order);
+            self.next_order += 1;
+        }
+    }
+
+    /// Globals in definition order, skipping unresolved placeholders.
+    pub fn ordered_globals(&self) -> Vec<GlobalId> {
+        let mut ids: Vec<GlobalId> = self
+            .globals
+            .iter()
+            .filter(|(_, global)| self.types.is_valid(global.ty))
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort_by_key(|id| self.global_order.get(id).copied().unwrap_or(u32::MAX));
+        ids
+    }
+
+    /// Functions in definition order, skipping unresolved placeholders.
+    pub fn ordered_functions(&self) -> Vec<FuncId> {
+        let mut ids: Vec<FuncId> = self
+            .functions
+            .iter()
+            .filter(|(_, function)| self.types.is_valid(function.ty))
+            .map(|(id, _)| id)
+            .collect();
+        ids.sort_by_key(|id| self.function_order.get(id).copied().unwrap_or(u32::MAX));
+        ids
     }
 
     /// Adds a constant to the module pool.
@@ -356,5 +481,59 @@ mod tests {
         assert_eq!(half_bits(1.0), 0x3c00);
         assert_eq!(half_bits(-2.0), 0xc000);
         assert_eq!(half_bits(0.0), 0);
+    }
+}
+
+fn for_each_operand_mut(kind: &mut InstKind, mut visit: impl FnMut(&mut Operand)) {
+    match kind {
+        InstKind::Binary { lhs, rhs, .. } | InstKind::ICmp { lhs, rhs, .. } => {
+            visit(lhs);
+            visit(rhs);
+        }
+        InstKind::FCmp { lhs, rhs, .. } => {
+            visit(lhs);
+            visit(rhs);
+        }
+        InstKind::FNeg { value, .. } | InstKind::Cast { value, .. } => visit(value),
+        InstKind::Alloca { count, .. } => {
+            if let Some(count) = count {
+                visit(count);
+            }
+        }
+        InstKind::Load { ptr, .. } => visit(ptr),
+        InstKind::Store { value, ptr, .. } => {
+            visit(value);
+            visit(ptr);
+        }
+        InstKind::Gep { ptr, .. } => visit(ptr),
+        InstKind::Call { callee, args, .. } => {
+            visit(callee);
+            for arg in args {
+                visit(arg);
+            }
+        }
+        InstKind::Phi { incoming } => {
+            for (value, _) in incoming {
+                visit(value);
+            }
+        }
+        InstKind::Select {
+            cond,
+            on_true,
+            on_false,
+            ..
+        } => {
+            visit(cond);
+            visit(on_true);
+            visit(on_false);
+        }
+        InstKind::Ret { value } => {
+            if let Some(value) = value {
+                visit(value);
+            }
+        }
+        InstKind::CondBr { cond, .. } => visit(cond),
+        InstKind::Switch { value, .. } => visit(value),
+        InstKind::Br { .. } | InstKind::Unreachable => {}
     }
 }

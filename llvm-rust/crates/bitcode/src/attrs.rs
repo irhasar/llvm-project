@@ -105,6 +105,9 @@ fn split_attributes(text: &str) -> Result<Vec<String>> {
         if parts[index] == "align" && index + 1 < parts.len() {
             joined.push(format!("align {}", parts[index + 1]));
             index += 2;
+        } else if let Some(value) = parts[index].strip_prefix("align=") {
+            joined.push(format!("align {value}"));
+            index += 1;
         } else {
             joined.push(parts[index].clone());
             index += 1;
@@ -335,7 +338,7 @@ pub(crate) fn decode_attribute_group(
                     .operands
                     .get(cursor + 1)
                     .ok_or_else(|| Error::bitcode("truncated enum attribute"))?;
-                attrs.push(Attribute(decode_enum_attribute(code)?.to_string()));
+                attrs.push(Attribute(decode_enum_attribute(code, index)?.to_string()));
                 cursor += 2;
             }
             1 => {
@@ -409,7 +412,22 @@ fn read_c_string(operands: &[u64], cursor: &mut usize) -> Result<Vec<u8>> {
     Err(Error::bitcode("unterminated attribute string"))
 }
 
-fn decode_enum_attribute(code: u64) -> Result<&'static str> {
+fn decode_enum_attribute(code: u64, index: u32) -> Result<&'static str> {
+    if index != FUNCTION_INDEX {
+        match code {
+            20 => return Ok("readnone"),
+            21 => return Ok("readonly"),
+            52 => return Ok("writeonly"),
+            _ => {}
+        }
+    } else {
+        match code {
+            20 => return Ok("memory(none)"),
+            21 => return Ok("memory(read)"),
+            52 => return Ok("memory(write)"),
+            _ => {}
+        }
+    }
     ENUM_ATTRIBUTES
         .iter()
         .find_map(|(name, value)| (*value == code).then_some(*name))

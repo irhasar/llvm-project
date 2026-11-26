@@ -54,9 +54,11 @@ def main():
         rust_as = [*prefix, os.path.join(args.rust_bin, "llvm-as-rust"), source, "-o", rust_bc]
         measure("llvm-as (C++)", cpp_as, args.runs)
         measure("llvm-as-rust", rust_as, args.runs)
-        cpp_dis = [*prefix, os.path.join(args.llvm_bin, "llvm-dis"), rust_bc, "-o", os.devnull]
+        # Both disassemblers consume the same C++-produced bitcode so the
+        # comparison isolates decoder work from writer record layout.
+        cpp_dis = [*prefix, os.path.join(args.llvm_bin, "llvm-dis"), cpp_bc, "-o", os.devnull]
         rust_dis = [*prefix, os.path.join(args.rust_bin, "llvm-dis-rust"), cpp_bc, "-o", os.devnull]
-        measure("llvm-dis (C++) on Rust bitcode", cpp_dis, args.runs)
+        measure("llvm-dis (C++) on C++ bitcode", cpp_dis, args.runs)
         measure("llvm-dis-rust on C++ bitcode", rust_dis, args.runs)
         print(f"input: {os.path.getsize(source)} bytes, {args.functions} functions")
 

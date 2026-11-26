@@ -6,7 +6,7 @@ use crate::constant::{ConstId, ConstKind, Constant};
 use crate::function::{BlockId, FuncId, Function};
 use crate::inst::{Attribute, FastMath, InstKind, Instruction, IntFlags};
 use crate::linkage::{Linkage, Visibility};
-use crate::module::{Global, Module};
+use crate::module::{Global, GlobalId, Module};
 use crate::names::{quote_bytes, quote_name};
 use crate::ty::{FloatKind, Type, TypeId};
 use crate::value::{Operand, OperandKind};
@@ -51,21 +51,16 @@ pub fn print_module(module: &Module) -> String {
         out.push('\n');
     }
 
-    for (_, global) in module.globals.iter() {
-        if !module.types.is_valid(global.ty) {
-            continue;
-        }
-        print_global(module, global, &mut out);
+    for id in module.ordered_globals() {
+        print_global(module, id, &module.globals[id], &mut out);
     }
     if !module.globals.is_empty() {
         out.push('\n');
     }
 
     let mut first_function = true;
-    for (id, function) in module.functions.iter() {
-        if !module.types.is_valid(function.ty) {
-            continue;
-        }
+    for id in module.ordered_functions() {
+        let function = &module.functions[id];
         if !first_function {
             out.push('\n');
         }
@@ -95,8 +90,34 @@ fn struct_body(module: &Module, fields: &[TypeId], packed: bool) -> String {
     out
 }
 
-fn print_global(module: &Module, global: &Global, out: &mut String) {
-    let _ = write!(out, "@{} = ", quote_name(module.name(global.name)));
+fn quote_declared_name(name: &str) -> String {
+    if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()) {
+        format!("\"{name}\"")
+    } else {
+        quote_name(name)
+    }
+}
+
+fn global_name(module: &Module, id: GlobalId) -> String {
+    let name = module.name(module.globals[id].name);
+    if module.is_unnamed_global(id) {
+        name.to_string()
+    } else {
+        quote_declared_name(name)
+    }
+}
+
+fn function_name(module: &Module, id: FuncId) -> String {
+    let name = module.name(module.functions[id].name);
+    if module.is_unnamed_function(id) {
+        name.to_string()
+    } else {
+        quote_declared_name(name)
+    }
+}
+
+fn print_global(module: &Module, id: GlobalId, global: &Global, out: &mut String) {
+    let _ = write!(out, "@{} = ", global_name(module, id));
     if global.linkage != Linkage::External {
         let _ = write!(out, "{} ", global.linkage.as_str());
     }
@@ -161,7 +182,7 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
         out,
         "{} @{}(",
         module.display_type(ret),
-        quote_name(module.name(function.name))
+        function_name(module, id)
     );
     for (index, param) in function.params.iter().enumerate() {
         if index > 0 {
@@ -512,14 +533,10 @@ fn write_instruction(
 fn write_callee(module: &Module, function: &Function, operand: Operand, out: &mut String) {
     match operand.kind {
         OperandKind::Function(id) => {
-            let _ = write!(
-                out,
-                "@{}",
-                quote_name(module.name(module.functions[id].name))
-            );
+            let _ = write!(out, "@{}", function_name(module, id));
         }
         OperandKind::Global(id) => {
-            let _ = write!(out, "@{}", quote_name(module.name(module.globals[id].name)));
+            let _ = write!(out, "@{}", global_name(module, id));
         }
         OperandKind::Local(id) => {
             let name = function
@@ -548,14 +565,10 @@ fn write_value(module: &Module, function: &Function, operand: Operand, out: &mut
         }
         OperandKind::Const(id) => write_constant(module, id, out),
         OperandKind::Global(id) => {
-            let _ = write!(out, "@{}", quote_name(module.name(module.globals[id].name)));
+            let _ = write!(out, "@{}", global_name(module, id));
         }
         OperandKind::Function(id) => {
-            let _ = write!(
-                out,
-                "@{}",
-                quote_name(module.name(module.functions[id].name))
-            );
+            let _ = write!(out, "@{}", function_name(module, id));
         }
     }
 }
@@ -596,18 +609,10 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
             out.push_str(&quote_bytes(text.as_bytes()));
         }
         ConstKind::Global(id) => {
-            let _ = write!(
-                out,
-                "@{}",
-                quote_name(module.name(module.globals[*id].name))
-            );
+            let _ = write!(out, "@{}", global_name(module, *id));
         }
         ConstKind::Function(id) => {
-            let _ = write!(
-                out,
-                "@{}",
-                quote_name(module.name(module.functions[*id].name))
-            );
+            let _ = write!(out, "@{}", function_name(module, *id));
         }
         ConstKind::Aggregate(elems) => {
             let (open, close) = match module.types.get(constant.ty) {
