@@ -1,0 +1,11 @@
+[package]
+name = "llvm-rust-ir"
+description = "Arena-based LLVM IR module, textual parser, printer, and verifier"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+llvm-rust-support.workspace = true

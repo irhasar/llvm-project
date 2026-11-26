@@ -1,0 +1,34 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/support",
+    "crates/ir",
+    "crates/bitcode",
+    "crates/tools",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+license = "Apache-2.0 WITH LLVM-exception"
+repository = "https://github.com/llvm/llvm-project"
+
+[workspace.dependencies]
+llvm-rust-support = { path = "crates/support" }
+llvm-rust-ir = { path = "crates/ir" }
+llvm-rust-bitcode = { path = "crates/bitcode" }
+
+# Track B daily profile: thin LTO with 16 codegen units keeps the edit/build
+# loop short. The release-candidate profile in RUST_LLVM_TRACK_B.md is
+# intentionally not the default here.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 0
+debug = 1

@@ -1,5 +1,10 @@
 # Incremental migration of LLVM components to Rust
 
+> **Track B branch.** Track A remains the production path on
+> `rust-migration-phase5`. This branch starts the separate Rust-native LLVM
+> core described in `RUST_LLVM_TRACK_B.md`; the Track A sections below are
+> reference material, not instructions for this branch.
+
 This document describes an experiment in porting LLVM components to Rust one at
 a time, without a flag day and without making the Rust toolchain a hard
 dependency of the build. The Phase 1 `lib/Support` slices are implemented and
