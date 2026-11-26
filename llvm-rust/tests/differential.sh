@@ -4,6 +4,15 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 LLVM_BIN=${LLVM_BIN:-/usr/lib/llvm-19/bin}
+V2_BIN=${LLVM_V2_BIN:-}
+if [ -z "$V2_BIN" ]; then
+    for candidate in /usr/lib/llvm-24/bin /usr/lib/llvm-23/bin; do
+        if [ -x "$candidate/llvm-as" ]; then
+            V2_BIN=$candidate
+            break
+        fi
+    done
+fi
 CARGO=${CARGO:-cargo}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -91,5 +100,49 @@ for input in tests/corpus/*.ll tests/corpus/*.bc; do
         echo "PASS $name"
     fi
 done
+
+if [ -n "$V2_BIN" ] && [ -x "$V2_BIN/llvm-as" ] && [ -x "$V2_BIN/llvm-dis" ]; then
+    for input in tests/corpus/v2/*.ll; do
+        [ -e "$input" ] || continue
+        name="v2-$(basename "$input")"
+        name=${name%.*}
+        cpp_bc="$TMP/$name-cpp.bc"
+        rust_bc="$TMP/$name-rust.bc"
+        cpp_ll="$TMP/$name-cpp.ll"
+        rust_ll="$TMP/$name-rust.ll"
+        read_ll="$TMP/$name-read.ll"
+        read_bc="$TMP/$name-read.bc"
+        read_canon="$TMP/$name-read-canon.ll"
+
+        "$V2_BIN/llvm-as" "$input" -o "$cpp_bc"
+        "$V2_BIN/llvm-dis" "$cpp_bc" -o "$cpp_ll"
+        ./target/debug/llvm-as-rust "$input" -o "$rust_bc"
+        "$V2_BIN/llvm-dis" "$rust_bc" -o "$rust_ll"
+
+        if ! diff -u <(normalize "$cpp_ll") <(normalize "$rust_ll") >"$TMP/$name-writer.diff"; then
+            echo "FAIL v2 writer: $name"
+            cat "$TMP/$name-writer.diff"
+            status=1
+        fi
+        if ! "$V2_BIN/llvm-bcanalyzer" "$rust_bc" >/dev/null 2>&1; then
+            echo "FAIL v2 bcanalyzer writer: $name"
+            status=1
+        fi
+
+        ./target/debug/llvm-dis-rust "$cpp_bc" -o "$read_ll"
+        ./target/debug/llvm-as-rust "$read_ll" -o "$read_bc"
+        "$V2_BIN/llvm-dis" "$read_bc" -o "$read_canon"
+        if ! diff -u <(normalize "$cpp_ll") <(normalize "$read_canon") >"$TMP/$name-reader.diff"; then
+            echo "FAIL v2 reader: $name"
+            cat "$TMP/$name-reader.diff"
+            status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            echo "PASS $name"
+        fi
+    done
+else
+    echo "SKIP v2 oracle (set LLVM_V2_BIN to an LLVM 23+ bin directory)"
+fi
 
 exit "$status"

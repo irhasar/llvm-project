@@ -94,12 +94,16 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   attribute keyed by the memory kind. Numbered groups apply after inline
   attributes, so a scoped group can override an inline flag. Modern memory
   uses LLVM 19's three-location encoding. An explicit errno clause is
-  accepted only when it matches the final other-memory effect; target
-  spellings are rejected. The reader folds errno into other memory and
-  validates version-2 target fields against inaccessible memory on AArch64
-  (other memory elsewhere), matching LLVM's downgrade path.
-  Parameter and return `readnone`/`readonly`/`writeonly` remain distinct
-  flags.
+  accepted only when it matches the final other-memory effect. On AArch64,
+  function and call-site resolution tracks implied target effects: explicit
+  target clauses require both target fields to match inaccessible memory,
+  and a default access kind whose nonzero target effects differ from
+  inaccessible memory is rejected because legacy encoding cannot preserve
+  it. Target clauses on non-AArch64 targets are rejected. The reader folds
+  errno into other memory and validates version-2 target fields against
+  inaccessible memory on AArch64 (other memory elsewhere), matching LLVM's
+  downgrade path. Parameter and return `readnone`/`readonly`/`writeonly`
+  remain distinct flags.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
 
 Half and bfloat conversion handles subnormals, infinities, quiet NaNs, and
@@ -138,6 +142,9 @@ builds LLVM):
 ```sh
 ./tests/differential.sh
 # or: LLVM_BIN=/path/to/llvm/bin ./tests/differential.sh
+
+# Version-2 AArch64 memory comparison (LLVM 23 or newer)
+LLVM_V2_BIN=/usr/lib/llvm-23/bin ./tests/differential.sh
 ```
 
 Reproducible benchmark (5 runs, `taskset -c 0`, median and min/max):
@@ -152,11 +159,13 @@ python3 tests/bench.py --runs 5
 
 Differential harness: all 30 modules in `tests/corpus/` match the C++ LLVM
 19.1.7 oracle in both directions after normalizing `source_filename` and
-`ModuleID`. The corpus covers TLS models, sections, opaque types, `i128`
-constants, hexadecimal floats and subnormal/signaling-NaN cases, float and
-double `CST_DATA` arrays, function and multiple-group alignment, type
-attributes with quoted names, raw non-UTF-8 attribute strings, parameter
-memory attributes, argument-indexed call-site attributes,
+`ModuleID`. A separate `tests/corpus/v2/aarch64_memory.ll` fixture is checked
+against an LLVM 23+ oracle when `LLVM_V2_BIN` is set, covering version-2
+target memory and the AArch64 downgrade path. The corpus covers TLS models,
+sections, opaque types, `i128` constants, hexadecimal floats and
+subnormal/signaling-NaN cases, float and double `CST_DATA` arrays, function
+and multiple-group alignment, type attributes with quoted names, raw
+non-UTF-8 attribute strings, parameter memory attributes, argument-indexed call-site attributes,
 `local_unnamed_addr`, forward references in constants and instructions,
 UTF-8 section names, unnamed globals/functions, explicit quoted numeric
 global/function names, unnamed/global slot ordering, unnamed/name collisions,
@@ -164,10 +173,10 @@ forward numbered references that must not consume definition slots, direct
 calls without pointer type records, repeated function memory effects,
 modern/legacy memory equivalence, inline legacy flags overridden by numbered
 scoped-memory groups, modern `memory(argmem: ...)`/
-`memory(inaccessiblemem: ...)` forms, duplicate attribute groups in a
-checked-in bitcode fixture that is read and reassembled with both Rust tools,
-unnamed value/block numbering, exact shift/divide flags, and `phi` self
-references.
+`memory(inaccessiblemem: ...)` forms, AArch64 target-memory validation and
+version-2 decoding, duplicate attribute groups in a checked-in bitcode
+fixture that is read and reassembled with both Rust tools, unnamed
+value/block numbering, exact shift/divide flags, and `phi` self references.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -184,10 +193,10 @@ five runs:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 37.2 ms | 36.2-37.4 ms | 55.7 MiB |
-| `llvm-as-rust` | 23.8 ms | 23.4-24.5 ms | 14.7 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 30.8 ms | 30.7-31.8 ms | 54.5 MiB |
-| `llvm-dis-rust` on C++ bitcode | 19.4 ms | 18.8-20.4 ms | 14.7 MiB |
+| `llvm-as` (C++) | 37.5 ms | 36.4-38.5 ms | 55.4 MiB |
+| `llvm-as-rust` | 23.8 ms | 23.5-24.7 ms | 14.6 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 30.8 ms | 30.0-33.6 ms | 54.5 MiB |
+| `llvm-dis-rust` on C++ bitcode | 19.0 ms | 18.8-21.0 ms | 14.6 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer-only
@@ -198,7 +207,7 @@ measurements, not a generated-code performance claim. The Rust binaries are 5.4 
 (`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 A clean release build of the two Rust tools, using a separate target
-directory, took 9.5 s wall, 31.5 s user, and 1.9 s system time. This is a
+directory, took 9.8 s wall, 31.5 s user, and 2.0 s system time. This is a
 Rust-only observation, not a cross-toolchain build-time result. A C++ compile
 baseline is not available in this workspace: only the installed LLVM 19.1.7
 tools and `libLLVM.so` are present, without LLVM development headers or a

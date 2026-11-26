@@ -586,19 +586,47 @@ fn parse_modref(text: &str) -> Option<u8> {
     }
 }
 
-fn parse_memory_attribute_parts(text: &str) -> Option<(MemoryEffects, Option<u8>)> {
+struct ParsedMemory {
+    effects: MemoryEffects,
+    errno: Option<u8>,
+    default_modref: Option<u8>,
+    target0: u8,
+    target1: u8,
+    target_explicit: bool,
+}
+
+fn parse_memory_attribute_parts(text: &str) -> Option<ParsedMemory> {
     let inner = text.strip_prefix("memory(")?.strip_suffix(')')?;
-    let mut effects = MemoryEffects::none();
-    let mut errno = None;
+    let mut parsed = ParsedMemory {
+        effects: MemoryEffects::none(),
+        errno: None,
+        default_modref: None,
+        target0: 0,
+        target1: 0,
+        target_explicit: false,
+    };
     let mut seen_location = false;
     for part in inner.split(',') {
         let part = part.trim();
         if let Some((location, modref)) = part.split_once(':') {
             let modref = parse_modref(modref.trim())?;
             match location.trim() {
-                "argmem" => effects.set(MEM_ARG, modref),
-                "inaccessiblemem" => effects.set(MEM_INACCESSIBLE, modref),
-                "errnomem" => errno = Some(modref),
+                "argmem" => parsed.effects.set(MEM_ARG, modref),
+                "inaccessiblemem" => parsed.effects.set(MEM_INACCESSIBLE, modref),
+                "errnomem" => parsed.errno = Some(modref),
+                "target_mem0" => {
+                    parsed.target0 = modref;
+                    parsed.target_explicit = true;
+                }
+                "target_mem1" => {
+                    parsed.target1 = modref;
+                    parsed.target_explicit = true;
+                }
+                "target_mem" => {
+                    parsed.target0 = modref;
+                    parsed.target1 = modref;
+                    parsed.target_explicit = true;
+                }
                 _ => return None,
             }
             seen_location = true;
@@ -606,20 +634,27 @@ fn parse_memory_attribute_parts(text: &str) -> Option<(MemoryEffects, Option<u8>
             if seen_location {
                 return None;
             }
-            effects = MemoryEffects::all(parse_modref(part)?);
+            let modref = parse_modref(part)?;
+            parsed.effects = MemoryEffects::all(modref);
+            parsed.default_modref = Some(modref);
+            parsed.target0 = modref;
+            parsed.target1 = modref;
         }
     }
-    Some((effects, errno))
+    Some(parsed)
 }
 
 fn parse_memory_attribute(text: &str) -> Option<MemoryEffects> {
-    let (effects, errno) = parse_memory_attribute_parts(text)?;
-    if let Some(errno) = errno {
-        if errno != effects.get(MEM_OTHER) {
+    let parsed = parse_memory_attribute_parts(text)?;
+    if parsed.target_explicit {
+        return None;
+    }
+    if let Some(errno) = parsed.errno {
+        if errno != parsed.effects.get(MEM_OTHER) {
             return None;
         }
     }
-    Some(effects)
+    Some(parsed.effects)
 }
 
 fn is_aarch64_triple(triple: Option<&str>) -> bool {
@@ -631,18 +666,49 @@ fn is_aarch64_triple(triple: Option<&str>) -> bool {
     })
 }
 
-fn resolve_function_attributes(attrs: Vec<Attribute>) -> Result<Vec<Attribute>> {
+fn resolve_function_attributes(
+    attrs: Vec<Attribute>,
+    target_triple: Option<&str>,
+) -> Result<Vec<Attribute>> {
     let mut resolved = Vec::new();
     let mut legacy_memory = MemoryEffects::unknown();
     let mut legacy_memory_seen = false;
     let mut modern_memory = None;
+    let is_aarch64 = is_aarch64_triple(target_triple);
     for attr in attrs {
         let text = attr.0.trim();
         if text.starts_with("memory(") {
-            modern_memory =
-                Some(parse_memory_attribute(text).ok_or_else(|| {
-                    Error::bitcode(format!("unsupported memory attribute `{text}`"))
-                })?);
+            let parsed = parse_memory_attribute_parts(text)
+                .ok_or_else(|| Error::bitcode(format!("unsupported memory attribute `{text}`")))?;
+            if let Some(errno) = parsed.errno {
+                if errno != parsed.effects.get(MEM_OTHER) {
+                    return Err(Error::bitcode(format!(
+                        "errno memory effect in `{text}` cannot be represented"
+                    )));
+                }
+            }
+            let inaccessible = parsed.effects.get(MEM_INACCESSIBLE);
+            if parsed.target_explicit {
+                if !is_aarch64 {
+                    return Err(Error::bitcode(format!(
+                        "target memory effects in `{text}` require an AArch64 target"
+                    )));
+                }
+                if parsed.target0 != inaccessible || parsed.target1 != inaccessible {
+                    return Err(Error::bitcode(format!(
+                        "target memory effects in `{text}` cannot survive LLVM 19 encoding"
+                    )));
+                }
+            } else if is_aarch64 {
+                if let Some(default) = parsed.default_modref {
+                    if default != 0 && default != inaccessible {
+                        return Err(Error::bitcode(format!(
+                            "target memory effects in `{text}` cannot survive LLVM 19 encoding"
+                        )));
+                    }
+                }
+            }
+            modern_memory = Some(parsed.effects);
         } else if let Some(effect) = legacy_memory_effect_name(text) {
             legacy_memory = legacy_memory.intersect(effect);
             legacy_memory_seen = true;
@@ -673,7 +739,7 @@ pub(crate) fn expand_function_attributes(
         .map(|attr| Attribute(attr.0.trim().to_string()))
         .collect();
     if !inline.is_empty() {
-        let resolved = resolve_function_attributes(inline)?;
+        let resolved = resolve_function_attributes(inline, module.target_triple.as_deref())?;
         merge_attributes(&mut expanded, &resolved);
     }
     for attr in attrs {
@@ -682,7 +748,7 @@ pub(crate) fn expand_function_attributes(
         }
         let mut group_attrs = Vec::new();
         expand_attribute(module, attr, 0, &mut group_attrs)?;
-        let resolved = resolve_function_attributes(group_attrs)?;
+        let resolved = resolve_function_attributes(group_attrs, module.target_triple.as_deref())?;
         merge_attributes(&mut expanded, &resolved);
     }
     Ok(expanded)
@@ -1026,6 +1092,33 @@ mod tests {
                 &TypeTable::new(),
                 &[],
                 None
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn aarch64_rejects_memory_effects_that_lose_target_access() {
+        let aarch64 = Some("aarch64-unknown-linux-gnu");
+        let resolve =
+            |text: &str| resolve_function_attributes(vec![Attribute(text.to_string())], aarch64);
+        assert!(resolve("memory(write, inaccessiblemem: none, errnomem: write)").is_err());
+        assert!(resolve("memory(write, inaccessiblemem: none)").is_err());
+        assert_eq!(
+            resolve("memory(write, inaccessiblemem: write, errnomem: write)").unwrap(),
+            vec![Attribute("memory(write)".to_string())]
+        );
+        assert_eq!(
+            resolve("memory(inaccessiblemem: read, target_mem0: read, target_mem1: read)").unwrap(),
+            vec![Attribute("memory(inaccessiblemem: read)".to_string())]
+        );
+        assert!(
+            resolve_function_attributes(
+                vec![Attribute(
+                    "memory(inaccessiblemem: read, target_mem0: read, target_mem1: read)"
+                        .to_string()
+                )],
+                Some("x86_64-unknown-linux-gnu")
             )
             .is_err()
         );
