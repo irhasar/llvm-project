@@ -717,6 +717,13 @@ if(LLVM_ENABLE_RUST_UNICODE)
       "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.lock")
     list(APPEND unicode_overflow_sources
       "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.toml")
+    # Keep the test rule honest when LLVM_RUST_FLAGS changes, especially with
+    # Unix Makefiles, which do not rerun a command just because its recipe did.
+    set(unicode_overflow_flags
+      "${CMAKE_CURRENT_BINARY_DIR}/rust-unicode-overflow-flags.txt")
+    file(GENERATE OUTPUT "${unicode_overflow_flags}"
+      CONTENT "${LLVM_RUST_FLAGS}\n")
+    list(APPEND unicode_overflow_sources "${unicode_overflow_flags}")
     add_custom_command(OUTPUT "${unicode_overflow_archive}"
       COMMAND "${CMAKE_COMMAND}" -E env
               "RUSTFLAGS=${LLVM_RUST_FLAGS} -Coverflow-checks=yes"

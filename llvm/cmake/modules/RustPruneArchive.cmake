@@ -52,12 +52,17 @@ else()
     set(allowed_undefined
       abort bcmp memcmp memcpy memmove memset rust_eh_personality)
     set(parsed FALSE)
+    # GNU nm prints "symbol U"; llvm-nm's POSIX format appends address and size.
     foreach(line IN LISTS undefined)
-      if(line MATCHES "^.*\\[([^]]+)\\]: ([^ ]+) U *$")
+      if(line MATCHES "^.*\\[([^]]+)\\]: ([^ ]+) U( +[0-9A-Fa-f]+ +[0-9A-Fa-f]+)? *$")
         set(parsed TRUE)
         set(member "${CMAKE_MATCH_1}")
         set(symbol "${CMAKE_MATCH_2}")
-        if(member IN_LIST crate_members AND NOT symbol IN_LIST allowed_undefined)
+        # Avoid IN_LIST: this script also runs standalone, where CMP0057 may
+        # still be unset with an older CMake.
+        list(FIND crate_members "${member}" crate_member_index)
+        list(FIND allowed_undefined "${symbol}" allowed_symbol_index)
+        if(crate_member_index GREATER_EQUAL 0 AND allowed_symbol_index EQUAL -1)
           set(prune FALSE)
         endif()
       endif()

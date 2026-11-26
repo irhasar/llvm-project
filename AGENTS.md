@@ -306,6 +306,10 @@ staged archive is 6,304 bytes instead of 5 MiB. Pruning is conditional: if the
 retained object references any symbol outside a small libc/panic allowlist,
 the script keeps the complete archive. Overflow checks trigger that fallback,
 and the wrapper supplies a weak `rust_eh_personality` for the pulled-in `core`.
+The script uses `list(FIND)` rather than policy-dependent `IN_LIST`, so its
+standalone `cmake -P` invocation works with CMake 3.x; it accepts both GNU
+`nm` and `llvm-nm` POSIX records. The overflow test tracks `LLVM_RUST_FLAGS`
+through a generated dependency, matching the production rule.
 
 ```sh
 (cd llvm/lib/Support/rust/unicode &&
