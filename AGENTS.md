@@ -105,6 +105,10 @@ optional and incremental.
   algorithms, data layout, allocation, PGO/BOLT, ThinLTO, and target tuning.
   A whole-LLVM/rustc-backend rewrite is a separate research project with a
   bootstrap problem, not an incremental migration step.
+- Track A, this branch, remains the production path. Track B is a long-term
+  Rust-native LLVM core on `rust-migration-track-b` and in a separate
+  `llvm-rust/` workspace; it must not change the default build or any Track A
+  `LLVM_ENABLE_RUST_*` switch.
 - A new port ships only if it clears the measurement gate below; otherwise keep
   the C++ implementation. “Rust” is not itself a performance result.
 - Keep the C ABI staticlib as the permanent boundary for existing C++ callers.

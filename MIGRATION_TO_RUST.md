@@ -14,14 +14,18 @@ Goals:
   are bit-for-bit compatible with the C++ they replace.
 * Keep every step independently revertible, reviewable, and off by default.
 * Keep the C++ ABI stable: callers of `llvm/Support/*.h` must not notice.
+* Long-term, build a Rust-native LLVM core compatible at the textual IR,
+  bitcode, object, debug-info, command-line, and LLVM-C levels. This is
+  Track B; it uses C++ LLVM as the bootstrap and differential oracle and does
+  not replace Track A or change the default build.
 
 Non-goals (for now):
 
-* Rewriting the IR, the code generator, or the target backends. Those are
-  data-structure-heavy and dominated by C++ template use; they are the last
-  candidates, not the first.
-* A whole-LLVM Rust rewrite. The unit of migration is a self-contained
-  component, not the project.
+* Rewriting the IR, the code generator, or the target backends as part of
+  Track A. Those are data-structure-heavy and dominated by C++ template use;
+  they are the last candidates, not the first.
+* A flag-day rewrite of the whole project. Track B is a gated, long-term
+  clean-room effort, not a replacement for the incremental production path.
 * Introducing Rust into the bootstrap path. Building LLVM with a Rust compiler
   remains optional.
 * A mixed-language build for downstream consumers that do not opt in.
@@ -121,6 +125,38 @@ are recorded and reviewed separately. A component that is larger only as an
 archive, but not in the final binary, is not rejected on the archive number
 alone. Keep every `LLVM_ENABLE_RUST_*` option default `OFF` with the C++
 fallback available.
+
+## Track B: long-term Rust LLVM core
+
+Track A stays the production path. Track B is a separate clean-room effort for
+a Rust-native LLVM core; it must not change the default build, the existing
+`LLVM_ENABLE_RUST_*` switches, or the C++ fallback.
+
+Scope for the first Track B program is LLVM core: `llvm/lib` and `llvm/tools`,
+starting with X86. LLD, compiler-rt, libc, libunwind, and upstream Clang/LLDB
+are later or separate programs, not part of the first rewrite.
+
+The compatibility contract is textual IR, bitcode, object files, DWARF,
+command-line tools, and LLVM-C. Full C++ API/ABI compatibility is not promised;
+if it becomes mandatory, the C ABI wrapper path is the supported answer.
+Track B is Rust-native from the start: no C++ wrapper inside the core, arena
+and index based IR instead of intrusive C++ pointers, `Result` based errors,
+and `unsafe` isolated behind small audited modules. C++ LLVM remains the
+differential oracle and the bootstrap.
+
+Bootstrap is staged. C++ LLVM is stage 0 and builds the first Rust LLVM;
+self-hosting `rustc` on Rust LLVM is a later gate, not a prerequisite. Do not
+make the default `rustc` depend on Rust LLVM until stage 1 and stage 2 are
+reproducible and pass the compatibility suite.
+
+The first vertical slice is textual IR parse/print plus bitcode round-trip,
+then object/MC and an X86 `llc` subset. Do not start with CodeGen or the target
+backends. Restore or vendor the upstream `llvm/test` suite before making parity
+claims; this fork does not carry `llvm/test` or `llvm/docs`.
+
+Track B starts in a separate `llvm-rust/` workspace and runs as a 3-6 month
+feasibility spike with explicit go/no-go gates. Detailed Track B instructions
+live on the `rust-migration-track-b` branch.
 
 ## Phases
 
@@ -1101,3 +1137,6 @@ keeps every step of the migration reversible.
    use `strip --strip-debug` for release packaging when debug information is not
    required. Do not reject a staticlib only because it carries
    `compiler_builtins` and `core` members that the final linker removes.
+10. Keep Track B on its own branch and in a separate `llvm-rust/` workspace.
+    Start with the textual IR/bitcode vertical slice and the 3-6 month
+    feasibility gate; do not change the default build or Track A switches.
