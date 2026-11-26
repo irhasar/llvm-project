@@ -64,10 +64,11 @@ Non-goals (for now):
   not share build freshness,
 * records the staged archive hash separately, so unchanged content does not
   relink dependents,
-* stages a restorable `copy_if_different` archive that Make can recreate
-  without rerunning Cargo. A staging stamp records the copy run, so a
+* stages a restorable archive atomically: the copy goes to a temporary file
+  and is renamed only after it completes, so an interrupted restore cannot
+  leave a partial archive. A staging stamp records the copy run, so a
   byte-identical Cargo rebuild does not recopy on later builds; a Make target
-  restores a deleted staged archive without hashing it.
+  restores a deleted or truncated staged archive without rerunning Cargo.
 * exposes the archive as a `STATIC IMPORTED` target that components link,
 * on Ninja, records the archive in `INTERFACE_LINK_DEPENDS` instead of adding a
   target-level dependency. CMake otherwise makes every C++ object in a
@@ -297,8 +298,8 @@ and the crate, five runs pinned to CPU set 0-3, measured:
 
 | Backend | Runs (s) | Median |
 |---------|----------|--------|
-| C++ | 1.029 / 1.013 / 1.000 / 0.993 / 1.005 | 1.005 |
-| Rust | 1.003 / 0.999 / 0.998 / 1.017 / 1.048 | 1.003 |
+| C++ | 1.044 / 1.041 / 0.999 / 1.014 / 1.021 | 1.021 |
+| Rust | 1.012 / 0.984 / 1.040 / 1.015 / 1.024 | 1.015 |
 
 That is parity and inside the 10% compile gate for this incremental consumer
 rebuild. The process sum above is retained as the worst-case cost; a full

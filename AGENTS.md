@@ -85,7 +85,9 @@ Every crate under `llvm/lib/*/rust/` follows the same rules:
   target-level dependency.
 - The staged archive is a byproduct of the staging-stamp rule. Keep the stamp;
   making the archive itself the rule output makes Make recopy it every build
-  after a byte-identical Cargo rebuild.
+  after a byte-identical Cargo rebuild. Staging and Make restores write a
+  temporary file and rename it, so an interrupted copy cannot leave a partial
+  archive that the next build accepts.
 - Release staticlibs use fat LTO and one codegen unit. Small standalone Rust
   binaries use LTO off; larger ones try thin LTO first. Development and test
   builds use the incremental dev profile. See `MIGRATION_TO_RUST.md` for the

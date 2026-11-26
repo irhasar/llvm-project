@@ -116,9 +116,11 @@ function(add_llvm_rust_staticlib name manifest)
   set(content_stamp "${target_dir}/content.stamp")
   if(CMAKE_CURRENT_FUNCTION_LIST_DIR)
     set(archive_stamp_script "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RustArchiveStamp.cmake")
+    set(stage_archive_script "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RustStageArchive.cmake")
     set(ensure_staged_script "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RustEnsureStaged.cmake")
   else()
     set(archive_stamp_script "${CMAKE_CURRENT_LIST_DIR}/RustArchiveStamp.cmake")
+    set(stage_archive_script "${CMAKE_CURRENT_LIST_DIR}/RustStageArchive.cmake")
     set(ensure_staged_script "${CMAKE_CURRENT_LIST_DIR}/RustEnsureStaged.cmake")
   endif()
 
@@ -140,13 +142,13 @@ function(add_llvm_rust_staticlib name manifest)
     COMMENT "Checking Rust archive ${name}"
     VERBATIM)
 
-  # A staging stamp records that the copy command ran even when
-  # copy_if_different left the archive untouched. Without it Make reruns the
-  # staging rule on every build after a byte-identical Cargo rebuild.
+  # A staging stamp records that the staging script ran even when the archive
+  # bytes matched. Without it Make reruns the staging rule on every build after
+  # a byte-identical Cargo rebuild.
   set(staged_stamp "${target_dir}/staged-$<CONFIG>.stamp")
   add_custom_command(OUTPUT "${staged_stamp}"
-    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${staging_source}" "${staged}"
-    COMMAND "${CMAKE_COMMAND}" -E touch "${staged_stamp}"
+    COMMAND "${CMAKE_COMMAND}" "-DSRC=${staging_source}" "-DDST=${staged}"
+            "-DSTAMP=${staged_stamp}" -P "${stage_archive_script}"
     BYPRODUCTS "${staged}"
     DEPENDS "${content_stamp}"
     COMMENT "Staging Rust archive ${name}"
