@@ -324,9 +324,11 @@ ninja -C /tmp/unicode-consumer-build
 
 The resource gate is cleared. The C++ one-TU compile is 419 ms and 95.9 MiB
 peak RSS; the Rust crate plus wrapper is 139.9 ms and 94.0 MiB peak RSS
-(0.33x wall, -2.1% RSS). `llvm-min-tblgen` is byte-identical (1,796,632
-bytes). `llvm-unicode-stable` is 20,288 bytes with C++ and 16,368 bytes with
-Rust (-3,920). The option stays opt-in by policy.
+(0.33x wall, -2.1% RSS). The wrapper includes only `Compiler.h`; pulling in
+`Unicode.h` costs 354 ms for the one-line wrapper and breaks the compile gate.
+`llvm-min-tblgen` is byte-identical (1,796,632 bytes). `llvm-unicode-stable`
+is 20,288 bytes with C++ and 16,368 bytes with Rust (-3,920). The option stays
+opt-in by policy.
 
 ## Demangler port
 

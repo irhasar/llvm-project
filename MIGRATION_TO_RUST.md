@@ -1192,6 +1192,10 @@ it to remove `core` and `compiler_builtins` members that a dependency-free
 crate never references and to strip the rustc `.comment` section. The staged
 archive drops from 5,054,122 bytes to 6,136 bytes.
 
+`UnicodeCaseFoldRust.cpp` includes only `Compiler.h` and repeats the
+`LLVM_ABI` declaration. Including `Unicode.h` made the one-line wrapper take
+354 ms by itself, which was the only reason the compile-time gate failed.
+
 Correctness coverage:
 
 * Four crate tests cover ASCII, identity, known non-ASCII mappings, table
