@@ -1,0 +1,1163 @@
+//! LLVM bitcode reader for the Track B IR subset.
+
+use llvm_rust_ir::{
+    BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath, FcmpPred, FuncId, Function,
+    Global, GlobalId, IcmpPred, InstKind, IntFlags, Linkage, Module, Operand, OperandKind,
+    TailKind, Type, TypeId, Visibility,
+};
+use llvm_rust_support::{Error, Result};
+
+use crate::bitstream::{Bitstream, Block, Item, Record};
+
+const MODULE_BLOCK: u32 = 8;
+const CONSTANTS_BLOCK: u32 = 11;
+const FUNCTION_BLOCK: u32 = 12;
+const VALUE_SYMTAB_BLOCK: u32 = 14;
+const TYPE_BLOCK: u32 = 17;
+const STRTAB_BLOCK: u32 = 23;
+
+const MODULE_VERSION: u64 = 1;
+const MODULE_TRIPLE: u64 = 2;
+const MODULE_DATALAYOUT: u64 = 3;
+const MODULE_GLOBALVAR: u64 = 7;
+const MODULE_FUNCTION: u64 = 8;
+const MODULE_SOURCE_FILENAME: u64 = 16;
+
+const TYPE_VOID: u64 = 2;
+const TYPE_FLOAT: u64 = 3;
+const TYPE_DOUBLE: u64 = 4;
+const TYPE_LABEL: u64 = 5;
+const TYPE_OPAQUE: u64 = 6;
+const TYPE_INTEGER: u64 = 7;
+const TYPE_HALF: u64 = 10;
+const TYPE_ARRAY: u64 = 11;
+const TYPE_VECTOR: u64 = 12;
+const TYPE_X86_FP80: u64 = 13;
+const TYPE_FP128: u64 = 14;
+const TYPE_PPC_FP128: u64 = 15;
+const TYPE_METADATA: u64 = 16;
+const TYPE_STRUCT_ANON: u64 = 18;
+const TYPE_STRUCT_NAME: u64 = 19;
+const TYPE_STRUCT_NAMED: u64 = 20;
+const TYPE_FUNCTION: u64 = 21;
+const TYPE_TOKEN: u64 = 22;
+const TYPE_BFLOAT: u64 = 23;
+const TYPE_OPAQUE_POINTER: u64 = 25;
+const TYPE_BYTE: u64 = 27;
+
+const CST_SETTYPE: u64 = 1;
+const CST_NULL: u64 = 2;
+const CST_UNDEF: u64 = 3;
+const CST_INTEGER: u64 = 4;
+const CST_WIDE_INTEGER: u64 = 5;
+const CST_FLOAT: u64 = 6;
+const CST_AGGREGATE: u64 = 7;
+const CST_STRING: u64 = 8;
+const CST_CSTRING: u64 = 9;
+const CST_DATA: u64 = 22;
+const CST_POISON: u64 = 26;
+
+const FUNC_DECLAREBLOCKS: u64 = 1;
+const FUNC_INST_BINOP: u64 = 2;
+const FUNC_INST_CAST: u64 = 3;
+const FUNC_INST_SELECT_OLD: u64 = 5;
+const FUNC_INST_RET: u64 = 10;
+const FUNC_INST_BR: u64 = 11;
+const FUNC_INST_SWITCH: u64 = 12;
+const FUNC_INST_UNREACHABLE: u64 = 15;
+const FUNC_INST_PHI: u64 = 16;
+const FUNC_INST_ALLOCA: u64 = 19;
+const FUNC_INST_LOAD: u64 = 20;
+const FUNC_INST_CMP2: u64 = 28;
+const FUNC_INST_VSELECT: u64 = 29;
+const FUNC_INST_CALL: u64 = 34;
+const FUNC_INST_GEP: u64 = 43;
+const FUNC_INST_STORE: u64 = 44;
+const FUNC_INST_UNOP: u64 = 56;
+
+const VST_ENTRY: u64 = 1;
+const VST_BBENTRY: u64 = 2;
+const STRTAB_BLOB: u64 = 1;
+
+#[derive(Clone, Copy, Debug)]
+enum ValueRef {
+    Global(GlobalId),
+    Function(FuncId),
+    Constant(ConstId),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum LocalRef {
+    Local(llvm_rust_ir::LocalId),
+    Constant(ConstId),
+}
+
+struct FuncState {
+    id: FuncId,
+    base: u32,
+    locals: Vec<LocalRef>,
+    blocks: Vec<BlockId>,
+    current_block: usize,
+}
+
+/// Reads a bitcode file into a module.
+pub fn read_bitcode(bytes: &[u8]) -> Result<Module> {
+    let stream = Bitstream::parse(bytes)?;
+    let strtab = stream
+        .blocks
+        .iter()
+        .find(|block| block.id == STRTAB_BLOCK)
+        .and_then(|block| block.records().find(|record| record.code == STRTAB_BLOB))
+        .and_then(|record| record.blob.clone())
+        .unwrap_or_default();
+    let module_block = stream
+        .blocks
+        .iter()
+        .find(|block| block.id == MODULE_BLOCK)
+        .ok_or_else(|| Error::bitcode("bitcode has no module block"))?;
+    let mut reader = Reader {
+        module: Module::new(),
+        strtab,
+        types: Vec::new(),
+        values: Vec::new(),
+        pending_globals: Vec::new(),
+        defined_functions: Vec::new(),
+        next_body: 0,
+    };
+    reader.read_module(module_block)?;
+    reader.resolve_globals()?;
+    Ok(reader.module)
+}
+
+struct Reader {
+    module: Module,
+    strtab: Vec<u8>,
+    types: Vec<TypeId>,
+    values: Vec<ValueRef>,
+    pending_globals: Vec<(GlobalId, u32)>,
+    defined_functions: Vec<FuncId>,
+    next_body: usize,
+}
+
+impl Reader {
+    fn read_module(&mut self, block: &Block) -> Result<()> {
+        for item in &block.items {
+            match item {
+                Item::Record(record) => match record.code {
+                    MODULE_VERSION => {}
+                    MODULE_TRIPLE => {
+                        self.module.target_triple = Some(bytes_to_string(&record.operands));
+                    }
+                    MODULE_DATALAYOUT => {
+                        self.module.data_layout = Some(bytes_to_string(&record.operands));
+                    }
+                    MODULE_SOURCE_FILENAME => {
+                        self.module.source_filename = Some(bytes_to_string(&record.operands));
+                    }
+                    MODULE_GLOBALVAR => self.read_global(record)?,
+                    MODULE_FUNCTION => self.read_function(record)?,
+                    _ => {}
+                },
+                Item::Block(child) => match child.id {
+                    TYPE_BLOCK => self.read_types(child)?,
+                    CONSTANTS_BLOCK => {
+                        self.read_constants(child, true)?;
+                    }
+                    FUNCTION_BLOCK => self.read_body(child)?,
+                    _ => {}
+                },
+            }
+        }
+        Ok(())
+    }
+
+    fn read_types(&mut self, block: &Block) -> Result<()> {
+        let mut pending_name: Option<String> = None;
+        for record in block.records() {
+            match record.code {
+                1 => {}
+                TYPE_STRUCT_NAME => pending_name = Some(bytes_to_string(&record.operands)),
+                TYPE_STRUCT_NAMED => {
+                    let name = pending_name
+                        .take()
+                        .ok_or_else(|| Error::bitcode("named struct without a name"))?;
+                    let id = self.module.types.named(&name);
+                    self.types.push(id);
+                    let packed = record.operands.first().copied().unwrap_or(0) != 0;
+                    let mut fields = Vec::new();
+                    for operand in record.operands.iter().skip(1) {
+                        fields.push(self.type_at(*operand)?);
+                    }
+                    self.module
+                        .types
+                        .define_named(&name, fields, packed)
+                        .map_err(Error::bitcode)?;
+                    if !self.module.named_types.contains(&id) {
+                        self.module.named_types.push(id);
+                    }
+                }
+                code => {
+                    let ty = self.read_type(code, record)?;
+                    let id = self.module.types.intern(ty);
+                    self.types.push(id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn read_type(&mut self, code: u64, record: &Record) -> Result<Type> {
+        let ty = match code {
+            TYPE_VOID => Type::Void,
+            TYPE_LABEL => Type::Label,
+            TYPE_TOKEN => Type::Token,
+            TYPE_METADATA => Type::Metadata,
+            TYPE_OPAQUE => Type::Opaque,
+            TYPE_INTEGER => Type::Int(record.operands.first().copied().unwrap_or(0) as u32),
+            TYPE_BYTE => Type::Int(8),
+            TYPE_HALF => Type::Float(llvm_rust_ir::FloatKind::Half),
+            TYPE_BFLOAT => Type::Float(llvm_rust_ir::FloatKind::BFloat),
+            TYPE_FLOAT => Type::Float(llvm_rust_ir::FloatKind::Float),
+            TYPE_DOUBLE => Type::Float(llvm_rust_ir::FloatKind::Double),
+            TYPE_X86_FP80 => Type::Float(llvm_rust_ir::FloatKind::X86Fp80),
+            TYPE_FP128 => Type::Float(llvm_rust_ir::FloatKind::Fp128),
+            TYPE_PPC_FP128 => Type::Float(llvm_rust_ir::FloatKind::PpcFp128),
+            TYPE_OPAQUE_POINTER => Type::Pointer,
+            TYPE_ARRAY => {
+                let len = record.operands.first().copied().unwrap_or(0);
+                let elem = self.type_at(*record.operands.get(1).unwrap_or(&0))?;
+                Type::Array { elem, len }
+            }
+            TYPE_VECTOR => {
+                let len = record.operands.first().copied().unwrap_or(0) as u32;
+                let elem = self.type_at(*record.operands.get(1).unwrap_or(&0))?;
+                let scalable = record.operands.get(2).copied().unwrap_or(0) != 0;
+                Type::Vector {
+                    elem,
+                    len,
+                    scalable,
+                }
+            }
+            TYPE_STRUCT_ANON => {
+                let packed = record.operands.first().copied().unwrap_or(0) != 0;
+                let mut fields = Vec::new();
+                for operand in record.operands.iter().skip(1) {
+                    fields.push(self.type_at(*operand)?);
+                }
+                Type::Struct {
+                    fields,
+                    packed,
+                    name: None,
+                }
+            }
+            TYPE_FUNCTION => {
+                let varargs = record.operands.first().copied().unwrap_or(0) != 0;
+                let ret = self.type_at(*record.operands.get(1).unwrap_or(&0))?;
+                let mut params = Vec::new();
+                for operand in record.operands.iter().skip(2) {
+                    params.push(self.type_at(*operand)?);
+                }
+                Type::Function {
+                    ret,
+                    params,
+                    varargs,
+                }
+            }
+            other => return Err(Error::bitcode(format!("unsupported type code {other}"))),
+        };
+        Ok(ty)
+    }
+
+    fn type_at(&self, index: u64) -> Result<TypeId> {
+        self.types
+            .get(index as usize)
+            .copied()
+            .ok_or_else(|| Error::bitcode(format!("unknown type index {index}")))
+    }
+
+    fn read_global(&mut self, record: &Record) -> Result<()> {
+        let name = self.name_from(
+            record.operands.first().copied().unwrap_or(0),
+            record.operands.get(1).copied().unwrap_or(0),
+        )?;
+        let ty = self.type_at(record.operands.get(2).copied().unwrap_or(0))?;
+        let flags = record.operands.get(3).copied().unwrap_or(0);
+        let is_const = flags & 1 != 0;
+        let init = record.operands.get(4).copied().unwrap_or(0);
+        let linkage = decode_linkage(record.operands.get(5).copied().unwrap_or(0));
+        let align = decode_align(record.operands.get(6).copied().unwrap_or(0));
+        let visibility = decode_visibility(record.operands.get(9).copied().unwrap_or(0));
+        let thread_local = record.operands.get(10).copied().unwrap_or(0) != 0;
+        let unnamed_addr = record.operands.get(11).copied().unwrap_or(0) != 0;
+        let dso_local = record.operands.get(17).copied().unwrap_or(0) != 0;
+        let symbol = self.module.intern(&name);
+        let id = self.module.global_or_insert(symbol);
+        self.module.define_global(
+            id,
+            Global {
+                name: symbol,
+                ty,
+                init: None,
+                linkage,
+                visibility,
+                is_const,
+                thread_local,
+                unnamed_addr,
+                dso_local,
+                align,
+                section: None,
+            },
+        );
+        self.values.push(ValueRef::Global(id));
+        if init != 0 {
+            self.pending_globals.push((id, (init - 1) as u32));
+        }
+        Ok(())
+    }
+
+    fn read_function(&mut self, record: &Record) -> Result<()> {
+        let name = self.name_from(
+            record.operands.first().copied().unwrap_or(0),
+            record.operands.get(1).copied().unwrap_or(0),
+        )?;
+        let ty = self.type_at(record.operands.get(2).copied().unwrap_or(0))?;
+        let is_declaration = record.operands.get(4).copied().unwrap_or(0) != 0;
+        let linkage = decode_linkage(record.operands.get(5).copied().unwrap_or(0));
+        let visibility = decode_visibility(record.operands.get(9).copied().unwrap_or(0));
+        let unnamed_addr = record.operands.get(11).copied().unwrap_or(0) != 0;
+        let dso_local = record.operands.get(17).copied().unwrap_or(0) != 0;
+        let symbol = self.module.intern(&name);
+        let mut function = Function::new(symbol, ty);
+        function.is_declaration = is_declaration;
+        function.linkage = linkage;
+        function.visibility = visibility;
+        function.unnamed_addr = unnamed_addr;
+        function.dso_local = dso_local;
+        if let Type::Function { params, .. } = self.module.types.get(ty).clone() {
+            for param in params {
+                function.add_param(None, param, Vec::new());
+            }
+        }
+        let id = self.module.function_or_insert(symbol);
+        self.module.define_function(id, function);
+        self.values.push(ValueRef::Function(id));
+        if !is_declaration {
+            self.defined_functions.push(id);
+        }
+        Ok(())
+    }
+
+    fn read_constants(&mut self, block: &Block, module_level: bool) -> Result<Vec<ConstId>> {
+        let mut current_ty = None;
+        let mut ids = Vec::new();
+        for record in block.records() {
+            if record.code == CST_SETTYPE {
+                current_ty = Some(self.type_at(record.operands.first().copied().unwrap_or(0))?);
+                continue;
+            }
+            let ty = current_ty.ok_or_else(|| Error::bitcode("constant without a type"))?;
+            let kind = self.read_constant_kind(record.code, ty, record)?;
+            let id = self.module.add_constant(Constant::new(ty, kind));
+            ids.push(id);
+            if module_level {
+                self.values.push(ValueRef::Constant(id));
+            }
+        }
+        Ok(ids)
+    }
+
+    fn read_constant_kind(&mut self, code: u64, ty: TypeId, record: &Record) -> Result<ConstKind> {
+        Ok(match code {
+            CST_NULL => match self.module.types.get(ty) {
+                Type::Int(_) => ConstKind::Int(0),
+                Type::Float(_) => ConstKind::Float(0),
+                Type::Array { .. } | Type::Struct { .. } | Type::Vector { .. } => {
+                    ConstKind::ZeroInitializer
+                }
+                _ => ConstKind::Null,
+            },
+            CST_UNDEF => ConstKind::Undef,
+            CST_POISON => ConstKind::Poison,
+            CST_INTEGER => {
+                let value = decode_signed(record.operands.first().copied().unwrap_or(0));
+                ConstKind::Int(value as u128)
+            }
+            CST_WIDE_INTEGER => {
+                let mut value = 0u128;
+                for (index, operand) in record.operands.iter().enumerate() {
+                    value |= ((*operand as u128) & 0xffff_ffff_ffff_ffff) << (index * 64);
+                }
+                ConstKind::Int(value)
+            }
+            CST_FLOAT => ConstKind::Float(record.operands.first().copied().unwrap_or(0)),
+            CST_STRING | CST_CSTRING => {
+                let mut bytes: Vec<u8> = record.operands.iter().map(|b| *b as u8).collect();
+                if code == CST_CSTRING {
+                    bytes.push(0);
+                }
+                ConstKind::String(bytes)
+            }
+            CST_AGGREGATE => {
+                let mut elements = Vec::new();
+                for operand in &record.operands {
+                    elements.push(self.resolve_const(*operand as u32)?);
+                }
+                ConstKind::Aggregate(elements)
+            }
+            CST_DATA => {
+                let mut elements = Vec::new();
+                let elem_ty = match self.module.types.get(ty) {
+                    Type::Array { elem, .. } => *elem,
+                    Type::Vector { elem, .. } => *elem,
+                    _ => return Err(Error::bitcode("data constant without an aggregate type")),
+                };
+                for operand in &record.operands {
+                    let constant = Constant::new(elem_ty, ConstKind::Int(*operand as u128));
+                    elements.push(self.module.add_constant(constant));
+                }
+                ConstKind::Aggregate(elements)
+            }
+            other => return Err(Error::bitcode(format!("unsupported constant code {other}"))),
+        })
+    }
+
+    fn resolve_globals(&mut self) -> Result<()> {
+        let pending = core::mem::take(&mut self.pending_globals);
+        for (global, value) in pending {
+            let init = self.resolve_const(value)?;
+            self.module.globals.get_mut(global).init = Some(init);
+        }
+        Ok(())
+    }
+
+    fn resolve_const(&mut self, value: u32) -> Result<ConstId> {
+        match self.values.get(value as usize).copied() {
+            Some(ValueRef::Constant(id)) => Ok(id),
+            Some(ValueRef::Global(id)) => {
+                let ptr = self.ptr_type()?;
+                Ok(self
+                    .module
+                    .add_constant(Constant::new(ptr, ConstKind::Global(id))))
+            }
+            Some(ValueRef::Function(id)) => {
+                let ty = self.module.functions[id].ty;
+                Ok(self
+                    .module
+                    .add_constant(Constant::new(ty, ConstKind::Function(id))))
+            }
+            None => Err(Error::bitcode(format!("unknown constant value {value}"))),
+        }
+    }
+
+    fn name_from(&self, offset: u64, size: u64) -> Result<String> {
+        let start = offset as usize;
+        let end = start + size as usize;
+        if end > self.strtab.len() {
+            return Ok(String::new());
+        }
+        Ok(String::from_utf8_lossy(&self.strtab[start..end]).into_owned())
+    }
+
+    fn read_body(&mut self, block: &Block) -> Result<()> {
+        let id = *self
+            .defined_functions
+            .get(self.body_index())
+            .ok_or_else(|| Error::bitcode("function body without a declaration"))?;
+        self.next_body += 1;
+        let base = self.values.len() as u32;
+        let param_count = self.module.functions[id].params.len() as u32;
+        let mut state = FuncState {
+            id,
+            base,
+            locals: (0..param_count).map(LocalRef::Local).collect(),
+            blocks: Vec::new(),
+            current_block: 0,
+        };
+        let items = block.items.clone();
+        for item in items {
+            match item {
+                Item::Record(record) => {
+                    if record.code == FUNC_DECLAREBLOCKS {
+                        let count = record.operands.first().copied().unwrap_or(0) as usize;
+                        let function = &mut self.module.functions[id];
+                        function.is_declaration = false;
+                        for _ in 0..count {
+                            let block = function.add_block(None);
+                            state.blocks.push(block);
+                        }
+                        function.entry = state.blocks.first().copied();
+                        continue;
+                    }
+                    self.read_instruction(&record, &mut state)?;
+                }
+                Item::Block(child) => match child.id {
+                    CONSTANTS_BLOCK => {
+                        let ids = self.read_constants(&child, false)?;
+                        state.locals.extend(ids.into_iter().map(LocalRef::Constant));
+                    }
+                    VALUE_SYMTAB_BLOCK => self.read_vst(&child, &mut state)?,
+                    _ => {}
+                },
+            }
+        }
+        Ok(())
+    }
+
+    fn body_index(&self) -> usize {
+        self.next_body
+    }
+
+    fn read_vst(&mut self, block: &Block, state: &mut FuncState) -> Result<()> {
+        for record in block.records() {
+            match record.code {
+                VST_ENTRY => {
+                    let value = record.operands.first().copied().unwrap_or(0) as u32;
+                    if value >= state.base {
+                        let index = (value - state.base) as usize;
+                        if let Some(LocalRef::Local(local)) = state.locals.get(index).copied() {
+                            let name = bytes_to_string(&record.operands[1..]);
+                            let symbol = self.module.intern(&name);
+                            let function = &mut self.module.functions[state.id];
+                            function.locals[local as usize].name = Some(symbol);
+                            if (local as usize) < function.params.len() {
+                                function.params[local as usize].name = Some(symbol);
+                            }
+                        }
+                    }
+                }
+                VST_BBENTRY => {
+                    let index = record.operands.first().copied().unwrap_or(0) as usize;
+                    if let Some(block) = state.blocks.get(index).copied() {
+                        let name = bytes_to_string(&record.operands[1..]);
+                        let symbol = self.module.intern(&name);
+                        self.module.functions[state.id].blocks[block].name = Some(symbol);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn resolve_value(&self, state: &FuncState, value: u32) -> Result<Operand> {
+        if (value as usize) < self.values.len() {
+            return Ok(match self.values[value as usize] {
+                ValueRef::Global(id) => {
+                    let ty = self.ptr_type()?;
+                    Operand::global(ty, id)
+                }
+                ValueRef::Function(id) => {
+                    let ty = self.module.functions[id].ty;
+                    Operand::function(ty, id)
+                }
+                ValueRef::Constant(id) => {
+                    let ty = self.module.constant(id).ty;
+                    Operand::constant(ty, id)
+                }
+            });
+        }
+        let index = (value - state.base) as usize;
+        let local = *state
+            .locals
+            .get(index)
+            .ok_or_else(|| Error::bitcode(format!("unknown local value {value}")))?;
+        Ok(match local {
+            LocalRef::Local(id) => {
+                let ty = self.module.functions[state.id].local_type(id);
+                Operand::local(ty, id)
+            }
+            LocalRef::Constant(id) => {
+                let ty = self.module.constant(id).ty;
+                Operand::constant(ty, id)
+            }
+        })
+    }
+
+    fn decode_value(
+        &self,
+        record: &Record,
+        index: usize,
+        inst_id: u32,
+        state: &FuncState,
+    ) -> Result<(Operand, usize)> {
+        let relative = record.operands[index];
+        let value = inst_id.wrapping_sub(relative as u32);
+        Ok((self.resolve_value(state, value)?, index + 1))
+    }
+
+    fn decode_typed_value(
+        &self,
+        record: &Record,
+        index: usize,
+        inst_id: u32,
+        state: &FuncState,
+    ) -> Result<(Operand, usize)> {
+        let relative = record.operands[index];
+        let value = inst_id.wrapping_sub(relative as u32);
+        let mut operand = self.resolve_value(state, value)?;
+        let mut next = index + 1;
+        if relative as u32 > inst_id {
+            operand.ty = self.type_at(record.operands[next])?;
+            next += 1;
+        }
+        Ok((operand, next))
+    }
+
+    fn read_instruction(&mut self, record: &Record, state: &mut FuncState) -> Result<()> {
+        let inst_id = state.base + state.locals.len() as u32;
+        let (kind, result_ty) = self.decode_instruction(record, inst_id, state)?;
+        let block = *state
+            .blocks
+            .get(state.current_block)
+            .ok_or_else(|| Error::bitcode("instruction after the last block"))?;
+        let function = &mut self.module.functions[state.id];
+        let inst = function.add_inst(
+            block,
+            llvm_rust_ir::Instruction {
+                result: None,
+                kind: kind.clone(),
+            },
+        );
+        if let Some(ty) = result_ty {
+            let local = function.add_local(None, ty, inst);
+            function.insts[inst].result = Some(local);
+            state.locals.push(LocalRef::Local(local));
+        }
+        if kind.is_terminator() {
+            state.current_block += 1;
+        }
+        Ok(())
+    }
+
+    fn decode_instruction(
+        &mut self,
+        record: &Record,
+        inst_id: u32,
+        state: &FuncState,
+    ) -> Result<(InstKind, Option<TypeId>)> {
+        match record.code {
+            FUNC_INST_BINOP => {
+                let (lhs, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (rhs, next) = self.decode_value(record, index, inst_id, state)?;
+                index = next;
+                let opcode = record.operands[index] as u32;
+                index += 1;
+                let flags = record.operands.get(index).copied().unwrap_or(0);
+                let is_float = matches!(self.module.types.get(lhs.ty), Type::Float(_));
+                let op = binop_from_code(opcode, is_float)?;
+                let mut int_flags = IntFlags::default();
+                let mut fastmath = FastMath::default();
+                if is_float {
+                    fastmath = decode_fastmath(flags);
+                } else if matches!(op, BinOp::UDiv | BinOp::SDiv | BinOp::URem | BinOp::SRem) {
+                    int_flags.exact = flags & 1 != 0;
+                } else {
+                    int_flags.nuw = flags & 1 != 0;
+                    int_flags.nsw = flags & 2 != 0;
+                }
+                Ok((
+                    InstKind::Binary {
+                        op,
+                        flags: int_flags,
+                        fastmath,
+                        lhs,
+                        rhs,
+                    },
+                    Some(lhs.ty),
+                ))
+            }
+            FUNC_INST_UNOP => {
+                let (value, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let opcode = record.operands.get(index).copied().unwrap_or(0);
+                index += 1;
+                let flags = record.operands.get(index).copied().unwrap_or(0);
+                if opcode != 0 {
+                    return Err(Error::bitcode("unsupported unary operator"));
+                }
+                Ok((
+                    InstKind::FNeg {
+                        flags: decode_fastmath(flags),
+                        value,
+                    },
+                    Some(value.ty),
+                ))
+            }
+            FUNC_INST_CMP2 => {
+                let (lhs, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (rhs, next) = self.decode_value(record, index, inst_id, state)?;
+                index = next;
+                let predicate = record.operands[index] as u32;
+                index += 1;
+                let flags = record.operands.get(index).copied().unwrap_or(0);
+                let i1 = self.i1_type()?;
+                let kind = if matches!(self.module.types.get(lhs.ty), Type::Float(_)) {
+                    InstKind::FCmp {
+                        pred: fcmp_from_code(predicate)?,
+                        flags: decode_fastmath(flags),
+                        lhs,
+                        rhs,
+                    }
+                } else {
+                    InstKind::ICmp {
+                        pred: icmp_from_code(predicate)?,
+                        lhs,
+                        rhs,
+                    }
+                };
+                Ok((kind, Some(i1)))
+            }
+            FUNC_INST_ALLOCA => {
+                let elem_ty = self.type_at(record.operands[0])?;
+                let size_value = record.operands[2] as u32;
+                let size = self.resolve_value(state, size_value)?;
+                let count = match size.kind {
+                    OperandKind::Const(id)
+                        if self.module.constant(id).kind == ConstKind::Int(1) =>
+                    {
+                        None
+                    }
+                    _ => Some(size),
+                };
+                let packed = record.operands[3];
+                let encoded = (packed & 0x1f) | (((packed >> 8) & 0x7) << 5);
+                let align = if encoded == 0 {
+                    None
+                } else {
+                    Some(1u64 << (encoded - 1))
+                };
+                let ptr = self.ptr_type()?;
+                Ok((
+                    InstKind::Alloca {
+                        elem_ty,
+                        count,
+                        align,
+                    },
+                    Some(ptr),
+                ))
+            }
+            FUNC_INST_LOAD => {
+                let (ptr, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let ty = self.type_at(record.operands[index])?;
+                index += 1;
+                let align = decode_align(record.operands[index]);
+                index += 1;
+                let volatile = record.operands.get(index).copied().unwrap_or(0) != 0;
+                Ok((
+                    InstKind::Load {
+                        ty,
+                        ptr,
+                        align,
+                        volatile,
+                    },
+                    Some(ty),
+                ))
+            }
+            FUNC_INST_STORE => {
+                let (ptr, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (value, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                let align = decode_align(record.operands[index]);
+                index += 1;
+                let volatile = record.operands.get(index).copied().unwrap_or(0) != 0;
+                Ok((
+                    InstKind::Store {
+                        value,
+                        ptr,
+                        align,
+                        volatile,
+                    },
+                    None,
+                ))
+            }
+            other => self.decode_instruction_rest(other, record, inst_id, state),
+        }
+    }
+
+    fn decode_instruction_rest(
+        &mut self,
+        code: u64,
+        record: &Record,
+        inst_id: u32,
+        state: &FuncState,
+    ) -> Result<(InstKind, Option<TypeId>)> {
+        match code {
+            FUNC_INST_GEP => {
+                let inbounds = record.operands.first().copied().unwrap_or(0) & 1 != 0;
+                let source_ty = self.type_at(record.operands[1])?;
+                let (ptr, mut index) = self.decode_typed_value(record, 2, inst_id, state)?;
+                let mut indices = Vec::new();
+                while index < record.operands.len() {
+                    let (value, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                    indices.push(llvm_rust_ir::GepIndex {
+                        ty: value.ty,
+                        value,
+                    });
+                    index = next;
+                }
+                let ptr_ty = self.ptr_type()?;
+                Ok((
+                    InstKind::Gep {
+                        inbounds,
+                        source_ty,
+                        ptr,
+                        indices,
+                    },
+                    Some(ptr_ty),
+                ))
+            }
+            FUNC_INST_CALL => {
+                let mut index = 1;
+                let flags = record.operands.get(index).copied().unwrap_or(0);
+                index += 1;
+                let fmf = if flags & (1 << 17) != 0 {
+                    let value = record.operands.get(index).copied().unwrap_or(0);
+                    index += 1;
+                    decode_fastmath(value)
+                } else {
+                    FastMath::default()
+                };
+                let fn_ty = self.type_at(record.operands[index])?;
+                index += 1;
+                let (callee, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                let (ret_ty, fixed, varargs) = match self.module.types.get(fn_ty) {
+                    Type::Function {
+                        ret,
+                        params,
+                        varargs,
+                    } => (*ret, params.len(), *varargs),
+                    _ => return Err(Error::bitcode("call with a non-function type")),
+                };
+                let mut args = Vec::new();
+                for _ in 0..fixed {
+                    let (arg, next) = self.decode_value(record, index, inst_id, state)?;
+                    args.push(arg);
+                    index = next;
+                }
+                if varargs {
+                    while index < record.operands.len() {
+                        let (arg, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                        args.push(arg);
+                        index = next;
+                    }
+                }
+                let tail = if flags & 1 != 0 {
+                    TailKind::Tail
+                } else if flags & (1 << 14) != 0 {
+                    TailKind::MustTail
+                } else if flags & (1 << 16) != 0 {
+                    TailKind::NoTail
+                } else {
+                    TailKind::None
+                };
+                let result = if self.module.types.get(ret_ty).is_void() {
+                    None
+                } else {
+                    Some(ret_ty)
+                };
+                Ok((
+                    InstKind::Call {
+                        tail,
+                        ret_ty,
+                        fn_ty,
+                        callee,
+                        args,
+                        fastmath: fmf,
+                        attrs: Vec::new(),
+                    },
+                    result,
+                ))
+            }
+            FUNC_INST_PHI => {
+                let ty = self.type_at(record.operands[0])?;
+                let mut incoming = Vec::new();
+                let mut index = 1;
+                while index + 1 < record.operands.len() {
+                    let diff = decode_signed(record.operands[index]);
+                    index += 1;
+                    let block = self.block_at(state, record.operands[index] as usize)?;
+                    index += 1;
+                    let value = (inst_id as i64 - diff) as u32;
+                    let value = self.resolve_value(state, value)?;
+                    incoming.push((value, block));
+                }
+                Ok((InstKind::Phi { incoming }, Some(ty)))
+            }
+            FUNC_INST_VSELECT | FUNC_INST_SELECT_OLD => {
+                let (on_true, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (on_false, next) = self.decode_value(record, index, inst_id, state)?;
+                index = next;
+                let (cond, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                let flags = record.operands.get(index).copied().unwrap_or(0);
+                Ok((
+                    InstKind::Select {
+                        cond,
+                        on_true,
+                        on_false,
+                        fastmath: decode_fastmath(flags),
+                    },
+                    Some(on_true.ty),
+                ))
+            }
+            FUNC_INST_CAST => {
+                let (value, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let to = self.type_at(record.operands[index])?;
+                index += 1;
+                let opcode = record.operands[index] as u32;
+                Ok((
+                    InstKind::Cast {
+                        op: cast_from_code(opcode)?,
+                        value,
+                        to,
+                    },
+                    Some(to),
+                ))
+            }
+            FUNC_INST_RET => {
+                if record.operands.is_empty() {
+                    Ok((InstKind::Ret { value: None }, None))
+                } else {
+                    let (value, _) = self.decode_typed_value(record, 0, inst_id, state)?;
+                    Ok((InstKind::Ret { value: Some(value) }, None))
+                }
+            }
+            FUNC_INST_BR => {
+                if record.operands.len() == 1 {
+                    let dest = self.block_at(state, record.operands[0] as usize)?;
+                    Ok((InstKind::Br { dest }, None))
+                } else {
+                    let then_block = self.block_at(state, record.operands[0] as usize)?;
+                    let else_block = self.block_at(state, record.operands[1] as usize)?;
+                    let (cond, _) = self.decode_value(record, 2, inst_id, state)?;
+                    Ok((
+                        InstKind::CondBr {
+                            cond,
+                            then_block,
+                            else_block,
+                        },
+                        None,
+                    ))
+                }
+            }
+            FUNC_INST_SWITCH => {
+                let value_ty = self.type_at(record.operands[0])?;
+                let (value, mut index) = self.decode_value(record, 1, inst_id, state)?;
+                let default = self.block_at(state, record.operands[index] as usize)?;
+                index += 1;
+                let mut cases = Vec::new();
+                while index + 1 < record.operands.len() {
+                    let case = self.resolve_const_state(record.operands[index] as u32, state)?;
+                    index += 1;
+                    let block = self.block_at(state, record.operands[index] as usize)?;
+                    index += 1;
+                    cases.push((case, block));
+                }
+                Ok((
+                    InstKind::Switch {
+                        value,
+                        default,
+                        cases,
+                    },
+                    None,
+                ))
+                .map(|(kind, ty)| {
+                    let _ = value_ty;
+                    (kind, ty)
+                })
+            }
+            FUNC_INST_UNREACHABLE => Ok((InstKind::Unreachable, None)),
+            other => Err(Error::bitcode(format!(
+                "unsupported instruction code {other}"
+            ))),
+        }
+    }
+
+    fn resolve_const_state(&mut self, value: u32, state: &FuncState) -> Result<ConstId> {
+        if (value as usize) < self.values.len() {
+            return self.resolve_const(value);
+        }
+        let index = (value - state.base) as usize;
+        match state.locals.get(index).copied() {
+            Some(LocalRef::Constant(id)) => Ok(id),
+            _ => Err(Error::bitcode(format!("unknown switch constant {value}"))),
+        }
+    }
+
+    fn block_at(&self, state: &FuncState, index: usize) -> Result<BlockId> {
+        state
+            .blocks
+            .get(index)
+            .copied()
+            .ok_or_else(|| Error::bitcode(format!("unknown basic block {index}")))
+    }
+
+    fn i1_type(&self) -> Result<TypeId> {
+        self.module
+            .types
+            .iter()
+            .find_map(|(id, ty)| match ty {
+                Type::Int(1) => Some(id),
+                _ => None,
+            })
+            .ok_or_else(|| Error::bitcode("module has no i1 type"))
+    }
+
+    fn ptr_type(&self) -> Result<TypeId> {
+        self.module
+            .types
+            .iter()
+            .find_map(|(id, ty)| match ty {
+                Type::Pointer => Some(id),
+                _ => None,
+            })
+            .ok_or_else(|| Error::bitcode("module has no pointer type"))
+    }
+}
+
+fn binop_from_code(code: u32, is_float: bool) -> Result<BinOp> {
+    Ok(match (code, is_float) {
+        (0, false) => BinOp::Add,
+        (1, false) => BinOp::Sub,
+        (2, false) => BinOp::Mul,
+        (3, false) => BinOp::UDiv,
+        (4, false) => BinOp::SDiv,
+        (5, false) => BinOp::URem,
+        (6, false) => BinOp::SRem,
+        (7, false) => BinOp::Shl,
+        (8, false) => BinOp::LShr,
+        (9, false) => BinOp::AShr,
+        (10, false) => BinOp::And,
+        (11, false) => BinOp::Or,
+        (12, false) => BinOp::Xor,
+        (0, true) => BinOp::FAdd,
+        (1, true) => BinOp::FSub,
+        (2, true) => BinOp::FMul,
+        (4, true) => BinOp::FDiv,
+        (6, true) => BinOp::FRem,
+        _ => return Err(Error::bitcode(format!("unknown binary operator {code}"))),
+    })
+}
+
+fn cast_from_code(code: u32) -> Result<CastOp> {
+    Ok(match code {
+        0 => CastOp::Trunc,
+        1 => CastOp::ZExt,
+        2 => CastOp::SExt,
+        3 => CastOp::FPToUI,
+        4 => CastOp::FPToSI,
+        5 => CastOp::UIToFP,
+        6 => CastOp::SIToFP,
+        7 => CastOp::FPTrunc,
+        8 => CastOp::FPExt,
+        9 => CastOp::PtrToInt,
+        10 => CastOp::IntToPtr,
+        11 => CastOp::BitCast,
+        12 => CastOp::AddrSpaceCast,
+        _ => return Err(Error::bitcode(format!("unknown cast operator {code}"))),
+    })
+}
+
+fn icmp_from_code(code: u32) -> Result<IcmpPred> {
+    Ok(match code {
+        32 => IcmpPred::Eq,
+        33 => IcmpPred::Ne,
+        34 => IcmpPred::Ugt,
+        35 => IcmpPred::Uge,
+        36 => IcmpPred::Ult,
+        37 => IcmpPred::Ule,
+        38 => IcmpPred::Sgt,
+        39 => IcmpPred::Sge,
+        40 => IcmpPred::Slt,
+        41 => IcmpPred::Sle,
+        _ => return Err(Error::bitcode(format!("unknown icmp predicate {code}"))),
+    })
+}
+
+fn fcmp_from_code(code: u32) -> Result<FcmpPred> {
+    Ok(match code {
+        0 => FcmpPred::False,
+        1 => FcmpPred::Oeq,
+        2 => FcmpPred::Ogt,
+        3 => FcmpPred::Oge,
+        4 => FcmpPred::Olt,
+        5 => FcmpPred::Ole,
+        6 => FcmpPred::One,
+        7 => FcmpPred::Ord,
+        8 => FcmpPred::Uno,
+        9 => FcmpPred::Ueq,
+        10 => FcmpPred::Ugt,
+        11 => FcmpPred::Uge,
+        12 => FcmpPred::Ult,
+        13 => FcmpPred::Ule,
+        14 => FcmpPred::Une,
+        15 => FcmpPred::True,
+        _ => return Err(Error::bitcode(format!("unknown fcmp predicate {code}"))),
+    })
+}
+
+fn decode_fastmath(bits: u64) -> FastMath {
+    if bits & 0xfe == 0xfe {
+        return FastMath {
+            fast: true,
+            ..FastMath::default()
+        };
+    }
+    FastMath {
+        fast: false,
+        nnan: bits & (1 << 1) != 0,
+        ninf: bits & (1 << 2) != 0,
+        nsz: bits & (1 << 3) != 0,
+        arcp: bits & (1 << 4) != 0,
+        contract: bits & (1 << 5) != 0,
+        afn: bits & (1 << 6) != 0,
+        reassoc: bits & (1 << 7) != 0,
+    }
+}
+
+fn decode_signed(value: u64) -> i64 {
+    if value & 1 == 0 {
+        (value >> 1) as i64
+    } else if value == 1 {
+        i64::MIN
+    } else {
+        -((value >> 1) as i64)
+    }
+}
+
+fn decode_linkage(value: u64) -> Linkage {
+    match value {
+        0 => Linkage::External,
+        2 => Linkage::Appending,
+        3 => Linkage::Internal,
+        7 => Linkage::ExternWeak,
+        8 => Linkage::Common,
+        9 => Linkage::Private,
+        12 => Linkage::AvailableExternally,
+        16 => Linkage::Weak,
+        17 => Linkage::WeakOdr,
+        18 => Linkage::LinkOnce,
+        19 => Linkage::LinkOnceOdr,
+        _ => Linkage::External,
+    }
+}
+
+fn decode_visibility(value: u64) -> Visibility {
+    match value {
+        1 => Visibility::Hidden,
+        2 => Visibility::Protected,
+        _ => Visibility::Default,
+    }
+}
+
+fn decode_align(value: u64) -> Option<u64> {
+    if value == 0 {
+        None
+    } else {
+        Some(1u64 << (value - 1))
+    }
+}
+
+fn bytes_to_string(bytes: &[u64]) -> String {
+    bytes.iter().map(|b| *b as u8 as char).collect()
+}

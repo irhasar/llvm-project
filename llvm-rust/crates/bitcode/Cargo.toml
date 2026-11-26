@@ -1,0 +1,12 @@
+[package]
+name = "llvm-rust-bitcode"
+description = "LLVM bitstream and bitcode reader/writer for the Rust LLVM core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+llvm-rust-support.workspace = true
+llvm-rust-ir.workspace = true

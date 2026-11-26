@@ -1,0 +1,25 @@
+[package]
+name = "llvm-rust-tools"
+description = "llvm-as and llvm-dis equivalents for the Rust LLVM core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+llvm-rust-support.workspace = true
+llvm-rust-ir.workspace = true
+llvm-rust-bitcode.workspace = true
+
+[[bin]]
+name = "llvm-as-rust"
+path = "src/bin/llvm-as.rs"
+
+[[bin]]
+name = "llvm-dis-rust"
+path = "src/bin/llvm-dis.rs"
+
+[[bin]]
+name = "llvm-rust-bench"
+path = "src/bin/bench.rs"
