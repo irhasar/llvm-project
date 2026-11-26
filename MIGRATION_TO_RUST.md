@@ -66,7 +66,12 @@ Non-goals (for now):
   relink dependents,
 * stages a restorable `copy_if_different` archive that Make can recreate
   without rerunning Cargo,
-* exposes the archive as a `STATIC IMPORTED` target that components link.
+* exposes the archive as a `STATIC IMPORTED` target that components link,
+* on Ninja, records the archive in `INTERFACE_LINK_DEPENDS` instead of adding a
+  target-level dependency. CMake otherwise makes every C++ object in a
+  consumer wait for Cargo; the link-only form lets Cargo overlap the C++
+  compile. Makefile and IDE generators keep the target dependency, and
+  `install-<component>` depends on the archive.
 
 Crates live next to the component they replace
 (`llvm/lib/<Component>/rust/<crate>/`), and their `Cargo.lock` is committed.
@@ -276,6 +281,15 @@ sum:
 | C++ wrapper (Rust ON) | clean | 622.39 (611.92-626.95) | 527.30 (516.38-535.37) | 89.43 (85.81-106.91) | 126.44 (126.28-126.50) | 13,352 |
 | Rust total | clean | 828.06 (815.14-834.67) | 657.48 | 167.93 | 126.44 (126.28-126.50) | 5,056,024 + 13,352 |
 | Rust total | incremental | 800.02 (787.52-808.67) | 652.69 | 143.36 | 126.44 (126.28-126.50) | 5,056,024 + 13,352 |
+
+Those totals add separate process wall times. The Ninja graph does not
+serialize them: with the link-only dependency, Cargo overlaps the C++ compile
+and link. Rebuilding `llvm-min-tblgen` after touching `NativeFormatting.cpp`
+and the crate measured 1.015/1.003/0.997 s with Rust against
+1.004/1.003/0.985 s with C++ (three runs each), i.e. parity and inside the 10%
+compile gate for this incremental consumer rebuild. The process sum above is
+retained as the worst-case cost; a full clean `LLVMSupport` rebuild was not
+run.
 
 `AddRustLibrary` strips debug sections from the staged copy with
 `strip --strip-debug`, reducing the 5,056,024-byte archive to 2,522,592 bytes.

@@ -79,6 +79,10 @@ Every crate under `llvm/lib/*/rust/` follows the same rules:
   function/body is replaced; buffering and padding stay in C++.
 - Each component has its own `LLVM_ENABLE_RUST_<COMPONENT>` switch, default
   `OFF`, and `Cargo.lock` is committed.
+- `AddRustLibrary` uses `INTERFACE_LINK_DEPENDS` on Ninja. Do not replace it
+  with `add_dependencies` on the imported archive: CMake then makes every C++
+  object in a consumer wait for Cargo. Makefile and IDE generators keep the
+  target-level dependency.
 - Release staticlibs use fat LTO and one codegen unit. Small standalone Rust
   binaries use LTO off; larger ones try thin LTO first. Development and test
   builds use the incremental dev profile. See `MIGRATION_TO_RUST.md` for the
