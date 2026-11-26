@@ -15,4 +15,8 @@ endif()
 
 if(NOT old STREQUAL hash)
   file(WRITE "${STAMP}" "${hash}\n")
+else()
+  # Keep the content stamp newer than the build stamp when the archive bytes
+  # did not change; otherwise Make rehashes on every subsequent build.
+  file(TOUCH "${STAMP}")
 endif()

@@ -147,6 +147,15 @@ function(add_llvm_rust_staticlib name manifest)
   add_custom_target(${name}-rust DEPENDS "${build_stamp}" "${content_stamp}" "${staged}")
   add_library(${name} STATIC IMPORTED GLOBAL)
   set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${staged}")
+
+  # A static component archives its C++ objects without a final link, so the
+  # archive has to be staged by an explicit component target before a direct
+  # `cmake --install --component <component>` can copy it.
+  if(NOT TARGET ${ARG_INSTALL_COMPONENT}-rust)
+    add_custom_target(${ARG_INSTALL_COMPONENT}-rust)
+  endif()
+  add_dependencies(${ARG_INSTALL_COMPONENT}-rust ${name}-rust)
+
   # A target-level dependency makes every object file in a consumer wait for
   # Cargo, because CMake adds it to the consumer's object order-only
   # dependencies. The archive is already a link input, so Ninja can use a
@@ -155,14 +164,20 @@ function(add_llvm_rust_staticlib name manifest)
   # they keep the target-level dependency.
   if(CMAKE_GENERATOR MATCHES "Ninja")
     set_property(TARGET ${name} PROPERTY INTERFACE_LINK_DEPENDS "${staged}")
-    if(TARGET install)
-      add_dependencies(install ${name}-rust)
-    endif()
-    if(TARGET install-${ARG_INSTALL_COMPONENT})
-      add_dependencies(install-${ARG_INSTALL_COMPONENT} ${name}-rust)
-    endif()
   else()
     add_dependencies(${name} ${name}-rust)
+  endif()
+
+  # Both install variants build the owning component, but a static component
+  # does not link the Rust archive. Make them stage it explicitly.
+  if(TARGET install)
+    add_dependencies(install ${ARG_INSTALL_COMPONENT}-rust)
+  endif()
+  if(TARGET install-${ARG_INSTALL_COMPONENT})
+    add_dependencies(install-${ARG_INSTALL_COMPONENT} ${ARG_INSTALL_COMPONENT}-rust)
+  endif()
+  if(TARGET install-${ARG_INSTALL_COMPONENT}-stripped)
+    add_dependencies(install-${ARG_INSTALL_COMPONENT}-stripped ${ARG_INSTALL_COMPONENT}-rust)
   endif()
 
   # The archive belongs to the owning component's install component so that

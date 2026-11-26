@@ -489,7 +489,9 @@ grep -q 'srcinst: 2, srcop: 0' /tmp/dbg.out.mir # ADD debug ref remapped
 g++ prog.cpp $(build/bin/llvm-config --cxxflags --ldflags --libs \
   --system-libs support)
 
-# A component install has to carry the Rust archives too.
+# A component install has to carry the Rust archives too. A static component
+# does not link them, so build the aggregate first for a direct install.
+ninja -C build LLVMSupport LLVMSupport-rust LLVMDemangle LLVMDemangle-rust
 cmake --install build --prefix /tmp/llvminst --component LLVMSupport
 cmake --install build --prefix /tmp/llvminst --component LLVMDemangle
 

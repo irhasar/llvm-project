@@ -70,8 +70,14 @@ Non-goals (for now):
 * on Ninja, records the archive in `INTERFACE_LINK_DEPENDS` instead of adding a
   target-level dependency. CMake otherwise makes every C++ object in a
   consumer wait for Cargo; the link-only form lets Cargo overlap the C++
-  compile. Makefile and IDE generators keep the target dependency, and
-  `install-<component>` depends on the archive.
+  compile. Makefile and IDE generators keep the target dependency.
+* stages the archive from both `install-<component>` and
+  `install-<component>-stripped`, and provides `<component>-rust` for direct
+  `cmake --install` users. A static component archives its C++ objects without
+  a final link, so build both `<component>` and `<component>-rust` before a
+  direct component install.
+* touches the content stamp when the archive hash is unchanged, so Make does
+  not rehash the archive on every build after a Cargo run with identical output.
 
 Crates live next to the component they replace
 (`llvm/lib/<Component>/rust/<crate>/`), and their `Cargo.lock` is committed.
@@ -285,11 +291,16 @@ sum:
 Those totals add separate process wall times. The Ninja graph does not
 serialize them: with the link-only dependency, Cargo overlaps the C++ compile
 and link. Rebuilding `llvm-min-tblgen` after touching `NativeFormatting.cpp`
-and the crate measured 1.015/1.003/0.997 s with Rust against
-1.004/1.003/0.985 s with C++ (three runs each), i.e. parity and inside the 10%
-compile gate for this incremental consumer rebuild. The process sum above is
-retained as the worst-case cost; a full clean `LLVMSupport` rebuild was not
-run.
+and the crate, five runs pinned to CPU set 0-3, measured:
+
+| Backend | Runs (s) | Median |
+|---------|----------|--------|
+| C++ | 1.025 / 1.008 / 1.028 / 1.026 / 1.014 | 1.025 |
+| Rust | 1.006 / 1.030 / 1.015 / 1.057 / 1.029 | 1.029 |
+
+That is parity and inside the 10% compile gate for this incremental consumer
+rebuild. The process sum above is retained as the worst-case cost; a full
+clean `LLVMSupport` rebuild was not run.
 
 `AddRustLibrary` strips debug sections from the staged copy with
 `strip --strip-debug`, reducing the 5,056,024-byte archive to 2,522,592 bytes.
@@ -464,9 +475,11 @@ A local configure with only `LLVM_ENABLE_RUST_RUSTDEMANGLE=ON` produced
 `LLVM_SYSTEM_LIBS = "-lrt -ldl -lm -lllvm_rustdemangle"`. The
 `llvm-rust-rustdemangle-differential` and `llvm-rustdemangle-stable` targets
 build without `LLVMSupport`, and `cmake --install --component LLVMDemangle`
-installs both `libLLVMDemangle.a` and `libllvm_rustdemangle.a`. Configuring the
-option `OFF` produces the original system-libs list and the stable test still
-passes against the C++ backend.
+installs both `libLLVMDemangle.a` and `libllvm_rustdemangle.a` after
+`ninja -C build LLVMDemangle LLVMDemangle-rust`; the `install-LLVMDemangle`
+and `install-LLVMDemangle-stripped` targets build that aggregate themselves.
+Configuring the option `OFF` produces the original system-libs list and the
+stable test still passes against the C++ backend.
 
 The second Phase 2 port is `llvm/lib/Demangle/DLangDemangle.cpp`, gated by
 `LLVM_ENABLE_RUST_DLANG` (default `OFF`). The crate lives in
@@ -497,7 +510,9 @@ matching the C++ C-string check.
 The CMake targets build only `LLVMDemangle` and the Rust archive. With the
 option on, `llvm-config --system-libs` gains `-lllvm_dlangdemangle`, and
 `cmake --install --component LLVMDemangle` installs `libllvm_dlangdemangle.a`
-next to `libLLVMDemangle.a`; an install-only downstream consumer links and runs
+next to `libLLVMDemangle.a` after `ninja -C build LLVMDemangle-rust`; the
+`install-LLVMDemangle` and `install-LLVMDemangle-stripped` targets build that
+aggregate themselves. An install-only downstream consumer links and runs
 without the build tree (with the fork's usual placeholders for uninstalled LLVM
 libraries); toolchain-only installs omit the archive with `LLVMDemangle`.
 Configuring `LLVM_ENABLE_RUST_DLANG=OFF` keeps the
