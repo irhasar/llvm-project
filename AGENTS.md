@@ -78,6 +78,10 @@ Every crate under `llvm/lib/*/rust/` follows the same rules:
   function/body is replaced; buffering and padding stay in C++.
 - Each component has its own `LLVM_ENABLE_RUST_<COMPONENT>` switch, default
   `OFF`, and `Cargo.lock` is committed.
+- Release staticlibs use fat LTO and one codegen unit. Small standalone Rust
+  binaries use LTO off; larger ones try thin LTO first. Development and test
+  builds use the incremental dev profile. See `MIGRATION_TO_RUST.md` for the
+  measured rationale.
 
 ## Migration policy (agreed 2026-11-25)
 
@@ -103,16 +107,26 @@ optional and incremental.
   bootstrap problem, not an incremental migration step.
 - A new port ships only if it clears the measurement gate below; otherwise keep
   the C++ implementation. “Rust” is not itself a performance result.
+- Keep the C ABI staticlib as the permanent boundary for existing C++ callers.
+  Pure Rust from the start is for new Rust-only tools, not a replacement for
+  LLVM's C++ entry points. Keep the Rust core safe and the C ABI adapter thin
+  so a future Rust caller can reuse the core without another port.
 
 Gate per component, measured on the same machine and input distribution:
 
 - runtime at least 1.05x faster, or a clearly documented safety/size win;
 - peak RSS no more than 2% higher;
 - compile time no more than 10% higher;
-- archive and linked binary not larger;
+- final linked binary not larger;
 - option `OFF` builds without cargo and stays byte-identical;
 - `cargo test`, differential fuzzing, and golden tests pass with the option
   `ON` and `OFF`.
+
+The Rust staticlib archive is reported separately from the final binary. It
+carries `core`, `compiler_builtins`, and debug sections that the final linker
+removes; `strip --strip-debug` is a release-packaging option. Do not reject a
+component on archive size alone when the linked binary and installed payload
+are not larger.
 
 Record rejected experiments and their numbers in `MIGRATION_TO_RUST.md` so the
 same idea is not retried blindly.

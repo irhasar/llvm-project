@@ -20,6 +20,8 @@ Non-goals (for now):
 * Rewriting the IR, the code generator, or the target backends. Those are
   data-structure-heavy and dominated by C++ template use; they are the last
   candidates, not the first.
+* A whole-LLVM Rust rewrite. The unit of migration is a self-contained
+  component, not the project.
 * Introducing Rust into the bootstrap path. Building LLVM with a Rust compiler
   remains optional.
 * A mixed-language build for downstream consumers that do not opt in.
@@ -59,16 +61,66 @@ Non-goals (for now):
 Crates live next to the component they replace
 (`llvm/lib/<Component>/rust/<crate>/`), and their `Cargo.lock` is committed.
 All crates use edition 2024 (`rust-version = "1.85"`) with `no_std`,
-`panic = "abort"`, LTO and one codegen unit. `rust-toolchain.toml` pins stable
-Rust 1.100.0. CI runs the crate tests, clippy, and rustfmt with both 1.100.0
-and `nightly-2026-11-23`, so nightly compatibility stays visible without making
-nightly the default.
+`panic = "abort"`, fat LTO and one codegen unit for the staticlib. Standalone
+experiments may disable LTO; see the build-mode policy below.
+`rust-toolchain.toml` pins stable Rust 1.100.0. CI runs the crate tests,
+clippy, and rustfmt with both 1.100.0 and `nightly-2026-11-23`, so nightly
+compatibility stays visible without making nightly the default.
 Each component is gated behind its own `LLVM_ENABLE_RUST_<COMPONENT>` option,
 defaulting to `OFF`.
 
 Known limitation: cross-compiling needs an explicit `--target` mapping that the
 helper does not implement yet. Until then, Rust ports are only built for
 native configurations.
+
+## Direction and build-mode policy
+
+The crates are already pure Rust. The C ABI staticlib is only the integration
+boundary with LLVM's C++ callers, not a temporary half-Rust implementation.
+The direction is therefore not "pure Rust versus wrapper" inside a crate, but
+"who calls the crate":
+
+* LLVM C++ integration keeps the C ABI staticlib. Treat that boundary as
+  permanent: C++ owns the public API, ABI, and memory; Rust owns the leaf
+  algorithm.
+* Pure Rust from the start is for new tools or libraries whose callers are all
+  Rust. It is not a way to replace an existing C++ entry point.
+* A later Rust-only caller is possible without rewriting the algorithm: keep
+  the core in safe Rust and keep the C ABI adapter thin. Do not put logic in the
+  C++ wrapper, and do not leak LLVM types into the core.
+* Do not port a component until its ownership, error, and allocation rules fit
+  the C ABI. Object readers, IR, and codegen are not leaf components.
+
+Build modes by artifact:
+
+| Artifact | Release profile | LTO | codegen-units | incremental |
+| --- | --- | --- | --- | --- |
+| LLVM staticlib | `opt-level=3`, `panic=abort` | fat | 1 | off |
+| Small Rust standalone | `opt-level=3` | off | 1 | off |
+| Large Rust standalone | `opt-level=3` | thin first, fat if measured | 1 | off |
+| Development/test | dev profile | off | default | on |
+
+LTO on the staticlib reduced the measured archive from about 8.1 MiB to
+5.05 MiB without changing measured runtime; disabling it makes the archive
+larger. For standalone binaries the opposite holds: LTO rebuilds the standard
+library at link time and raised the VersionTuple build from about 0.23 s to
+2.55 s with no runtime gain. Do not use one profile for both artifact types.
+
+Archive size is not binary size. A Rust staticlib carries `core`,
+`compiler_builtins`, and debug sections; the linker removes unused members from
+the final binary. Compare final linked binaries and installed payloads first,
+and report the archive separately. For release packaging, consider
+`strip --strip-debug` on the Rust archive; it reduced the VersionTuple archive
+from 5.05 MiB to 2.52 MiB and still linked a 25.6 KiB wrapper binary.
+`compiler_builtins` is Rust's `libgcc`/`compiler-rt` equivalent and cannot be
+dropped blindly.
+
+The measurement gate follows that distinction: runtime, peak RSS, compile time,
+and final linked binary remain per-component gates; archive and install payload
+are recorded and reviewed separately. A component that is larger only as an
+archive, but not in the final binary, is not rejected on the archive number
+alone. Keep every `LLVM_ENABLE_RUST_*` option default `OFF` with the C++
+fallback available.
 
 ## Phases
 
@@ -1039,3 +1091,13 @@ keeps every step of the migration reversible.
    `llvm-config`. `LLVMDemangle` now owns `libllvm_rustdemangle.a` and
    `libllvm_dlangdemangle.a`; follow the same per-component install pattern for
    the remaining ports.
+7. Standardize new crates on a safe Rust core plus a thin C ABI adapter. Keep
+   the C++ wrapper free of algorithm logic so a future Rust caller can use the
+   core directly without a second port.
+8. Apply the artifact-specific build modes above. Use fat LTO for staticlibs,
+   disable LTO for small standalone binaries, and evaluate thin LTO before fat
+   LTO for the larger crates when compile time is the constraint.
+9. Record final linked binary and installed payload alongside the Rust archive;
+   use `strip --strip-debug` for release packaging when debug information is not
+   required. Do not reject a staticlib only because it carries
+   `compiler_builtins` and `core` members that the final linker removes.
