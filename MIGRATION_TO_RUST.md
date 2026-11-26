@@ -65,7 +65,9 @@ Non-goals (for now):
 * records the staged archive hash separately, so unchanged content does not
   relink dependents,
 * stages a restorable `copy_if_different` archive that Make can recreate
-  without rerunning Cargo,
+  without rerunning Cargo. A staging stamp records the copy run, so a
+  byte-identical Cargo rebuild does not recopy on later builds; a Make target
+  restores a deleted staged archive without hashing it.
 * exposes the archive as a `STATIC IMPORTED` target that components link,
 * on Ninja, records the archive in `INTERFACE_LINK_DEPENDS` instead of adding a
   target-level dependency. CMake otherwise makes every C++ object in a
@@ -295,8 +297,8 @@ and the crate, five runs pinned to CPU set 0-3, measured:
 
 | Backend | Runs (s) | Median |
 |---------|----------|--------|
-| C++ | 1.025 / 1.008 / 1.028 / 1.026 / 1.014 | 1.025 |
-| Rust | 1.006 / 1.030 / 1.015 / 1.057 / 1.029 | 1.029 |
+| C++ | 1.029 / 1.013 / 1.000 / 0.993 / 1.005 | 1.005 |
+| Rust | 1.003 / 0.999 / 0.998 / 1.017 / 1.048 | 1.003 |
 
 That is parity and inside the 10% compile gate for this incremental consumer
 rebuild. The process sum above is retained as the worst-case cost; a full
@@ -510,9 +512,10 @@ matching the C++ C-string check.
 The CMake targets build only `LLVMDemangle` and the Rust archive. With the
 option on, `llvm-config --system-libs` gains `-lllvm_dlangdemangle`, and
 `cmake --install --component LLVMDemangle` installs `libllvm_dlangdemangle.a`
-next to `libLLVMDemangle.a` after `ninja -C build LLVMDemangle-rust`; the
-`install-LLVMDemangle` and `install-LLVMDemangle-stripped` targets build that
-aggregate themselves. An install-only downstream consumer links and runs
+next to `libLLVMDemangle.a` after `ninja -C build LLVMDemangle
+LLVMDemangle-rust`; the `install-LLVMDemangle` and
+`install-LLVMDemangle-stripped` targets build that aggregate themselves. An
+install-only downstream consumer links and runs
 without the build tree (with the fork's usual placeholders for uninstalled LLVM
 libraries); toolchain-only installs omit the archive with `LLVMDemangle`.
 Configuring `LLVM_ENABLE_RUST_DLANG=OFF` keeps the

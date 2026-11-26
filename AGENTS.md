@@ -83,6 +83,9 @@ Every crate under `llvm/lib/*/rust/` follows the same rules:
   with `add_dependencies` on the imported archive: CMake then makes every C++
   object in a consumer wait for Cargo. Makefile and IDE generators keep the
   target-level dependency.
+- The staged archive is a byproduct of the staging-stamp rule. Keep the stamp;
+  making the archive itself the rule output makes Make recopy it every build
+  after a byte-identical Cargo rebuild.
 - Release staticlibs use fat LTO and one codegen unit. Small standalone Rust
   binaries use LTO off; larger ones try thin LTO first. Development and test
   builds use the incremental dev profile. See `MIGRATION_TO_RUST.md` for the

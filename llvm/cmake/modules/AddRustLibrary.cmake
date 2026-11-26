@@ -116,8 +116,10 @@ function(add_llvm_rust_staticlib name manifest)
   set(content_stamp "${target_dir}/content.stamp")
   if(CMAKE_CURRENT_FUNCTION_LIST_DIR)
     set(archive_stamp_script "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RustArchiveStamp.cmake")
+    set(ensure_staged_script "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RustEnsureStaged.cmake")
   else()
     set(archive_stamp_script "${CMAKE_CURRENT_LIST_DIR}/RustArchiveStamp.cmake")
+    set(ensure_staged_script "${CMAKE_CURRENT_LIST_DIR}/RustEnsureStaged.cmake")
   endif()
 
   add_custom_command(OUTPUT "${build_stamp}"
@@ -138,13 +140,30 @@ function(add_llvm_rust_staticlib name manifest)
     COMMENT "Checking Rust archive ${name}"
     VERBATIM)
 
-  add_custom_command(OUTPUT "${staged}"
+  # A staging stamp records that the copy command ran even when
+  # copy_if_different left the archive untouched. Without it Make reruns the
+  # staging rule on every build after a byte-identical Cargo rebuild.
+  set(staged_stamp "${target_dir}/staged-$<CONFIG>.stamp")
+  add_custom_command(OUTPUT "${staged_stamp}"
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${staging_source}" "${staged}"
+    COMMAND "${CMAKE_COMMAND}" -E touch "${staged_stamp}"
+    BYPRODUCTS "${staged}"
     DEPENDS "${content_stamp}"
     COMMENT "Staging Rust archive ${name}"
     VERBATIM)
 
-  add_custom_target(${name}-rust DEPENDS "${build_stamp}" "${content_stamp}" "${staged}")
+  if(CMAKE_GENERATOR MATCHES "Ninja")
+    add_custom_target(${name}-rust DEPENDS
+      "${build_stamp}" "${content_stamp}" "${staged_stamp}" "${staged}")
+  else()
+    # Make has no byproduct rule for a deleted staged archive. The target
+    # command restores it without hashing or copying an existing archive.
+    add_custom_target(${name}-rust
+      COMMAND "${CMAKE_COMMAND}" "-DSRC=${staging_source}" "-DDST=${staged}"
+              -P "${ensure_staged_script}"
+      DEPENDS "${build_stamp}" "${content_stamp}" "${staged_stamp}"
+      VERBATIM)
+  endif()
   add_library(${name} STATIC IMPORTED GLOBAL)
   set_target_properties(${name} PROPERTIES IMPORTED_LOCATION "${staged}")
 
