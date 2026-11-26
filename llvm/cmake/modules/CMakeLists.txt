@@ -21,7 +21,7 @@ endfunction()
 # a comma (or another separator) in the prefix cannot truncate a location.
 function(llvm_record_rust_imported_directory library_dir)
   if(CMAKE_CONFIGURATION_TYPES)
-    string(REPLACE "${CMAKE_CFG_INTDIR}" "__LLVM_RUST_CONFIG__"
+    string(REPLACE "${CMAKE_CFG_INTDIR}" "__LLVM_RUST_CONFIG_6F3A1C9D__"
       library_dir "${library_dir}")
     set(LLVM_CONFIG_RUST_CONFIGURATIONS "${CMAKE_CONFIGURATION_TYPES}")
   else()
@@ -34,7 +34,7 @@ endfunction()
 
 set(LLVM_CONFIG_RUST_SUPPORT_PORTS
   SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF CONVERTEBCDIC XXHASH DJB
-  VERSIONTUPLE OPTIONSTRCMP)
+  VERSIONTUPLE OPTIONSTRCMP NATIVEFORMATTING)
 
 # CMAKE_INSTALL_PACKAGEDIR might be absolute, so don't reuse below.
 string(REPLACE "${CMAKE_CFG_INTDIR}" "." llvm_cmake_builddir "${LLVM_LIBRARY_DIR}")

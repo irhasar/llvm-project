@@ -7,8 +7,9 @@
 //===----------------------------------------------------------------------===//
 //
 // The production VersionTuple.cpp also defines getAsString and operator<<,
-// which need LLVMSupport. The differential target deliberately does not link
-// LLVMSupport, so this file carries the original parse implementation alone.
+// so the differential target links LLVMSupport. This file carries the original
+// parse implementation as a free function so it does not collide with the
+// public VersionTuple::tryParse being measured.
 //
 //===----------------------------------------------------------------------===//
 
@@ -41,14 +42,14 @@ static bool parseInt(StringRef &Input, unsigned &Value) {
   return false;
 }
 
-bool VersionTuple::tryParse(StringRef Input) {
+bool referenceTryParse(StringRef Input, VersionTuple &V) {
   unsigned Major = 0, Minor = 0, Subminor = 0, Build = 0, Subbuild = 0;
 
   if (parseInt(Input, Major))
     return true;
 
   if (Input.empty()) {
-    *this = VersionTuple(Major);
+    V = VersionTuple(Major);
     return false;
   }
 
@@ -59,7 +60,7 @@ bool VersionTuple::tryParse(StringRef Input) {
     return true;
 
   if (Input.empty()) {
-    *this = VersionTuple(Major, Minor);
+    V = VersionTuple(Major, Minor);
     return false;
   }
 
@@ -69,7 +70,7 @@ bool VersionTuple::tryParse(StringRef Input) {
     return true;
 
   if (Input.empty()) {
-    *this = VersionTuple(Major, Minor, Subminor);
+    V = VersionTuple(Major, Minor, Subminor);
     return false;
   }
 
@@ -81,7 +82,7 @@ bool VersionTuple::tryParse(StringRef Input) {
     return true;
 
   if (Input.empty()) {
-    *this = VersionTuple(Major, Minor, Subminor, Build);
+    V = VersionTuple(Major, Minor, Subminor, Build);
     return false;
   }
 
@@ -95,6 +96,6 @@ bool VersionTuple::tryParse(StringRef Input) {
   if (!Input.empty())
     return true;
 
-  *this = VersionTuple(Major, Minor, Subminor, Build, Subbuild);
+  V = VersionTuple(Major, Minor, Subminor, Build, Subbuild);
   return false;
 }

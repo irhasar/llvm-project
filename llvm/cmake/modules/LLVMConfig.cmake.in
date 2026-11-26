@@ -232,7 +232,7 @@ foreach(_llvm_rust_entry IN LISTS _llvm_rust_imported_targets)
       string(TOUPPER "${_llvm_rust_config}" _llvm_rust_config_upper)
       set(_llvm_rust_location
         "${_llvm_rust_library_dir}/${_llvm_rust_library}")
-      string(REPLACE "__LLVM_RUST_CONFIG__" "${_llvm_rust_config}"
+      string(REPLACE "__LLVM_RUST_CONFIG_6F3A1C9D__" "${_llvm_rust_config}"
         _llvm_rust_location "${_llvm_rust_location}")
       set_property(TARGET ${_llvm_rust_target} APPEND PROPERTY
         IMPORTED_CONFIGURATIONS "${_llvm_rust_config_upper}")

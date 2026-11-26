@@ -110,6 +110,11 @@ larger. For standalone binaries the opposite holds: LTO rebuilds the standard
 library at link time and raised the VersionTuple build from about 0.23 s to
 2.55 s with no runtime gain. Do not use one profile for both artifact types.
 
+Full LLVM LTO is not supported yet: linking the C++ objects and the Rust archive
+with fat LTO fails on the undefined `rust_eh_personality` symbol. Thin LTO links
+and was measured on the NativeFormatting archive. Keep full LTO off for builds
+that enable a Rust port until the personality symbol is handled.
+
 Archive size is not binary size. A Rust staticlib carries `core`,
 `compiler_builtins`, and debug sections; the linker removes unused members from
 the final binary. Compare final linked binaries and installed payloads first,
@@ -216,35 +221,41 @@ The NativeFormatting port replaces only the decimal/hex digit conversion in
 Decimal conversion uses a two-digit lookup table, and hex conversion consumes
 eight nibbles per iteration with a 256-entry byte-to-two-hex-digits table. The
 C++ wrapper still allocates only a 128-byte stack buffer, so the option does not
-change allocation behavior.
+change allocation behavior. The archive is part of the LLVMSupport install
+component, `llvm-config --link-static --libs --system-libs support` emits
+`-lllvm_nativeformatting`, and `LLVMConfig.cmake` exports the
+`llvm_nativeformatting` imported target for CMake consumers.
 
 Correctness coverage:
 
-* Five crate tests cover zero, 32/64-bit edges, grouping, prefix/width, and the
-  short-buffer contract.
+* Six crate tests cover zero, 32/64-bit edges, grouping, prefix/width, the
+  short-buffer contract, and the safe `MaybeUninit` core against the C ABI
+  adapter.
 * `llvm-rust-nativeformatting-differential` checks the edge corpus and 200,000
   random values against an independent C++ reference: 0 mismatches.
 * `llvm-nativeformatting-stable` checks the public C++ API with the option on
   and off, including `write_double`.
 
 Measured on this Zen 4 host with `g++ -O3` against `-C opt-level=3`, generic
-x86-64 on both sides, nine interleaved pinned runs (`taskset -c 0`), median
-ns/op:
+x86-64 on both sides, five pinned runs (`taskset -c 0`) over four million
+full-width 64-bit values through the public C++ API, median ns/op:
 
 | Operation | C++ | Rust | Rust speedup |
 |-----------|-----|------|--------------|
-| Decimal integer | 27.47 | 17.08 | 1.61x |
-| Grouped integer | 63.68 | 24.61 | 2.59x |
-| Hex, width 16 | 12.96 | 11.07 | 1.17x |
+| Decimal integer | 34.52 | 22.77 | 1.52x |
+| Grouped integer | 68.43 | 27.24 | 2.51x |
+| Hex, width 16 | 13.20 | 11.31 | 1.17x |
 
-The process-level benchmark (four million calls per operation) took 415.96 ms
-wall / 413.82 ms CPU for C++ and 213.51 ms / 211.32 ms for Rust, with 3.88 MiB
-peak RSS for both. A clean C++ compile of `NativeFormatting.cpp` took 677.72 ms
-wall / 582.22 ms CPU / 127.60 MiB RSS and produced a 13,208-byte object; the
+The process-level benchmark took 464.60 ms wall / 463.08 ms CPU for C++ and
+245.26 ms / 244.84 ms for Rust, with 3.62 MiB peak RSS for both. A clean C++
+compile of `NativeFormatting.cpp` took 677.72 ms
+wall / 582.22 ms CPU / 127.60 MiB RSS and produced a 13,352-byte object; the
 clean Rust crate build took 195.41 ms / 123.14 ms / 114.00 MiB and produced a
-5,055,064-byte archive. The linked stable test grew from 1,564,480 to 1,577,120
-bytes (+0.81%); the large Rust archive is mostly `compiler_builtins` bitcode and
-linker GC removes it from the consumer.
+5,056,024-byte archive. `AddRustLibrary` strips debug sections from the staged
+archive with `strip --strip-debug`, reducing it to 2,522,592 bytes. The linked
+stable test still grew from 1,564,480 to 1,576,248 bytes (+11,768 bytes, +0.75%).
+That misses the final-linked-binary size gate; the port remains opt-in and is
+not claimed as a gate-clearing result.
 
 ## Measurement policy
 
@@ -302,7 +313,7 @@ generic x86-64 target unless noted:
 | ConvertEBCDIC   | 1.04-1.10x UTF-8 output, 1.28-1.30x EBCDIC output, 1.40-1.43x on GOFF 129-256 B names |
 | xxHash 64-bit   | 0.99x at 12 B, 1.1x at 48 B, 2.5x at 768 B, 3.5x at 1 MiB |
 | xxHash 128-bit  | 1.04x at 12 B, 1.2x at 48 B, 2.3x at 768 B, 3.5x at 1 MiB |
-| NativeFormatting| 1.61x decimal, 2.59x grouped, 1.17x hex (public path) |
+| NativeFormatting| 1.52x decimal, 2.51x grouped, 1.17x hex (public path) |
 
 MD5 initially lost to GCC at the generic target (0.83x). LLVM's reassociation
 moved the round constant to the end of `a + f + x + t`, leaving three register
@@ -1016,12 +1027,13 @@ arithmetic, matches the original component limits (`build < 2^20`,
 truncate exactly like the C++ bitfields. The C ABI struct is `#[repr(C)]` and
 contains only `uint32_t`, so no Rust layout assumptions cross the boundary.
 
-The differential target does not link `LLVMSupport`; `test/reference.cpp`
-carries the original parse loop because `VersionTuple.cpp` also contains stream
-helpers that need Support. The corpus covers valid boundaries, invalid
-separators and trailing bytes, oversized components, and 300,000 random ASCII
-strings: 300,086 inputs, 0 mismatches. `test/stable.cpp` checks every component
-presence flag and that a failed parse leaves the destination unchanged.
+The differential target links `LLVMSupport` and measures the public
+`VersionTuple::tryParse` path. `test/reference.cpp` carries the original parse
+loop as a free function so it does not collide with the public method. The
+corpus covers valid boundaries, invalid separators and trailing bytes,
+oversized components, and 300,000 random ASCII strings: 300,086 inputs, 0
+mismatches. `test/stable.cpp` checks every component presence flag and that a
+failed parse leaves the destination unchanged.
 
 Measured on this Zen 4 host with `g++ -O3` and `-C opt-level=3`, five-component
 versions. Both rows construct the public `VersionTuple` and consume all five
@@ -1029,16 +1041,16 @@ components, so the compiler cannot drop the Rust tuple's unused fields:
 
 | Backend | ns/parse, median (min-max) |
 |---------|----------------------------|
-| C++ | 15.57 (15.51-16.89) |
-| Rust public wrapper | 14.67 (14.38-15.85) |
+| C++ | 15.75 (15.50-16.04) |
+| Rust public wrapper | 14.75 (14.47-15.48) |
 
 The raw C ABI parser alone is about 11.5 ns, but the public wrapper must still
-build the `VersionTuple`. Across five runs the speedup is 1.04x to 1.08x, with
+build the `VersionTuple`. Across five runs the speedup is 1.02x to 1.09x, with
 a median of 1.07x. The median clears the 1.05x runtime gate, but one run was
-just under it, so this is a narrow win rather than a comfortable margin. It
-remains opt-in because the archive-size and compile-resource gates still fail.
-The linked stable test and `LLVMSupport` were not rebuilt for this measurement;
-the CMake differential target and standalone stable binaries were built.
+under it, so this is a narrow win rather than a comfortable margin. It remains
+opt-in because the archive-size and compile-resource gates still fail. The
+differential target now links `LLVMSupport`, so the public path and the golden
+stable binary are exercised by the same build.
 
 ## Eleventh port: OptionStrCmp
 

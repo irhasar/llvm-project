@@ -16,6 +16,8 @@
 
 using namespace llvm;
 
+bool referenceTryParse(llvm::StringRef Input, VersionTuple &V);
+
 namespace {
 
 struct RustFields {
@@ -44,7 +46,15 @@ VersionTuple fromRust(const RustFields &F) {
 
 bool check(llvm::StringRef Input) {
   VersionTuple Cpp(9, 9, 9);
-  bool CppError = Cpp.tryParse(Input);
+  bool CppError = referenceTryParse(Input, Cpp);
+
+  VersionTuple Public(9, 9, 9);
+  bool PublicError = Public.tryParse(Input);
+  if (PublicError != CppError || Public.asTuple() != Cpp.asTuple()) {
+    std::fprintf(stderr, "public API mismatch len=%zu reference=%d public=%d\n",
+                 Input.size(), CppError, PublicError);
+    return false;
+  }
 
   RustFields F{};
   bool RustError =
@@ -96,14 +106,14 @@ void benchmark() {
   for (int Rep = 0; Rep < 200; ++Rep)
     for (const auto &S : Inputs) {
       VersionTuple V;
-      bool Parsed = V.tryParse(S);
+      bool Parsed = referenceTryParse(S, V);
       Sink += Parsed ? 1 : observeTuple(V);
     }
   auto Start = std::chrono::steady_clock::now();
   for (int Rep = 0; Rep < 20000; ++Rep)
     for (const auto &S : Inputs) {
       VersionTuple V;
-      bool Parsed = V.tryParse(S);
+      bool Parsed = referenceTryParse(S, V);
       Sink += Parsed ? 1 : observeTuple(V);
     }
   auto End = std::chrono::steady_clock::now();
@@ -113,18 +123,16 @@ void benchmark() {
 
   for (int Rep = 0; Rep < 200; ++Rep)
     for (const auto &S : Inputs) {
-      RustFields F{};
-      bool Parsed = llvm_versiontuple_try_parse(
-          reinterpret_cast<const uint8_t *>(S.data()), S.size(), &F);
-      Sink += Parsed ? 1 : observeTuple(fromRust(F));
+      VersionTuple V;
+      bool Parsed = V.tryParse(S);
+      Sink += Parsed ? 1 : observeTuple(V);
     }
   Start = std::chrono::steady_clock::now();
   for (int Rep = 0; Rep < 20000; ++Rep)
     for (const auto &S : Inputs) {
-      RustFields F{};
-      bool Parsed = llvm_versiontuple_try_parse(
-          reinterpret_cast<const uint8_t *>(S.data()), S.size(), &F);
-      Sink += Parsed ? 1 : observeTuple(fromRust(F));
+      VersionTuple V;
+      bool Parsed = V.tryParse(S);
+      Sink += Parsed ? 1 : observeTuple(V);
     }
   End = std::chrono::steady_clock::now();
   double RustNs =

@@ -600,7 +600,7 @@ if(LLVM_ENABLE_RUST_VERSIONTUPLE)
   target_include_directories(llvm-rust-versiontuple-differential PRIVATE
     ${LLVM_MAIN_INCLUDE_DIR}
     ${LLVM_BINARY_DIR}/include)
-  target_link_libraries(llvm-rust-versiontuple-differential PRIVATE llvm_versiontuple)
+  target_link_libraries(llvm-rust-versiontuple-differential PRIVATE LLVMSupport)
   add_custom_target(check-llvm-rust-versiontuple
     COMMAND llvm-rust-versiontuple-differential
     COMMAND llvm-versiontuple-stable
@@ -642,7 +642,8 @@ target_link_libraries(llvm-optionstrcmp-stable PRIVATE LLVMSupport)
 if(LLVM_ENABLE_RUST_NATIVEFORMATTING)
   include(AddRustLibrary)
   add_llvm_rust_staticlib(llvm_nativeformatting
-    "${CMAKE_CURRENT_SOURCE_DIR}/rust/nativeformatting/Cargo.toml")
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/nativeformatting/Cargo.toml"
+    STRIP_DEBUG)
   target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_NATIVEFORMATTING)
   target_link_libraries(LLVMSupport PRIVATE llvm_nativeformatting)
 
@@ -712,7 +713,7 @@ set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${llvm_system_libs}")
 # The Rust ports are static archives installed next to the other LLVM
 # libraries, so downstream links need them in llvm-config --system-libs.
 foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF CONVERTEBCDIC
-                  XXHASH RUSTDEMANGLE DLANG)
+                  XXHASH RUSTDEMANGLE DLANG NATIVEFORMATTING)
   if(LLVM_ENABLE_RUST_${rust_port})
     if(rust_port STREQUAL "DLANG")
       set(rust_port_lower "dlangdemangle")

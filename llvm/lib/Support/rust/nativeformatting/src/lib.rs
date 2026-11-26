@@ -15,6 +15,8 @@
 #![cfg_attr(not(test), no_std)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
+use core::mem::MaybeUninit;
+
 #[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
@@ -59,21 +61,23 @@ const HEX_PAIRS_LOWER: [u8; 512] = make_hex_pairs(false);
 const HEX_PAIRS_UPPER: [u8; 512] = make_hex_pairs(true);
 
 #[inline(always)]
-unsafe fn write_hex2(table: &[u8; 512], dst: *mut u8, byte: usize) {
-    *dst = *table.get_unchecked(byte * 2);
-    *dst.add(1) = *table.get_unchecked(byte * 2 + 1);
+fn write_hex2(table: &[u8; 512], dst: &mut [MaybeUninit<u8>], byte: usize) {
+    dst[0].write(table[byte * 2]);
+    dst[1].write(table[byte * 2 + 1]);
 }
 
 #[inline(always)]
-unsafe fn write_hex4(table: &[u8; 512], dst: *mut u8, word: usize) {
-    write_hex2(table, dst, (word >> 8) & 0xFF);
-    write_hex2(table, dst.add(2), word & 0xFF);
+fn write_hex4(table: &[u8; 512], dst: &mut [MaybeUninit<u8>], word: usize) {
+    let (high, low) = dst.split_at_mut(2);
+    write_hex2(table, high, (word >> 8) & 0xFF);
+    write_hex2(table, low, word & 0xFF);
 }
 
 #[inline(always)]
-unsafe fn write_hex8(table: &[u8; 512], dst: *mut u8, word: u32) {
-    write_hex4(table, dst, (word >> 16) as usize);
-    write_hex4(table, dst.add(4), (word & 0xFFFF) as usize);
+fn write_hex8(table: &[u8; 512], dst: &mut [MaybeUninit<u8>], word: u32) {
+    let (high, low) = dst.split_at_mut(4);
+    write_hex4(table, high, (word >> 16) as usize);
+    write_hex4(table, low, (word & 0xFFFF) as usize);
 }
 
 #[inline]
@@ -124,19 +128,9 @@ fn digits_u64(mut value: u64, buf: &mut [u8; MAX_DECIMAL_DIGITS]) -> usize {
 /// as `writeWithCommas` in NativeFormatting.cpp. The sign and minimum-width
 /// padding are intentionally left to the C++ caller.
 ///
-/// Returns the number of bytes required. If `cap` is too small, nothing is
+/// Returns the number of bytes required. If `out` is too small, nothing is
 /// written and the required size is still returned.
-///
-/// # Safety
-///
-/// `out` must be writable for at least `cap` bytes when `cap` is non-zero.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn llvm_nativeformatting_format_decimal(
-    value: u64,
-    grouping: bool,
-    out: *mut u8,
-    cap: usize,
-) -> usize {
+pub fn format_decimal(value: u64, grouping: bool, out: &mut [MaybeUninit<u8>]) -> usize {
     let mut digits = [0u8; MAX_DECIMAL_DIGITS];
     let len = if value <= u32::MAX as u64 {
         digits_u32(value as u32, &mut digits)
@@ -151,41 +145,145 @@ pub unsafe extern "C" fn llvm_nativeformatting_format_decimal(
         0
     };
     let total = len + commas;
-    if cap < total {
+    if out.len() < total {
         return total;
     }
-    if total == 0 {
-        return 0;
-    }
 
-    let dst = core::slice::from_raw_parts_mut(out, total);
+    let dst = &mut out[..total];
     if !grouping || commas == 0 {
-        dst.copy_from_slice(&digits[start..]);
+        for (slot, &digit) in dst.iter_mut().zip(&digits[start..]) {
+            slot.write(digit);
+        }
         return total;
     }
 
     let initial = (len - 1) % 3 + 1;
     let mut src = start;
     let mut pos = 0usize;
-    dst[pos..pos + initial].copy_from_slice(&digits[src..src + initial]);
+    for (slot, &digit) in dst[..initial].iter_mut().zip(&digits[src..src + initial]) {
+        slot.write(digit);
+    }
     src += initial;
     pos += initial;
     while src < MAX_DECIMAL_DIGITS {
-        dst[pos] = b',';
+        dst[pos].write(b',');
         pos += 1;
-        dst[pos..pos + 3].copy_from_slice(&digits[src..src + 3]);
+        for (slot, &digit) in dst[pos..pos + 3].iter_mut().zip(&digits[src..src + 3]) {
+            slot.write(digit);
+        }
         src += 3;
         pos += 3;
     }
     total
 }
 
+/// C ABI adapter for [`format_decimal`].
+///
+/// # Safety
+///
+/// `out` must be writable for at least `cap` bytes when `cap` is non-zero.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn llvm_nativeformatting_format_decimal(
+    value: u64,
+    grouping: bool,
+    out: *mut u8,
+    cap: usize,
+) -> usize {
+    let out: &mut [MaybeUninit<u8>] = if cap == 0 {
+        &mut []
+    } else {
+        core::slice::from_raw_parts_mut(out.cast::<MaybeUninit<u8>>(), cap)
+    };
+    format_decimal(value, grouping, out)
+}
+
 /// Writes a hexadecimal number using the same width and prefix rules as
 /// `llvm::write_hex`. `width` is clamped to 128 by the caller, matching the
 /// C++ implementation.
 ///
-/// Returns the number of bytes required. If `cap` is too small, nothing is
+/// Returns the number of bytes required. If `out` is too small, nothing is
 /// written and the required size is still returned.
+pub fn format_hex(
+    value: u64,
+    upper: bool,
+    prefix: bool,
+    width: usize,
+    out: &mut [MaybeUninit<u8>],
+) -> usize {
+    let width = width.min(128);
+    let nibbles = if value == 0 {
+        0
+    } else {
+        (64 - value.leading_zeros() as usize).div_ceil(4)
+    };
+    let prefix_chars = if prefix { 2 } else { 0 };
+    let num_chars = width.max(nibbles.max(1) + prefix_chars);
+    if out.len() < num_chars {
+        return num_chars;
+    }
+
+    let dst = &mut out[..num_chars];
+    for slot in dst.iter_mut() {
+        slot.write(b'0');
+    }
+    if prefix {
+        dst[1].write(b'x');
+    }
+
+    let table = if upper {
+        &HEX_PAIRS_UPPER
+    } else {
+        &HEX_PAIRS_LOWER
+    };
+    let mut n = value;
+    let mut pos = num_chars;
+    while n >= 0x1_0000_0000 {
+        pos -= 8;
+        write_hex8(table, &mut dst[pos..pos + 8], (n & 0xFFFF_FFFF) as u32);
+        n >>= 32;
+    }
+    if n >= 0x1000_0000 {
+        pos -= 8;
+        write_hex8(table, &mut dst[pos..pos + 8], n as u32);
+    } else if n >= 0x1_0000 {
+        let high = (n >> 16) as usize;
+        let low = (n & 0xFFFF) as usize;
+        let high_digits = if high >= 0x100 {
+            3
+        } else if high >= 0x10 {
+            2
+        } else {
+            1
+        };
+        pos -= high_digits + 4;
+        let tail = &mut dst[pos..];
+        if high_digits == 3 {
+            tail[0].write(table[(high >> 8) * 2 + 1]);
+            write_hex2(table, &mut tail[1..], high & 0xFF);
+        } else if high_digits == 2 {
+            write_hex2(table, tail, high);
+        } else {
+            tail[0].write(table[high * 2 + 1]);
+        }
+        write_hex4(table, &mut tail[high_digits..], low);
+    } else if n >= 0x1000 {
+        pos -= 4;
+        write_hex4(table, &mut dst[pos..pos + 4], n as usize);
+    } else if n >= 0x100 {
+        pos -= 3;
+        dst[pos].write(table[((n >> 8) as usize) * 2 + 1]);
+        write_hex2(table, &mut dst[pos + 1..pos + 3], (n & 0xFF) as usize);
+    } else if n >= 0x10 {
+        pos -= 2;
+        write_hex2(table, &mut dst[pos..pos + 2], n as usize);
+    } else if n != 0 {
+        pos -= 1;
+        dst[pos].write(table[n as usize * 2 + 1]);
+    }
+    num_chars
+}
+
+/// C ABI adapter for [`format_hex`].
 ///
 /// # Safety
 ///
@@ -199,76 +297,12 @@ pub unsafe extern "C" fn llvm_nativeformatting_format_hex(
     out: *mut u8,
     cap: usize,
 ) -> usize {
-    let width = width.min(128);
-    let nibbles = if value == 0 {
-        0
+    let out: &mut [MaybeUninit<u8>] = if cap == 0 {
+        &mut []
     } else {
-        (64 - value.leading_zeros() as usize).div_ceil(4)
+        core::slice::from_raw_parts_mut(out.cast::<MaybeUninit<u8>>(), cap)
     };
-    let prefix_chars = if prefix { 2 } else { 0 };
-    let num_chars = width.max(nibbles.max(1) + prefix_chars);
-    if cap < num_chars {
-        return num_chars;
-    }
-    if num_chars == 0 {
-        return 0;
-    }
-
-    core::ptr::write_bytes(out, b'0', num_chars);
-    if prefix {
-        *out.add(1) = b'x';
-    }
-
-    let table = if upper {
-        &HEX_PAIRS_UPPER
-    } else {
-        &HEX_PAIRS_LOWER
-    };
-    let mut n = value;
-    let mut pos = out.add(num_chars);
-    while n >= 0x1_0000_0000 {
-        pos = pos.sub(8);
-        write_hex8(table, pos, (n & 0xFFFF_FFFF) as u32);
-        n >>= 32;
-    }
-    if n >= 0x1000_0000 {
-        pos = pos.sub(8);
-        write_hex8(table, pos, n as u32);
-    } else if n >= 0x1_0000 {
-        let high = (n >> 16) as usize;
-        let low = (n & 0xFFFF) as usize;
-        let high_digits = if high >= 0x100 {
-            3
-        } else if high >= 0x10 {
-            2
-        } else {
-            1
-        };
-        pos = pos.sub(high_digits + 4);
-        if high_digits == 3 {
-            *pos = *table.get_unchecked((high >> 8) * 2 + 1);
-            write_hex2(table, pos.add(1), high & 0xFF);
-        } else if high_digits == 2 {
-            write_hex2(table, pos, high);
-        } else {
-            *pos = *table.get_unchecked(high * 2 + 1);
-        }
-        write_hex4(table, pos.add(high_digits), low);
-    } else if n >= 0x1000 {
-        pos = pos.sub(4);
-        write_hex4(table, pos, n as usize);
-    } else if n >= 0x100 {
-        pos = pos.sub(3);
-        *pos = *table.get_unchecked((n >> 8) as usize * 2 + 1);
-        write_hex2(table, pos.add(1), (n & 0xFF) as usize);
-    } else if n >= 0x10 {
-        pos = pos.sub(2);
-        write_hex2(table, pos, n as usize);
-    } else if n != 0 {
-        pos = pos.sub(1);
-        *pos = *table.get_unchecked(n as usize * 2 + 1);
-    }
-    num_chars
+    format_hex(value, upper, prefix, width, out)
 }
 
 #[cfg(test)]
@@ -296,6 +330,20 @@ mod tests {
             )
         };
         String::from_utf8(buf[..len].to_vec()).unwrap()
+    }
+
+    fn safe_decimal(value: u64, grouping: bool) -> String {
+        let mut buf = [MaybeUninit::<u8>::uninit(); 64];
+        let len = format_decimal(value, grouping, &mut buf);
+        let bytes = unsafe { core::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), len) };
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    fn safe_hex(value: u64, upper: bool, prefix: bool, width: usize) -> String {
+        let mut buf = [MaybeUninit::<u8>::uninit(); 128];
+        let len = format_hex(value, upper, prefix, width, &mut buf);
+        let bytes = unsafe { core::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), len) };
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 
     #[test]
@@ -337,6 +385,38 @@ mod tests {
         assert_eq!(hex(0xf, false, true, 6), "0x000f");
         assert_eq!(hex(0x1234, false, false, 8), "00001234");
         assert_eq!(hex(0x1234, true, true, 8), "0x001234");
+    }
+
+    #[test]
+    fn safe_core_matches_ffi() {
+        for value in [
+            0,
+            1,
+            9,
+            10,
+            99,
+            100,
+            999,
+            1000,
+            1234567,
+            u32::MAX as u64,
+            u64::MAX,
+        ] {
+            assert_eq!(safe_decimal(value, false), decimal(value, false));
+            assert_eq!(safe_decimal(value, true), decimal(value, true));
+        }
+        for value in [0, 1, 0xf, 0x10, 0x1234, u32::MAX as u64, u64::MAX] {
+            for upper in [false, true] {
+                for prefix in [false, true] {
+                    for width in [0, 4, 8, 32] {
+                        assert_eq!(
+                            safe_hex(value, upper, prefix, width),
+                            hex(value, upper, prefix, width)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

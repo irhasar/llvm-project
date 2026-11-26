@@ -2,7 +2,7 @@
 # Build support for incrementally porting LLVM components to Rust.
 #
 # add_llvm_rust_staticlib(<target> <cargo-manifest>
-#   [INSTALL_COMPONENT <component>] [INSTALL_WITH_TOOLCHAIN])
+#   [INSTALL_COMPONENT <component>] [INSTALL_WITH_TOOLCHAIN] [STRIP_DEBUG])
 #
 # Builds a Rust crate as a static library with cargo and exposes it as the
 # STATIC IMPORTED target <target>. <target> must match the crate's [lib] name
@@ -10,7 +10,8 @@
 #
 # Crates are built out-of-tree into the CMake binary directory and are only
 # pulled in when a component explicitly links them, so the Rust toolchain stays
-# an optional dependency of the LLVM build.
+# an optional dependency of the LLVM build. STRIP_DEBUG runs CMAKE_STRIP on the
+# cargo archive before staging it.
 #===----------------------------------------------------------------------===#
 
 find_program(LLVM_RUST_CARGO_EXECUTABLE
@@ -19,7 +20,8 @@ find_program(LLVM_RUST_CARGO_EXECUTABLE
 mark_as_advanced(LLVM_RUST_CARGO_EXECUTABLE)
 
 function(add_llvm_rust_staticlib name manifest)
-  cmake_parse_arguments(ARG "INSTALL_WITH_TOOLCHAIN" "INSTALL_COMPONENT" "" ${ARGN})
+  cmake_parse_arguments(ARG "INSTALL_WITH_TOOLCHAIN;STRIP_DEBUG"
+    "INSTALL_COMPONENT" "" ${ARGN})
   if(NOT ARG_INSTALL_COMPONENT)
     set(ARG_INSTALL_COMPONENT LLVMSupport)
   endif()
@@ -88,9 +90,20 @@ function(add_llvm_rust_staticlib name manifest)
     set(cargo_env "")
   endif()
 
+  set(strip_command "")
+  if(ARG_STRIP_DEBUG AND CMAKE_STRIP AND NOT MSVC)
+    if(APPLE)
+      set(strip_args -S)
+    else()
+      set(strip_args --strip-debug)
+    endif()
+    set(strip_command COMMAND "${CMAKE_STRIP}" ${strip_args} "${archive}")
+  endif()
+
   add_custom_command(OUTPUT "${staged}"
     COMMAND ${cargo_env} "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
             --manifest-path "${manifest}" --target-dir "${target_dir}"
+    ${strip_command}
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${archive}" "${staged}"
     DEPENDS ${crate_sources}
     COMMENT "Building Rust crate ${name}"

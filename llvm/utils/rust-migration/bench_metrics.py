@@ -75,12 +75,15 @@ def build_launcher(directory: Path) -> Path | None:
             [str(launcher), "/bin/true"],
             check=False,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
     except (OSError, subprocess.CalledProcessError):
         return None
-    return launcher if probe.returncode == 0 else None
+    fields = probe.stdout.decode().split()
+    if probe.returncode != 0 or not fields or fields[0] != "0":
+        return None
+    return launcher
 
 
 def run_once_direct(command: list[str], cwd: str | None) -> dict[str, float | int]:
