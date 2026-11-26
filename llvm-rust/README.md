@@ -161,11 +161,13 @@ The base corpus runs against `LLVM_BIN` in the default target-aware mode.
 Its textual comparison ignores `target_mem` spelling because Rust still
 emits the LLVM 19 three-location encoding. The AArch64 fixture is checked
 separately against `LLVM19_BIN` with `--llvm19`, which omits target clauses
-and accepts legacy AArch64 memory text. If `LLVM19_BIN` is unset, the
-harness uses `LLVM_BIN` when it reports LLVM 19, then falls back to
-`/usr/lib/llvm-19/bin`. The harness fails if no LLVM 19 oracle is available,
-so legacy coverage cannot be skipped accidentally. The version-2 fixture
-keeps target-aware output.
+and accepts legacy AArch64 memory text. Relative oracle paths are resolved
+from this `llvm-rust/` directory. If `LLVM19_BIN` is unset, the harness uses
+`LLVM_BIN` when it reports LLVM 19, then scans standard locations for a
+complete install with both `llvm-as` and `llvm-dis`; incomplete candidates
+are skipped. The harness fails if no LLVM 19 oracle is available, so legacy
+coverage cannot be skipped accidentally. The version-2 fixture keeps
+target-aware output.
 
 Reproducible benchmark (5 runs, `taskset -c 0`, median and min/max):
 

@@ -3,21 +3,24 @@
 set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
 llvm_major() {
     "$1/llvm-as" --version 2>/dev/null | sed -n 's/.*LLVM version \([0-9][0-9]*\)\..*/\1/p' | head -n1
 }
 
+llvm19_complete() {
+    [ -n "$1" ] && [ -x "$1/llvm-as" ] && [ -x "$1/llvm-dis" ] &&
+        [ "$(llvm_major "$1")" = 19 ]
+}
+
 LLVM_BIN=${LLVM_BIN:-/usr/lib/llvm-19/bin}
 LLVM19_BIN=${LLVM19_BIN:-}
-if [ -z "$LLVM19_BIN" ] && [ "$(llvm_major "$LLVM_BIN")" = 19 ]; then
+if [ -z "$LLVM19_BIN" ] && llvm19_complete "$LLVM_BIN"; then
     LLVM19_BIN=$LLVM_BIN
 fi
-if [ -z "$LLVM19_BIN" ] && [ -x /usr/lib/llvm-19/bin/llvm-as ]; then
-    LLVM19_BIN=/usr/lib/llvm-19/bin
-fi
 if [ -z "$LLVM19_BIN" ]; then
-    for candidate in /usr/local/llvm-19/bin /opt/llvm-19/bin; do
-        if [ -x "$candidate/llvm-as" ] && [ "$(llvm_major "$candidate")" = 19 ]; then
+    for candidate in /usr/lib/llvm-19/bin /usr/local/llvm-19/bin /opt/llvm-19/bin; do
+        if llvm19_complete "$candidate"; then
             LLVM19_BIN=$candidate
             break
         fi
@@ -45,7 +48,6 @@ CARGO=${CARGO:-cargo}
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-cd "$ROOT"
 "$CARGO" build -p llvm-rust-tools --bin llvm-as-rust --bin llvm-dis-rust >/dev/null
 
 normalize() {
@@ -141,7 +143,7 @@ for input in tests/corpus/*.ll tests/corpus/*.bc; do
     fi
 done
 
-if [ -x "$LLVM19_BIN/llvm-as" ] && [ -x "$LLVM19_BIN/llvm-dis" ]; then
+if llvm19_complete "$LLVM19_BIN"; then
     input=tests/corpus/aarch64_memory.ll
     name=aarch64_memory
     cpp_bc="$TMP/$name-cpp.bc"
