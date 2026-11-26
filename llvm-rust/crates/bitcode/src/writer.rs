@@ -139,6 +139,8 @@ struct Writer<'a> {
     paramattr_lists: Vec<Vec<u64>>,
     paramattr_list_ids: HashMap<Vec<u64>, u32>,
     local_values: HashMap<LocalId, u32>,
+    #[cfg(test)]
+    split_attr_slots: bool,
 }
 
 impl<'a> Writer<'a> {
@@ -202,6 +204,8 @@ impl<'a> Writer<'a> {
             paramattr_lists: Vec::new(),
             paramattr_list_ids: HashMap::new(),
             local_values: HashMap::new(),
+            #[cfg(test)]
+            split_attr_slots: false,
         };
         for id in module.ordered_globals() {
             let global = &module.globals[id];
@@ -523,8 +527,25 @@ impl<'a> Writer<'a> {
         )))
     }
 
-    fn add_attr_list(&mut self, entries: Vec<(u32, Vec<Attribute>)>) -> u32 {
+    #[allow(unused_mut)]
+    fn add_attr_list(&mut self, mut entries: Vec<(u32, Vec<Attribute>)>) -> u32 {
+        #[cfg(test)]
+        if self.split_attr_slots {
+            let mut split = Vec::new();
+            for (index, attrs) in entries {
+                if index != function_attr_index() && attrs.len() > 1 {
+                    for attr in attrs {
+                        split.push((index, vec![attr]));
+                    }
+                } else {
+                    split.push((index, attrs));
+                }
+            }
+            entries = split;
+        }
         let mut groups = Vec::new();
+        #[cfg(test)]
+        let mut function_group = None;
         for (index, attrs) in entries {
             if attrs.is_empty() {
                 continue;
@@ -538,6 +559,16 @@ impl<'a> Writer<'a> {
                 self.paramattr_group_ids.insert(key, id);
                 id
             };
+            #[cfg(test)]
+            if index == function_attr_index() {
+                function_group = Some(group);
+            }
+            groups.push(group);
+        }
+        #[cfg(test)]
+        if self.split_attr_slots
+            && let Some(group) = function_group
+        {
             groups.push(group);
         }
         if groups.is_empty() {
@@ -1389,4 +1420,52 @@ fn fmf_bits(flags: FastMath) -> u64 {
         | (flags.contract as u64) << 5
         | (flags.afn as u64) << 6
         | (flags.reassoc as u64) << 7
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::reader::read_bitcode;
+
+    #[test]
+    fn roundtrips_duplicate_attribute_groups() {
+        let mut module = llvm_rust_ir::parse_module(
+            "declare void @dup(ptr align 8)\n\
+             declare void @decl() #0\n\
+             attributes #0 = { nounwind }\n",
+        )
+        .expect("parse");
+        let dup_name = module.intern("dup");
+        let dup = module.function_named(dup_name).expect("dup");
+        module.functions[dup].params[0].attrs = Arc::new(vec![
+            Attribute("align 8".to_string()),
+            Attribute("align 16".to_string()),
+        ]);
+
+        let mut writer = Writer::new(&module);
+        writer.split_attr_slots = true;
+        writer.write().expect("write");
+        let bytes = writer.finish();
+        let read = read_bitcode(&bytes).expect("read");
+        let dup = read
+            .functions
+            .iter()
+            .find_map(|(id, function)| (read.name(function.name) == "dup").then_some(id))
+            .expect("dup function");
+        assert_eq!(
+            read.functions[dup].params[0].attrs.as_ref(),
+            &[Attribute("align 16".to_string())]
+        );
+        let decl = read
+            .functions
+            .iter()
+            .find_map(|(id, function)| (read.name(function.name) == "decl").then_some(id))
+            .expect("decl function");
+        assert_eq!(
+            read.functions[decl].attrs.as_ref(),
+            &[Attribute("nounwind".to_string())]
+        );
+    }
 }
