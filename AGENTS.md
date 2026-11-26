@@ -5,7 +5,7 @@ The migration itself is described in `MIGRATION_TO_RUST.md`; read that first.
 
 ## What this fork is
 
-- Shallow clone on branch `rust-migration-phase4` (`git rev-parse
+- Shallow clone on the current Rust migration branch (`git rev-parse
   --is-shallow-repository` returns `true`). History before the tip is absent.
 - The Rust migration of `lib/Support` components lives under
   `llvm/lib/Support/rust/<component>/`; demangler ports live under
@@ -17,6 +17,9 @@ The migration itself is described in `MIGRATION_TO_RUST.md`; read that first.
 ## Toolchain in this container
 
 - `rustc`/`cargo` 1.100.0 (stable), edition 2024 crates (`rust-version = "1.85"`).
+  `rust-toolchain.toml` pins that stable release; CI also runs the crates with
+  `nightly-2026-11-23` for compatibility. Use `cargo +nightly-2026-11-23` for
+  the nightly leg; nightly is not required by the default build.
 - `cmake` 4.4.5 and `ninja` 1.13 are installed in `~/.local/bin`.
 - GCC 14.2 at `/usr/bin/g++`. Host CPU: AMD EPYC 9B14 (Zen 4) with SHA-NI.
 
@@ -36,7 +39,10 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON \
   -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON \
   -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON \
-  -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_XXHASH=ON \
+  -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON \
+  -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON \
+  -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON -DLLVM_ENABLE_RUST_OPTIONSTRCMP=ON \
+  -DLLVM_ENABLE_RUST_NATIVEFORMATTING=ON \
   -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
@@ -46,8 +52,12 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_LIBEDIT=OFF
 
 ninja -C build LLVMSupport llvm-sha1-stable llvm-sha256-stable \
-  llvm-convertutf-stable llvm-rustdemangle-stable llvm-dlang-stable \
-  llvm-rust-rustdemangle-differential llvm-rust-dlang-differential llc
+  llvm-convertutf-stable llvm-convertebcdic-stable llvm-djb-stable \
+  llvm-versiontuple-stable llvm-optionstrcmp-stable \
+  llvm-rustdemangle-stable llvm-dlang-stable \
+  llvm-rust-rustdemangle-differential llvm-rust-dlang-differential \
+  llvm-rust-djb-differential llvm-rust-versiontuple-differential \
+  llvm-rust-optionstrcmp-differential llc
 ```
 
 Full LLVM builds are large; prefer building `LLVMSupport` and the specific
@@ -69,6 +79,74 @@ Every crate under `llvm/lib/*/rust/` follows the same rules:
   function/body is replaced; buffering and padding stay in C++.
 - Each component has its own `LLVM_ENABLE_RUST_<COMPONENT>` switch, default
   `OFF`, and `Cargo.lock` is committed.
+- `AddRustLibrary` uses `INTERFACE_LINK_DEPENDS` on Ninja. Do not replace it
+  with `add_dependencies` on the imported archive: CMake then makes every C++
+  object in a consumer wait for Cargo. Makefile and IDE generators keep the
+  target-level dependency.
+- The staged archive is a byproduct of the staging-stamp rule. Keep the stamp;
+  making the archive itself the rule output makes Make recopy it every build
+  after a byte-identical Cargo rebuild. Staging and Make restores write a
+  temporary file and rename it, so an interrupted copy cannot leave a partial
+  archive that the next build accepts. Keep `RustStageArchive.cmake` in the
+  staging rule's dependencies so editing the script restages. The Make fallback
+  for a missing Cargo archive verifies the staged archive against the content
+  stamp before using it.
+- Release staticlibs use fat LTO and one codegen unit. Small standalone Rust
+  binaries use LTO off; larger ones try thin LTO first. Development and test
+  builds use the incremental dev profile. See `MIGRATION_TO_RUST.md` for the
+  measured rationale.
+
+## Migration policy (agreed 2026-11-25)
+
+The experiments showed that Rust can beat C++ on leaf components, but they do
+not justify a whole-LLVM rewrite or a core-free default. Keep the migration
+optional and incremental.
+
+- Migrate self-contained leaf components first. Use the stable Rust toolchain
+  and the normal `no_std` (plus `alloc` or `std` only when the component
+  genuinely needs it) staticlib/C-ABI path. The default build must not invoke
+  `cargo`, nightly, `build-std`, or `RUSTC_BOOTSTRAP`.
+- The core-free artifact experiment (`-Z build-std=core,compiler_builtins`,
+  `panic=immediate-abort`) is an **opt-in experiment for small, allocation-free
+  leaf crates**, not the default and not a model for the whole project. It
+  changes panic semantics and adds nightly/rust-src requirements.
+- Direct C++ ABI exports (mangled symbols, `std::string_view`/`SmallVector`
+  layout, Itanium ABI) are research prototypes only. Production components
+  cross a C ABI; the public C++ headers and class layouts stay unchanged.
+- Do not rewrite LLVM's IR, code generator, or target backends merely to gain
+  performance. Rust and C++ both lower through LLVM; backend speed comes from
+  algorithms, data layout, allocation, PGO/BOLT, ThinLTO, and target tuning.
+  A whole-LLVM/rustc-backend rewrite is a separate research project with a
+  bootstrap problem, not an incremental migration step.
+- Track A, this branch, remains the production path. Track B is a long-term
+  Rust-native LLVM core on `rust-migration-track-b` and in a separate
+  `llvm-rust/` workspace; it must not change the default build or any Track A
+  `LLVM_ENABLE_RUST_*` switch.
+- A new port ships only if it clears the measurement gate below; otherwise keep
+  the C++ implementation. “Rust” is not itself a performance result.
+- Keep the C ABI staticlib as the permanent boundary for existing C++ callers.
+  Pure Rust from the start is for new Rust-only tools, not a replacement for
+  LLVM's C++ entry points. Keep the Rust core safe and the C ABI adapter thin
+  so a future Rust caller can reuse the core without another port.
+
+Gate per component, measured on the same machine and input distribution:
+
+- runtime at least 1.05x faster, or a clearly documented safety/size win;
+- peak RSS no more than 2% higher;
+- compile time no more than 10% higher;
+- final linked binary not larger;
+- option `OFF` builds without cargo and stays byte-identical;
+- `cargo test`, differential fuzzing, and golden tests pass with the option
+  `ON` and `OFF`.
+
+The Rust staticlib archive is reported separately from the final binary. It
+carries `core`, `compiler_builtins`, and debug sections that the final linker
+removes; `strip --strip-debug` is a release-packaging option. Do not reject a
+component on archive size alone when the linked binary and installed payload
+are not larger.
+
+Record rejected experiments and their numbers in `MIGRATION_TO_RUST.md` so the
+same idea is not retried blindly.
 
 MD5 is the exception that proves the codegen rule: it carries a generic x86-64
 body that emits `a + x + t` as an explicit `lea` through `asm!` (LLVM otherwise
@@ -108,6 +186,104 @@ To prove a backend-neutral result, configure the option `OFF`, rebuild
 `LLVMSupport` and the `*-stable` test, and confirm identical output. For
 `LLVM_ENABLE_RUST_RUSTDEMANGLE` or `LLVM_ENABLE_RUST_DLANG`, rebuild
 `LLVMDemangle` and the matching `*-stable` test instead.
+
+## DJB port
+
+`llvm/lib/Support/rust/djb` is gated by `LLVM_ENABLE_RUST_DJB` (default
+`OFF`). `DJB.cpp` keeps the original implementation under `#else`; with the
+option on, `llvm::caseFoldingDjbHash` is a C-ABI call to
+`llvm_djb_case_folding_hash`. The Rust ASCII path uses a 256-byte fold table
+and the same `h * 33 + c` recurrence as C++; the Unicode path reuses the
+lenient one-code-point UTF-8 behaviour of `ConvertUTF`.
+
+```sh
+(cd llvm/lib/Support/rust/djb &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build llvm-rust-djb-differential llvm-djb-stable
+./build/bin/llvm-djb-stable
+./build/bin/llvm-rust-djb-differential
+```
+
+The differential harness checks every legal Unicode scalar value, all
+single-byte inputs, and 200,000 random valid UTF-8 names, then benchmarks
+ASCII and Unicode. The C++ reference has an out-of-bounds write when a valid
+code point is followed by a truncated sequence, so malformed multi-byte input
+is not used as a differential oracle; the Rust port replaces it with U+FFFD.
+Measured here with `g++ -O3` and `-C opt-level=3`: 1.6x to 1.7x on ASCII
+debug-info names and 1.4x to 1.6x on non-ASCII names. The linked stable test
+shrinks from 30,376 to 20,640 bytes.
+
+## VersionTuple port
+
+`llvm/lib/Support/rust/versiontuple` is gated by
+`LLVM_ENABLE_RUST_VERSIONTUPLE` (default `OFF`). Only
+`VersionTuple::tryParse` is replaced; the class layout, constructors,
+`getAsString`, `operator<<`, and `withMajorReplaced` stay in C++. The Rust
+entry point is `llvm_versiontuple_try_parse(data, len, *out)` returning 0 on
+success; `out` carries five `uint32_t` components and a flags word.
+
+```sh
+(cd llvm/lib/Support/rust/versiontuple &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build llvm-rust-versiontuple-differential llvm-versiontuple-stable
+./build/bin/llvm-versiontuple-stable
+./build/bin/llvm-rust-versiontuple-differential
+```
+
+The differential target links `LLVMSupport` and measures the public
+`VersionTuple::tryParse` path. `test/reference.cpp` carries the original parse
+loop as a free-function oracle. Coverage is the boundary corpus plus 300,000
+random ASCII strings; the observed result is 300,093 inputs and 0 mismatches.
+`test/stable.cpp` checks component presence and that a failed parse leaves the
+destination unchanged.
+
+Measured here with `g++ -O3` and `-C opt-level=3` on five-component versions,
+including the C++ wrapper's tuple construction in the Rust row: C++ 15.75 ns
+(15.50-16.04), Rust public wrapper 14.75 ns (14.47-15.48). Both rows consume all
+five tuple fields, so the compiler cannot drop the Rust tuple's unused fields.
+The raw C ABI parser is about 11.5 ns, but the public API must still build the
+`VersionTuple`; the public speedup is 1.02x-1.09x with a 1.07x median across
+five runs. The median clears the runtime gate, but one run was just under it,
+so this is a narrow win. The port stays opt-in because the archive-size and
+compile-resource gates still fail. The parser uses wrapping `u32` arithmetic
+and masks minor/subminor to 31 bits so oversized components match the C++
+bitfield truncation.
+
+## OptionStrCmp port
+
+`llvm/lib/Support/rust/optionstrcmp` is gated by
+`LLVM_ENABLE_RUST_OPTIONSTRCMP` (default `OFF`). `StrCmpOptionName` becomes a
+C-ABI call to `llvm_optionstrcmp_name`; `StrCmpOptionPrefixes` stays in C++
+and calls the wrapper for each pair, so the `ArrayRef` iteration and its
+layout remain on the C++ side.
+
+```sh
+(cd llvm/lib/Support/rust/optionstrcmp &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build llvm-rust-optionstrcmp-differential llvm-optionstrcmp-stable
+./build/bin/llvm-optionstrcmp-stable
+./build/bin/llvm-rust-optionstrcmp-differential
+```
+
+The differential target compiles the original `OptionStrCmp.cpp` and supplies
+the one `StringRef::compare_insensitive` entry point it needs, so it does not
+link `LLVMSupport`. Coverage includes every pair of single bytes, the option
+name corpus with both fallback settings, prefix arrays of different lengths,
+and 300,000 random pairs: 449,588 inputs, 0 mismatches. `test/stable.cpp`
+checks the public API with the option on and off.
+
+Measured here with `g++ -O3` and `-C opt-level=3`, alternating runs over 205
+option names: C++ 6.23 ns, public Rust wrapper 5.00 ns, or 1.25x faster. A
+direct call to `llvm_optionstrcmp_name` is 4.74 ns; the 0.26 ns difference is
+the C++ wrapper and C-ABI call. The Rust loop folds ASCII in one pass, reads
+both lengths before the loop, and avoids the two `StringRef::substr`
+temporaries and the out-of-line `compare_insensitive` call.
 
 ## Demangler port
 
@@ -172,11 +348,15 @@ ninja -C build llvm-rust-dlang-differential llvm-dlang-stable
 
 The differential harness generates 448 valid symbols, 100,000 random byte
 strings, 100,000 mutations of the corpus, and 100,000 targeted back-reference
-inputs. It reports 0 mismatches and benchmarks the public wrapper against the
-C++ reference. Measured here with `g++ -O3` and `-C opt-level=3` on generic
-x86-64, best of five rounds: 1.09x to 1.17x on the full string path (including
-the caller's std::string copy), 1.10x to 1.21x on the pointer API, and 1.11x to
-1.19x on long qualified names with repeated back references. The first NUL is
+inputs. It compares the raw `(pointer, length)` outputs, including bytes after
+an embedded NUL, and calls the public `dlangDemangleViaFFI` wrapper so its
+terminator write is checked for every input. It reports 0 mismatches and
+benchmarks the public wrapper against the C++ reference. Mismatch diagnostics
+print full byte sequences rather than C strings. Measured here with `g++ -O3`
+and `-C opt-level=3` on generic x86-64, best of five rounds: 1.17x to 1.20x
+on the full string path (including the caller's std::string copy), 1.21x to
+1.26x on the pointer API, and 1.18x to 1.29x on long qualified names with
+repeated back references. The first NUL is
 found once with `memchr` and cached lazily, so NUL-free names do not rescan for
 back references. A successful parse that stops at NUL is accepted even when the
 explicit input length has trailing bytes, matching the C++ C-string check. With
@@ -189,8 +369,47 @@ A toolchain-only install omits the companion archive along with `LLVMDemangle`.
 
 ## Benchmarks
 
-- Compare at the same optimization level: `g++ -O3` against
-  `-C opt-level=3`. Do not compare `-O2` C++ with `-O3` Rust.
+Every C++/Rust comparison must measure both sides, not only throughput:
+
+- **Compile:** clean and incremental wall time, user/system CPU, peak RSS,
+  object/archive bytes, and final linked binary bytes. Record compiler flags
+  and Rust flags.
+- **Runtime:** wall time, user/system CPU, peak RSS, throughput, and code size
+  or instruction counts where relevant.
+- Use the same optimization level (`g++ -O3` against `-C opt-level=3`), input
+  corpus, CPU affinity, and warmup. Report at least five repetitions as median
+  and min-max. Never compare `-O2` C++ with `-O3` Rust.
+- Toolchain caveat: `cargo build` invokes the installed `rustc`, which uses its
+  own bundled LLVM (currently 23.1.6), not the LLVM built from this repository.
+  The C++ reference is built by GCC 14.2. The repository's LLVM is used by
+  `llc` only in the explicit IR/backend experiments. Do not describe these as
+  same-LLVM codegen comparisons.
+- Separate process-level CPU/RSS from per-operation timings. Isolate a backend
+  with `--no-checks --bench-backend=cpp|rust` before comparing resources.
+- `llvm/utils/rust-migration/bench_metrics.py` measures wall time, user/system
+  CPU, peak RSS, and artifact bytes for either a compile command or a runtime
+  benchmark. On Linux it compiles and probes `measure_exec.c` in a temporary
+  directory, then forks a distinct child, so `ru_maxrss` excludes Python's
+  pre-exec pages. A `noexec` temp mount makes `auto` fall back to `wait4` with a
+  warning; `--rss-backend=launcher` fails with an actionable error. The
+  temporary directory is removed after every run. Artifact paths resolve
+  against `--cwd`, and output reports median plus min-max for wall, user, and
+  system time and peak RSS:
+
+```sh
+python3 llvm/utils/rust-migration/bench_metrics.py \
+  --label cpp-compile --repeat 5 --artifact /tmp/ebcdic.o \
+  --prepare 'rm -f /tmp/ebcdic.o' -- sh /tmp/compile-ebcdic.sh
+
+python3 llvm/utils/rust-migration/bench_metrics.py \
+  --label rust-runtime --repeat 5 -- \
+  ./build/bin/llvm-rust-convertebcdic-differential --no-checks \
+  --bench-backend=rust
+```
+
+`size`/`nm` report final linked and section sizes. A large static Rust archive
+is not the same as a large linked binary; report both.
+
 - The crates link as a plain static archive, so the differential test can be
   built without CMake:
   `g++ -O3 test/differential.cpp -Ltarget/release -lllvm_sha256 -o /tmp/diff`
@@ -278,9 +497,15 @@ grep -q 'srcinst: 2, srcop: 0' /tmp/dbg.out.mir # ADD debug ref remapped
 g++ prog.cpp $(build/bin/llvm-config --cxxflags --ldflags --libs \
   --system-libs support)
 
-# A component install has to carry the Rust archives too.
+# A component install has to carry the Rust archives too. A static component
+# does not link them, so build the aggregate first for a direct install.
+ninja -C build LLVMSupport LLVMSupport-rust LLVMDemangle LLVMDemangle-rust
 cmake --install build --prefix /tmp/llvminst --component LLVMSupport
 cmake --install build --prefix /tmp/llvminst --component LLVMDemangle
+
+# LLVMConfig.cmake must recreate every enabled Rust archive as an imported
+# target. Check it from a consumer without adding the prefix lib dir:
+#   get_target_property(loc llvm_convertebcdic IMPORTED_LOCATION)
 ```
 
 `llvm-config` without a component list fails in this fork because the `engine`

@@ -209,6 +209,54 @@ if(LLVM_ENABLE_RUST_DLANG AND NOT TARGET llvm_dlangdemangle)
   unset(_llvm_dlangdemangle_locations)
 endif()
 
+# Static LLVMSupport keeps Rust archives in its exported link interface. Define
+# those targets so consumers never fall back to a bare -l<name> that requires
+# the caller to add the LLVM library directory to its link search path.
+set(_llvm_rust_library_dir "@LLVM_CONFIG_RUST_LIBRARY_DIR@")
+set(_llvm_rust_configurations "@LLVM_CONFIG_RUST_CONFIGURATIONS@")
+set(_llvm_rust_imported_targets
+  "@LLVM_CONFIG_RUST_IMPORTED_TARGETS@")
+foreach(_llvm_rust_entry IN LISTS _llvm_rust_imported_targets)
+  if(NOT _llvm_rust_entry)
+    continue()
+  endif()
+  string(REPLACE "|" ";" _llvm_rust_fields "${_llvm_rust_entry}")
+  list(GET _llvm_rust_fields 0 _llvm_rust_target)
+  list(GET _llvm_rust_fields 1 _llvm_rust_library)
+  if(TARGET ${_llvm_rust_target})
+    continue()
+  endif()
+  add_library(${_llvm_rust_target} STATIC IMPORTED GLOBAL)
+  if(_llvm_rust_configurations)
+    foreach(_llvm_rust_config IN LISTS _llvm_rust_configurations)
+      string(TOUPPER "${_llvm_rust_config}" _llvm_rust_config_upper)
+      set(_llvm_rust_location
+        "${_llvm_rust_library_dir}/${_llvm_rust_library}")
+      string(REPLACE "__LLVM_RUST_CONFIG_6F3A1C9D__" "${_llvm_rust_config}"
+        _llvm_rust_location "${_llvm_rust_location}")
+      set_property(TARGET ${_llvm_rust_target} APPEND PROPERTY
+        IMPORTED_CONFIGURATIONS "${_llvm_rust_config_upper}")
+      set_target_properties(${_llvm_rust_target} PROPERTIES
+        "IMPORTED_LOCATION_${_llvm_rust_config_upper}"
+        "${_llvm_rust_location}")
+    endforeach()
+  else()
+    set_target_properties(${_llvm_rust_target} PROPERTIES
+      IMPORTED_LOCATION
+      "${_llvm_rust_library_dir}/${_llvm_rust_library}")
+  endif()
+endforeach()
+unset(_llvm_rust_library_dir)
+unset(_llvm_rust_configurations)
+unset(_llvm_rust_imported_targets)
+unset(_llvm_rust_entry)
+unset(_llvm_rust_fields)
+unset(_llvm_rust_target)
+unset(_llvm_rust_library)
+unset(_llvm_rust_config)
+unset(_llvm_rust_config_upper)
+unset(_llvm_rust_location)
+
 # This is a secondary one for generated files
 set(LLVM_INCLUDE_DIR "@LLVM_CONFIG_INCLUDE_DIR@")
 

@@ -15,6 +15,61 @@
 
 #include "llvm/Support/ConvertEBCDIC.h"
 
+#if defined(LLVM_RUST_CONVERTEBCDIC)
+#include "ConvertEBCDICFFI.h"
+
+namespace llvm::ConverterEBCDIC {
+std::error_code convertToEBCDIC(StringRef Source,
+                                SmallVectorImpl<char> &Result) {
+  assert(Result.empty() && "Result must be empty!");
+  Result.resize_for_overwrite(Source.size());
+  size_t ResultLen = 0;
+  int32_t Status = llvm_convertebcdic_to_ebcdic(
+      reinterpret_cast<const uint8_t *>(Source.data()), Source.size(),
+      reinterpret_cast<uint8_t *>(Result.data()), Result.size(), &ResultLen);
+  Result.resize(ResultLen);
+  if (Status == 0)
+    return {};
+  if (Status == 2)
+    return std::make_error_code(std::errc::invalid_argument);
+  return std::make_error_code(std::errc::illegal_byte_sequence);
+}
+
+void convertToUTF8(StringRef Source, SmallVectorImpl<char> &Result) {
+  assert(Result.empty() && "Result must be empty!");
+  // ASCII-only EBCDIC names keep the output at one byte per input byte. Size
+  // for that case first so GOFF's SmallString<256> names stay inline; only
+  // retry at the two-byte worst case when the Rust code reports that it needs
+  // more room.
+  Result.resize_for_overwrite(Source.size());
+  size_t ResultLen = 0;
+  size_t Consumed = 0;
+  int32_t Status = llvm_convertebcdic_to_utf8(
+      reinterpret_cast<const uint8_t *>(Source.data()), Source.size(),
+      reinterpret_cast<uint8_t *>(Result.data()), Result.size(), &ResultLen,
+      &Consumed);
+  if (Status == 3) {
+    size_t PrefixLen = ResultLen;
+    size_t SuffixLen = 0;
+    size_t SuffixConsumed = 0;
+    Result.resize_for_overwrite(Source.size() * 2);
+    Status = llvm_convertebcdic_to_utf8(
+        reinterpret_cast<const uint8_t *>(Source.data()) + Consumed,
+        Source.size() - Consumed,
+        reinterpret_cast<uint8_t *>(Result.data()) + PrefixLen,
+        Result.size() - PrefixLen, &SuffixLen, &SuffixConsumed);
+    ResultLen = PrefixLen + SuffixLen;
+    assert(Consumed + SuffixConsumed == Source.size() &&
+           "Rust EBCDIC retry did not consume the whole source");
+  }
+  assert(Status == 0 && "Rust EBCDIC conversion ran out of output space");
+  (void)Status;
+  Result.resize(ResultLen);
+}
+} // namespace llvm::ConverterEBCDIC
+
+#else
+
 using namespace llvm;
 
 static const unsigned char ISO88591ToIBM1047[256] = {
@@ -121,3 +176,5 @@ void ConverterEBCDIC::convertToUTF8(StringRef Source,
     Result.push_back(static_cast<char>(Ch));
   }
 }
+
+#endif // LLVM_RUST_CONVERTEBCDIC

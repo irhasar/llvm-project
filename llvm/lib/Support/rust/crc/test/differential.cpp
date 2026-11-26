@@ -1,5 +1,9 @@
 //===-- differential.cpp - Differential test for the Rust CRC-32 ----------===//
 //
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
 // Compares the Rust implementation against two C++ references: the
 // byte-at-a-time loop LLVM currently uses and a slicing-by-8 implementation.
 // Also reports throughput for each so regressions show up in CI logs.

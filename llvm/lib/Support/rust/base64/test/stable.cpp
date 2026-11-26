@@ -1,5 +1,9 @@
 //===-- stable.cpp - Golden tests for LLVM's Base64 API -------------------===//
 //
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
 // Exercises llvm::encodeBase64 and llvm::decodeBase64 through the public
 // headers. Built against LLVMSupport so it covers the Rust crate and the C++
 // fallback with the same binary layout.

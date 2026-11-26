@@ -14,7 +14,6 @@
 //===----------------------------------------------------------------------===//
 
 #![cfg_attr(not(test), no_std)]
-#![allow(clippy::missing_safety_doc)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 #[cfg(not(test))]
@@ -1321,6 +1320,14 @@ fn decode_punycode(input: &[u8], out: &mut Out) -> bool {
     true
 }
 
+/// Demangles a Rust v0 symbol into a newly allocated buffer.
+///
+/// # Safety
+///
+/// `input` must be readable for `input_len` bytes and may be null when
+/// `input_len` is zero. `output` must be a valid, writable pointer. On success
+/// the returned pointer is owned by the caller and must be released with
+/// `free`; the returned length excludes the NUL terminator.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_rustdemangle_demangle(
     input: *const u8,
@@ -1399,11 +1406,13 @@ mod tests {
                 b"core::str::count::do_count_chars",
             ),
             (
-                b"_RINvMNtCs8uuN1nrGffB_4core3stre12trim_matchesNvMNtNtB5_4char7methodsc13is_whitespaceECsh0g7Hz38UNf_3std",
+                b"_RINvMNtCs8uuN1nrGffB_4core3stre12trim_matchesNvMNtNtB5_4char7methodsc\
+                 13is_whitespaceECsh0g7Hz38UNf_3std",
                 b"<str>::trim_matches::<<char>::is_whitespace>",
             ),
             (
-                b"_RNvXsR_NtCs8uuN1nrGffB_4core6optionINtB5_6OptionmENtNtB7_3fmt5Debug3fmtCsh0g7Hz38UNf_3std",
+                b"_RNvXsR_NtCs8uuN1nrGffB_4core6optionINtB5_6OptionmENtNtB7_3fmt5Debug\
+                 3fmtCsh0g7Hz38UNf_3std",
                 b"<core::option::Option<u32> as core::fmt::Debug>::fmt",
             ),
         ];

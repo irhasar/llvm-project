@@ -680,8 +680,18 @@ option(LLVM_ENABLE_RUST_BASE64
   "Use the Rust implementation of Base64 in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_CONVERTUTF
   "Use the Rust implementation of ConvertUTF in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_CONVERTEBCDIC
+  "Use the Rust implementation of EBCDIC conversion in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_XXHASH
   "Use the Rust implementation of xxHash in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_DJB
+  "Use the Rust implementation of the DJB hash in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_VERSIONTUPLE
+  "Use the Rust implementation of VersionTuple parsing in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_OPTIONSTRCMP
+  "Use the Rust implementation of option string comparison in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_NATIVEFORMATTING
+  "Use the Rust implementation of NativeFormatting in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_RUSTDEMANGLE
   "Use the Rust implementation of the Rust v0 demangler in LLVMDemangle (experimental)" OFF)
 option(LLVM_ENABLE_RUST_DLANG

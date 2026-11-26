@@ -1,5 +1,9 @@
 //===-- differential.cpp - Rust vs C++ D demangler -------------*- C++ -*-===//
 //
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
 // Compares llvm::dlangDemangle with the Rust port on generated D symbols,
 // randomized inputs, and mutations, then reports throughput.
 //
@@ -19,44 +23,83 @@
 
 namespace llvm {
 char *dlangDemangleCpp(std::string_view MangledName);
+bool dlangDemangleCppBytes(std::string_view MangledName, std::string &Result);
 }
 
-static bool rustDemangle(std::string_view Mangled, std::string &Result) {
-  char *Text = llvm::dlangDemangle(Mangled);
-  if (!Text)
+static bool rustDemangleBytes(std::string_view Mangled, std::string &Result) {
+  uint8_t *Buffer = nullptr;
+  intptr_t Len = llvm_dlangdemangle_demangle(
+      reinterpret_cast<const uint8_t *>(Mangled.data()), Mangled.size(),
+      &Buffer);
+  if (Len <= 0) {
+    std::free(Buffer);
     return false;
-  Result.assign(Text);
-  std::free(Text);
+  }
+  Result.assign(reinterpret_cast<const char *>(Buffer),
+                static_cast<size_t>(Len));
+  std::free(Buffer);
   return true;
 }
 
-static bool referenceDemangle(std::string_view Mangled, std::string &Result) {
+static bool referenceDemangleBytes(std::string_view Mangled,
+                                   std::string &Result) {
+  return llvm::dlangDemangleCppBytes(Mangled, Result);
+}
+
+static bool rustDemanglePublic(std::string_view Mangled, std::string &Result) {
+  char *Text = llvm::detail::dlangDemangleViaFFI(Mangled);
+  if (!Text)
+    return false;
+  Result.assign(Text);
+  bool Terminated = Text[Result.size()] == '\0';
+  std::free(Text);
+  return Terminated;
+}
+
+static bool referenceDemanglePublic(std::string_view Mangled,
+                                    std::string &Result) {
   char *Text = llvm::dlangDemangleCpp(Mangled);
   if (!Text)
     return false;
   Result.assign(Text);
+  bool Terminated = Text[Result.size()] == '\0';
   std::free(Text);
-  return true;
+  return Terminated;
+}
+
+static void printBytes(const char *Label, const std::string &S) {
+  std::fprintf(stderr, "  %s (%zu):", Label, S.size());
+  for (unsigned char C : S)
+    std::fprintf(stderr, " %02x", C);
+  std::fputc('\n', stderr);
 }
 
 static bool check(std::string_view Mangled) {
-  std::string Rust;
-  std::string Reference;
-  bool RustOK = rustDemangle(Mangled, Rust);
-  bool ReferenceOK = referenceDemangle(Mangled, Reference);
+  std::string RustBytes;
+  std::string ReferenceBytes;
+  bool RustOK = rustDemangleBytes(Mangled, RustBytes);
+  bool ReferenceOK = referenceDemangleBytes(Mangled, ReferenceBytes);
 
-  if (RustOK == ReferenceOK && (!RustOK || Rust == Reference))
+  std::string RustPublic;
+  std::string ReferencePublic;
+  bool RustPublicOK = rustDemanglePublic(Mangled, RustPublic);
+  bool ReferencePublicOK = referenceDemanglePublic(Mangled, ReferencePublic);
+
+  bool BytesMatch =
+      RustOK == ReferenceOK && (!RustOK || RustBytes == ReferenceBytes);
+  bool PublicMatch = RustPublicOK == ReferencePublicOK &&
+                     (!RustPublicOK || RustPublic == ReferencePublic);
+  if (BytesMatch && PublicMatch)
     return true;
 
-  std::fprintf(stderr, "mismatch for %zu-byte input: %.*s\n", Mangled.size(),
-               static_cast<int>(Mangled.size()), Mangled.data());
-  std::fprintf(stderr, "  bytes:");
-  for (unsigned char C : Mangled) std::fprintf(stderr, " %02x", C);
-  std::fprintf(stderr, "\n");
-  std::fprintf(stderr, "  rust ok=%d: %s\n", RustOK,
-               RustOK ? Rust.c_str() : "<null>");
-  std::fprintf(stderr, "  c++  ok=%d: %s\n", ReferenceOK,
-               ReferenceOK ? Reference.c_str() : "<null>");
+  std::fprintf(stderr, "mismatch for %zu-byte input\n", Mangled.size());
+  printBytes("input", std::string(Mangled));
+  printBytes("rust raw", RustBytes);
+  printBytes("c++ raw", ReferenceBytes);
+  printBytes("rust public", RustPublic);
+  printBytes("c++ public", ReferencePublic);
+  std::fprintf(stderr, "  ok raw=%d/%d public=%d/%d\n", RustOK, ReferenceOK,
+               RustPublicOK, ReferencePublicOK);
   return false;
 }
 
@@ -140,6 +183,24 @@ static std::vector<std::string> makeCorpus() {
   Corpus.push_back("_D3foo3bar6__S3bazZ");
   Corpus.push_back("_D3foo3bar6__S3foo3bari");
   return Corpus;
+}
+
+static bool checkNulSuffix() {
+  std::string_view Input("_D3a\0b3barQeZ", 13);
+  std::string Expected("a\0b.bar.bar", 11);
+  std::string RustBytes;
+  std::string ReferenceBytes;
+  std::string RustPublic;
+  std::string ReferencePublic;
+  if (!rustDemangleBytes(Input, RustBytes) ||
+      !referenceDemangleBytes(Input, ReferenceBytes) ||
+      !rustDemanglePublic(Input, RustPublic) ||
+      !referenceDemanglePublic(Input, ReferencePublic))
+    return false;
+  if (RustBytes != Expected || ReferenceBytes != Expected)
+    return false;
+  // The public C-string wrapper must stop at the embedded NUL.
+  return RustPublic == "a" && ReferencePublic == "a";
 }
 
 static std::vector<std::string> makeLongCorpus() {
@@ -272,19 +333,37 @@ static double measureApiRound(bool Rust,
          (200.0 * Corpus.size());
 }
 
-int main() {
+int main(int argc, char **argv) {
+  bool RunChecks = true;
+  int BenchBackend = -1; // -1 both, 0 C++, 1 Rust.
+  for (int I = 1; I < argc; ++I) {
+    if (std::strcmp(argv[I], "--no-checks") == 0)
+      RunChecks = false;
+    else if (std::strcmp(argv[I], "--bench-backend=cpp") == 0)
+      BenchBackend = 0;
+    else if (std::strcmp(argv[I], "--bench-backend=rust") == 0)
+      BenchBackend = 1;
+  }
+
   std::vector<std::string> Corpus = makeCorpus();
   std::vector<std::string> LongCorpus = makeLongCorpus();
   Corpus.insert(Corpus.end(), LongCorpus.begin(), LongCorpus.end());
   unsigned Failures = 0;
-  for (const std::string &Symbol : Corpus) {
-    if (!check(Symbol))
-      ++Failures;
-  }
+  if (RunChecks) {
+    for (const std::string &Symbol : Corpus) {
+      if (!check(Symbol))
+        ++Failures;
+    }
 
-  if (!checkFuzz()) {
-    std::fprintf(stderr, "differential fuzz failed\n");
-    return 1;
+    if (!checkNulSuffix()) {
+      std::fprintf(stderr, "differential NUL suffix comparison failed\n");
+      return 1;
+    }
+
+    if (!checkFuzz()) {
+      std::fprintf(stderr, "differential fuzz failed\n");
+      return 1;
+    }
   }
 
   double Cpp = 1e100;
@@ -294,28 +373,48 @@ int main() {
   double CppLong = 1e100;
   double RustLong = 1e100;
   for (unsigned Round = 0; Round != 5; ++Round) {
-    Cpp = std::min(Cpp, measureRound(false, Corpus));
-    Rust = std::min(Rust, measureRound(true, Corpus));
-    CppApi = std::min(CppApi, measureApiRound(false, Corpus));
-    RustApi = std::min(RustApi, measureApiRound(true, Corpus));
-    CppLong = std::min(CppLong, measureRound(false, LongCorpus));
-    RustLong = std::min(RustLong, measureRound(true, LongCorpus));
+    if (BenchBackend != 1) {
+      Cpp = std::min(Cpp, measureRound(false, Corpus));
+      CppApi = std::min(CppApi, measureApiRound(false, Corpus));
+      CppLong = std::min(CppLong, measureRound(false, LongCorpus));
+    }
+    if (BenchBackend != 0) {
+      Rust = std::min(Rust, measureRound(true, Corpus));
+      RustApi = std::min(RustApi, measureApiRound(true, Corpus));
+      RustLong = std::min(RustLong, measureRound(true, LongCorpus));
+    }
   }
-  std::printf("corpus: %zu symbols, %u mismatches\n", Corpus.size(), Failures);
-  std::printf("fuzz: 300000 inputs, 0 mismatches\n");
-  std::printf("benchmark: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
-              "speedup %.2fx\n",
-              Cpp, Rust, Cpp / Rust);
-  std::printf("api: c++ %.1f ns/symbol, rust %.1f ns/symbol, speedup %.2fx\n",
-              CppApi, RustApi, CppApi / RustApi);
-  std::printf("long qualified: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
-              "speedup %.2fx\n",
-              CppLong, RustLong, CppLong / RustLong);
+  if (RunChecks) {
+    std::printf("corpus: %zu symbols, %u mismatches\n", Corpus.size(),
+                Failures);
+    std::printf("fuzz: 300000 inputs, 0 mismatches\n");
+  }
+  if (BenchBackend == 0) {
+    std::printf("benchmark: c++ %.1f ns/symbol\n", Cpp);
+    std::printf("api: c++ %.1f ns/symbol\n", CppApi);
+    std::printf("long qualified: c++ %.1f ns/symbol\n", CppLong);
+  } else if (BenchBackend == 1) {
+    std::printf("benchmark: rust %.1f ns/symbol\n", Rust);
+    std::printf("api: rust %.1f ns/symbol\n", RustApi);
+    std::printf("long qualified: rust %.1f ns/symbol\n", RustLong);
+  } else {
+    std::printf("benchmark: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
+                "speedup %.2fx\n",
+                Cpp, Rust, Cpp / Rust);
+    std::printf("api: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
+                "speedup %.2fx\n",
+                CppApi, RustApi, CppApi / RustApi);
+    std::printf("long qualified: c++ %.1f ns/symbol, rust %.1f ns/symbol, "
+                "speedup %.2fx\n",
+                CppLong, RustLong, CppLong / RustLong);
+  }
 
-  if (Failures != 0) {
-    std::fprintf(stderr, "%u mismatches\n", Failures);
-    return 1;
+  if (RunChecks) {
+    if (Failures != 0) {
+      std::fprintf(stderr, "%u mismatches\n", Failures);
+      return 1;
+    }
+    std::printf("OK: Rust dlangDemangle matches the C++ reference\n");
   }
-  std::printf("OK: Rust dlangDemangle matches the C++ reference\n");
   return 0;
 }

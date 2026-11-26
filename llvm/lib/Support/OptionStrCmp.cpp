@@ -8,9 +8,23 @@
 
 #include "llvm/Support/OptionStrCmp.h"
 #include "llvm/ADT/STLExtras.h"
+#include <cstdint>
 
 using namespace llvm;
 
+#if defined(LLVM_RUST_OPTIONSTRCMP)
+extern "C" int llvm_optionstrcmp_name(const uint8_t *A, size_t ALen,
+                                      const uint8_t *B, size_t BLen,
+                                      uint8_t FallbackCaseSensitive);
+
+int llvm::StrCmpOptionName(StringRef A, StringRef B,
+                           bool FallbackCaseSensitive) {
+  return llvm_optionstrcmp_name(
+      reinterpret_cast<const uint8_t *>(A.data()), A.size(),
+      reinterpret_cast<const uint8_t *>(B.data()), B.size(),
+      FallbackCaseSensitive ? 1 : 0);
+}
+#else
 // Comparison function for Option strings (option names & prefixes).
 // The ordering is *almost* case-insensitive lexicographic, with an exception.
 // '\0' comes at the end of the alphabet instead of the beginning (thus options
@@ -30,6 +44,7 @@ int llvm::StrCmpOptionName(StringRef A, StringRef B,
   return (A.size() == MinSize) ? 1 /* A is a prefix of B. */
                                : -1 /* B is a prefix of A */;
 }
+#endif
 
 // Comparison function for Option prefixes.
 int llvm::StrCmpOptionPrefixes(ArrayRef<StringRef> APrefixes,

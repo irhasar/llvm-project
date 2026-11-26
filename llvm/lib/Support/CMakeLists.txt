@@ -482,6 +482,57 @@ add_executable(llvm-convertutf-stable EXCLUDE_FROM_ALL
   rust/convertutf/test/stable.cpp)
 target_link_libraries(llvm-convertutf-stable PRIVATE LLVMSupport)
 
+# The standalone EBCDIC tests avoid linking LLVMSupport on 64-bit ELF by
+# providing the one SmallVector out-of-line symbol they can reach. Other
+# targets use the real support library.
+if(UNIX AND NOT APPLE AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+  set(LLVM_EBCDIC_STANDALONE_SOURCES
+    rust/convertebcdic/test/SmallVectorStub.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/ConvertEBCDIC.cpp")
+  set(LLVM_EBCDIC_TEST_SUPPORT_LIBS)
+else()
+  set(LLVM_EBCDIC_STANDALONE_SOURCES)
+  set(LLVM_EBCDIC_TEST_SUPPORT_LIBS LLVMSupport)
+endif()
+
+if(LLVM_ENABLE_RUST_CONVERTEBCDIC)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_convertebcdic
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/convertebcdic/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_CONVERTEBCDIC)
+  target_link_libraries(LLVMSupport PRIVATE llvm_convertebcdic)
+
+  add_executable(llvm-rust-convertebcdic-differential EXCLUDE_FROM_ALL
+    rust/convertebcdic/test/differential.cpp
+    rust/convertebcdic/test/ConvertEBCDICCpp.cpp
+    ${LLVM_EBCDIC_STANDALONE_SOURCES})
+  target_compile_definitions(llvm-rust-convertebcdic-differential PRIVATE
+    LLVM_RUST_CONVERTEBCDIC)
+  target_include_directories(llvm-rust-convertebcdic-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-convertebcdic-differential PRIVATE
+    llvm_convertebcdic ${LLVM_EBCDIC_TEST_SUPPORT_LIBS})
+  add_custom_target(check-llvm-rust-convertebcdic
+    COMMAND llvm-rust-convertebcdic-differential
+    DEPENDS llvm-rust-convertebcdic-differential
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-convertebcdic-stable EXCLUDE_FROM_ALL
+  rust/convertebcdic/test/stable.cpp
+  ${LLVM_EBCDIC_STANDALONE_SOURCES})
+target_include_directories(llvm-convertebcdic-stable PRIVATE
+  ${LLVM_MAIN_INCLUDE_DIR}
+  ${LLVM_BINARY_DIR}/include)
+target_link_libraries(llvm-convertebcdic-stable PRIVATE
+  ${LLVM_EBCDIC_TEST_SUPPORT_LIBS})
+if(LLVM_ENABLE_RUST_CONVERTEBCDIC)
+  target_compile_definitions(llvm-convertebcdic-stable PRIVATE
+    LLVM_RUST_CONVERTEBCDIC)
+  target_link_libraries(llvm-convertebcdic-stable PRIVATE llvm_convertebcdic)
+endif()
+
 if(LLVM_ENABLE_RUST_XXHASH)
   include(AddRustLibrary)
   add_llvm_rust_staticlib(llvm_xxhash
@@ -506,6 +557,114 @@ endif()
 add_executable(llvm-xxhash-stable EXCLUDE_FROM_ALL
   rust/xxhash/test/stable.cpp)
 target_link_libraries(llvm-xxhash-stable PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_DJB)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_djb
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/djb/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_DJB)
+  target_link_libraries(LLVMSupport PRIVATE llvm_djb)
+
+  add_executable(llvm-rust-djb-differential EXCLUDE_FROM_ALL
+    rust/djb/test/differential.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/DJB.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ConvertUTF.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/UnicodeCaseFold.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ABIBreak.cpp")
+  target_include_directories(llvm-rust-djb-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-djb-differential PRIVATE llvm_djb)
+  add_custom_target(check-llvm-rust-djb
+    COMMAND llvm-rust-djb-differential
+    COMMAND llvm-djb-stable
+    DEPENDS llvm-rust-djb-differential llvm-djb-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-djb-stable EXCLUDE_FROM_ALL
+  rust/djb/test/stable.cpp)
+target_link_libraries(llvm-djb-stable PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_VERSIONTUPLE)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_versiontuple
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/versiontuple/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_VERSIONTUPLE)
+  target_link_libraries(LLVMSupport PRIVATE llvm_versiontuple)
+
+  add_executable(llvm-rust-versiontuple-differential EXCLUDE_FROM_ALL
+    rust/versiontuple/test/differential.cpp
+    rust/versiontuple/test/reference.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/ABIBreak.cpp")
+  target_include_directories(llvm-rust-versiontuple-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-versiontuple-differential PRIVATE LLVMSupport)
+  add_custom_target(check-llvm-rust-versiontuple
+    COMMAND llvm-rust-versiontuple-differential
+    COMMAND llvm-versiontuple-stable
+    DEPENDS llvm-rust-versiontuple-differential llvm-versiontuple-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-versiontuple-stable EXCLUDE_FROM_ALL
+  rust/versiontuple/test/stable.cpp)
+target_link_libraries(llvm-versiontuple-stable PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_OPTIONSTRCMP)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_optionstrcmp
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/optionstrcmp/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_OPTIONSTRCMP)
+  target_link_libraries(LLVMSupport PRIVATE llvm_optionstrcmp)
+
+  add_executable(llvm-rust-optionstrcmp-differential EXCLUDE_FROM_ALL
+    rust/optionstrcmp/test/differential.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/OptionStrCmp.cpp"
+    rust/optionstrcmp/test/reference_stringref.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/ABIBreak.cpp")
+  target_include_directories(llvm-rust-optionstrcmp-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-optionstrcmp-differential PRIVATE llvm_optionstrcmp)
+  add_custom_target(check-llvm-rust-optionstrcmp
+    COMMAND llvm-rust-optionstrcmp-differential
+    COMMAND llvm-optionstrcmp-stable
+    DEPENDS llvm-rust-optionstrcmp-differential llvm-optionstrcmp-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-optionstrcmp-stable EXCLUDE_FROM_ALL
+  rust/optionstrcmp/test/stable.cpp)
+target_link_libraries(llvm-optionstrcmp-stable PRIVATE LLVMSupport)
+
+if(LLVM_ENABLE_RUST_NATIVEFORMATTING)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_nativeformatting
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/nativeformatting/Cargo.toml"
+    STRIP_DEBUG)
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_NATIVEFORMATTING)
+  target_link_libraries(LLVMSupport PRIVATE llvm_nativeformatting)
+
+  add_executable(llvm-rust-nativeformatting-differential EXCLUDE_FROM_ALL
+    rust/nativeformatting/test/differential.cpp)
+  target_include_directories(llvm-rust-nativeformatting-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-nativeformatting-differential PRIVATE
+    llvm_nativeformatting)
+  add_custom_target(check-llvm-rust-nativeformatting
+    COMMAND llvm-rust-nativeformatting-differential
+    COMMAND llvm-nativeformatting-stable
+    DEPENDS llvm-rust-nativeformatting-differential
+            llvm-nativeformatting-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-nativeformatting-stable EXCLUDE_FROM_ALL
+  rust/nativeformatting/test/stable.cpp)
+target_link_libraries(llvm-nativeformatting-stable PRIVATE LLVMSupport)
 
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
@@ -553,8 +712,8 @@ set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${llvm_system_libs}")
 
 # The Rust ports are static archives installed next to the other LLVM
 # libraries, so downstream links need them in llvm-config --system-libs.
-foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF XXHASH RUSTDEMANGLE
-                  DLANG)
+foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF CONVERTEBCDIC
+                  XXHASH RUSTDEMANGLE DLANG NATIVEFORMATTING)
   if(LLVM_ENABLE_RUST_${rust_port})
     if(rust_port STREQUAL "DLANG")
       set(rust_port_lower "dlangdemangle")

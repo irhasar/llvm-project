@@ -16,7 +16,11 @@ on:
       - 'llvm/lib/Support/Base64.cpp'
       - 'llvm/lib/Support/ConvertUTF.cpp'
       - 'llvm/lib/Support/ConvertUTFWrapper.cpp'
+      - 'llvm/lib/Support/ConvertEBCDIC.cpp'
       - 'llvm/lib/Support/xxhash.cpp'
+      - 'llvm/lib/Support/DJB.cpp'
+      - 'llvm/lib/Support/VersionTuple.cpp'
+      - 'llvm/lib/Support/OptionStrCmp.cpp'
       - 'llvm/lib/Support/CMakeLists.txt'
       - 'llvm/lib/Demangle/**'
       - 'llvm/CMakeLists.txt'
@@ -34,32 +38,40 @@ concurrency:
 
 jobs:
   lint:
-    name: Lint crates
+    name: Lint crates (${{ matrix.toolchain }})
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.100.0", "nightly-2026-11-23"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust
         run: |
-          rustup toolchain install --profile minimal
-          rustc --version
+          rustup toolchain install "${{ matrix.toolchain }}" --profile minimal \
+            --component clippy,rustfmt
+          rustc "+${{ matrix.toolchain }}" --version
       - name: fmt, clippy and unit tests
         run: |
-          for crate in siphash crc md5 sha1 sha256 base64 convertutf xxhash; do
+          for crate in siphash crc md5 sha1 sha256 base64 convertutf convertebcdic xxhash djb versiontuple optionstrcmp nativeformatting; do
             echo "::group::$crate"
             (cd "llvm/lib/Support/rust/$crate" \
-              && cargo fmt --check \
-              && cargo clippy --all-targets -- -D warnings \
-              && cargo test)
+              && cargo "+${{ matrix.toolchain }}" fmt --check \
+              && cargo "+${{ matrix.toolchain }}" clippy --all-targets --locked -- -D warnings \
+              && cargo "+${{ matrix.toolchain }}" test --locked)
             echo "::endgroup::"
           done
           for demangler in rustdemangle dlangdemangle; do
             echo "::group::$demangler"
             (cd "llvm/lib/Demangle/rust/$demangler" \
-              && cargo fmt --check \
-              && cargo clippy --all-targets -- -D warnings \
-              && cargo test)
+              && cargo "+${{ matrix.toolchain }}" fmt --check \
+              && cargo "+${{ matrix.toolchain }}" clippy --all-targets --locked -- -D warnings \
+              && cargo "+${{ matrix.toolchain }}" test --locked)
             echo "::endgroup::"
           done
+          # cargo fmt does not follow include!(); check every Rust source.
+          find llvm/lib/Support/rust llvm/lib/Demangle/rust -name '*.rs' -print0 \
+            | xargs -0 rustfmt "+${{ matrix.toolchain }}" --check --edition 2024
   aarch64:
     name: AArch64 NEON (qemu)
     runs-on: ubuntu-24.04
@@ -67,19 +79,19 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Install Rust
         run: |
-          rustup toolchain install --profile minimal
-          rustc --version
+          rustup toolchain install 1.100.0 --profile minimal
+          rustc +1.100.0 --version
       - name: Install qemu and cross linker
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user gcc-aarch64-linux-gnu
       - name: Run NEON tests under qemu
         run: |
-          rustup target add aarch64-unknown-linux-gnu
+          rustup target add aarch64-unknown-linux-gnu --toolchain 1.100.0
           cd llvm/lib/Support/rust/xxhash
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
           export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu"
-          cargo test --target aarch64-unknown-linux-gnu
+          cargo +1.100.0 test --target aarch64-unknown-linux-gnu --locked
 
   build:
     name: Build (${{ matrix.backend }} backend)
@@ -97,13 +109,13 @@ jobs:
       - name: Install Rust
         if: matrix.backend == 'rust'
         run: |
-          rustup toolchain install --profile minimal
-          rustc --version
+          rustup toolchain install 1.100.0 --profile minimal
+          rustc +1.100.0 --version
       - name: Configure
         run: |
           RUST_FLAGS=""
           if [ "${{ matrix.backend }}" = "rust" ]; then
-            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON"
+            RUST_FLAGS="-DLLVM_ENABLE_RUST_SIPHASH=ON -DLLVM_ENABLE_RUST_CRC=ON -DLLVM_ENABLE_RUST_MD5=ON -DLLVM_ENABLE_RUST_SHA1=ON -DLLVM_ENABLE_RUST_SHA256=ON -DLLVM_ENABLE_RUST_BASE64=ON -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON -DLLVM_ENABLE_RUST_OPTIONSTRCMP=ON -DLLVM_ENABLE_RUST_NATIVEFORMATTING=ON -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON"
           fi
           cmake -G Ninja -S llvm -B build \
             -DCMAKE_BUILD_TYPE=Release \
@@ -121,8 +133,10 @@ jobs:
         run: |
           ninja -C build llvm-siphash-stable-hash llvm-crc-stable llvm-md5-stable \
             llvm-sha1-stable llvm-sha256-stable llvm-base64-stable \
-            llvm-convertutf-stable llvm-xxhash-stable llvm-rustdemangle-stable \
-            llvm-dlang-stable
+            llvm-convertutf-stable llvm-convertebcdic-stable llvm-xxhash-stable \
+            llvm-djb-stable llvm-versiontuple-stable \
+            llvm-optionstrcmp-stable llvm-nativeformatting-stable \
+            llvm-rustdemangle-stable llvm-dlang-stable
           ./build/bin/llvm-siphash-stable-hash
           ./build/bin/llvm-crc-stable
           ./build/bin/llvm-md5-stable
@@ -130,7 +144,12 @@ jobs:
           ./build/bin/llvm-sha256-stable
           ./build/bin/llvm-base64-stable
           ./build/bin/llvm-convertutf-stable
+          ./build/bin/llvm-convertebcdic-stable
           ./build/bin/llvm-xxhash-stable
+          ./build/bin/llvm-djb-stable
+          ./build/bin/llvm-versiontuple-stable
+          ./build/bin/llvm-optionstrcmp-stable
+          ./build/bin/llvm-nativeformatting-stable
           ./build/bin/llvm-rustdemangle-stable
           ./build/bin/llvm-dlang-stable
       - name: Differential checks
@@ -139,8 +158,10 @@ jobs:
           ninja -C build check-llvm-rust-siphash check-llvm-rust-crc \
             check-llvm-rust-md5 check-llvm-rust-sha1 check-llvm-rust-sha256 \
             check-llvm-rust-base64 check-llvm-rust-convertutf \
-            check-llvm-rust-xxhash check-llvm-rust-rustdemangle \
-            check-llvm-rust-dlang
+            check-llvm-rust-convertebcdic check-llvm-rust-xxhash \
+            check-llvm-rust-djb check-llvm-rust-versiontuple \
+            check-llvm-rust-optionstrcmp check-llvm-rust-nativeformatting \
+            check-llvm-rust-rustdemangle check-llvm-rust-dlang
 
   codegen-lea:
     name: LEA fold (llc)
@@ -162,8 +183,8 @@ jobs:
           sudo apt-get install -y cmake ninja-build g++ zlib1g-dev ccache
       - name: Install Rust
         run: |
-          rustup toolchain install --profile minimal
-          rustc --version
+          rustup toolchain install 1.100.0 --profile minimal
+          rustc +1.100.0 --version
       - name: Configure
         run: |
           cmake -G Ninja -S llvm -B build \
@@ -183,7 +204,7 @@ jobs:
           set -euo pipefail
           cd llvm/lib/Support/rust/md5
           RUSTFLAGS="-C lto=no -C target-cpu=generic" \
-            cargo rustc --release -- --emit=llvm-ir
+            cargo +1.100.0 rustc --release --locked -- --emit=llvm-ir
           IR="$(find target -name '*.ll' | head -n 1)"
           test -n "$IR"
           echo "IR=$PWD/$IR" >> "$GITHUB_ENV"

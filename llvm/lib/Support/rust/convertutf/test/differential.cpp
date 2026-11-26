@@ -1,5 +1,9 @@
 //===-- differential.cpp - Differential test for the Rust ConvertUTF -----===//
 //
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
 // Compares the Rust conversion routines against the C++ implementation in
 // llvm/lib/Support/ConvertUTF.cpp and reports throughput for both.
 //

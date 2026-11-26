@@ -12,9 +12,6 @@
 //===----------------------------------------------------------------------===//
 
 #![cfg_attr(not(test), no_std)]
-// The extern "C" entry points document their pointer contracts in the C
-// headers; repeating them as Rust `# Safety` sections would be redundant.
-#![allow(clippy::missing_safety_doc)]
 // The range checks mirror the C++ source one-for-one; keeping the explicit
 // comparisons makes the translation easier to audit.
 #![allow(clippy::manual_range_contains)]
@@ -197,11 +194,22 @@ unsafe fn find_maximal_subpart(source: *const u8, source_end: *const u8) -> u32 
     1
 }
 
+/// Returns the number of bytes in a UTF-8 sequence from its first byte.
+///
+/// # Safety
+///
+/// No pointer is dereferenced; `first` is any byte value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_get_num_bytes_for_utf8(first: u8) -> u32 {
     TRAILING_BYTES[first as usize] as u32 + 1
 }
 
+/// Checks whether the UTF-8 sequence at `source` is legal.
+///
+/// # Safety
+///
+/// `source` must point to at least one readable byte, and `source_end` must be
+/// a one-past-the-end pointer in the same allocation with `source < source_end`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_is_legal_utf8_sequence(
     source: *const u8,
@@ -215,6 +223,12 @@ pub unsafe extern "C" fn llvm_convertutf_is_legal_utf8_sequence(
     unsafe { is_legal_utf8(source, length) as u8 }
 }
 
+/// Returns the size of the legal UTF-8 sequence at `source`, or zero.
+///
+/// # Safety
+///
+/// `source` must point to at least one readable byte, and `source_end` must be
+/// a one-past-the-end pointer in the same allocation with `source < source_end`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_get_utf8_sequence_size(
     source: *const u8,
@@ -229,6 +243,12 @@ pub unsafe extern "C" fn llvm_convertutf_get_utf8_sequence_size(
     }
 }
 
+/// Finds the longest legal prefix of an invalid UTF-8 sequence.
+///
+/// # Safety
+///
+/// `source` and `source_end` must delimit a readable range in the same
+/// allocation, with `source <= source_end`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_find_maximal_subpart(
     source: *const u8,
@@ -237,6 +257,12 @@ pub unsafe extern "C" fn llvm_convertutf_find_maximal_subpart(
     unsafe { find_maximal_subpart(source, source_end) }
 }
 
+/// Checks a UTF-8 string and updates `source` to the first invalid position.
+///
+/// # Safety
+///
+/// `source` must be a valid, writable pointer to a cursor, and the range from
+/// `*source` to `source_end` must be readable and in the same allocation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_is_legal_utf8_string(
     source: *mut *const u8,
@@ -325,6 +351,13 @@ unsafe fn convert_ascii_run_utf16(
     }
 }
 
+/// Converts UTF-32 to UTF-16 and updates the source and target cursors.
+///
+/// # Safety
+///
+/// `source_start` and `target_start` must be valid, writable cursor pointers.
+/// The source range must be readable and the target range writable in their
+/// respective allocations; `flags` must be a valid conversion flag set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_utf32_to_utf16(
     source_start: *mut *const u32,
@@ -455,6 +488,13 @@ pub unsafe extern "C" fn llvm_convertutf_utf32_to_utf16(
     result
 }
 
+/// Converts UTF-16 to UTF-32 and updates the source and target cursors.
+///
+/// # Safety
+///
+/// `source_start` and `target_start` must be valid, writable cursor pointers.
+/// The source range must be readable and the target range writable in their
+/// respective allocations; `flags` must be a valid conversion flag set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_utf16_to_utf32(
     source_start: *mut *const u16,
@@ -537,6 +577,13 @@ unsafe fn write_utf8(ch: u32, target: *mut u8, bytes: usize) {
     }
 }
 
+/// Converts UTF-16 to UTF-8 and updates the source and target cursors.
+///
+/// # Safety
+///
+/// `source_start` and `target_start` must be valid, writable cursor pointers.
+/// The source range must be readable and the target range writable in their
+/// respective allocations; `flags` must be a valid conversion flag set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_utf16_to_utf8(
     source_start: *mut *const u16,
@@ -611,6 +658,13 @@ pub unsafe extern "C" fn llvm_convertutf_utf16_to_utf8(
     result
 }
 
+/// Converts UTF-32 to UTF-8 and updates the source and target cursors.
+///
+/// # Safety
+///
+/// `source_start` and `target_start` must be valid, writable cursor pointers.
+/// The source range must be readable and the target range writable in their
+/// respective allocations; `flags` must be a valid conversion flag set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_utf32_to_utf8(
     source_start: *mut *const u32,
@@ -698,6 +752,13 @@ unsafe fn decode_utf8(source: *const u8, extra: usize) -> u32 {
     }
 }
 
+/// Converts UTF-8 to UTF-16 and updates the source and target cursors.
+///
+/// # Safety
+///
+/// `source_start` and `target_start` must be valid, writable cursor pointers.
+/// The source range must be readable and the target range writable in their
+/// respective allocations; `flags` must be a valid conversion flag set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_utf8_to_utf16(
     source_start: *mut *const u8,
@@ -869,6 +930,13 @@ unsafe fn convert_utf8_to_utf32_impl(
     result
 }
 
+/// Converts UTF-8 to UTF-32, stopping at an incomplete trailing sequence.
+///
+/// # Safety
+///
+/// `source_start` and `target_start` must be valid, writable cursor pointers.
+/// The source range must be readable and the target range writable in their
+/// respective allocations; `flags` must be a valid conversion flag set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_utf8_to_utf32_partial(
     source_start: *mut *const u8,
@@ -889,6 +957,13 @@ pub unsafe extern "C" fn llvm_convertutf_utf8_to_utf32_partial(
     }
 }
 
+/// Converts UTF-8 to UTF-32 and updates the source and target cursors.
+///
+/// # Safety
+///
+/// `source_start` and `target_start` must be valid, writable cursor pointers.
+/// The source range must be readable and the target range writable in their
+/// respective allocations; `flags` must be a valid conversion flag set.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_convertutf_utf8_to_utf32(
     source_start: *mut *const u8,

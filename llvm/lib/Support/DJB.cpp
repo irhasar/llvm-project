@@ -16,6 +16,16 @@
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/Unicode.h"
 
+#if defined(LLVM_RUST_DJB)
+extern "C" uint32_t llvm_djb_case_folding_hash(const uint8_t *Data, size_t Len,
+                                               uint32_t H);
+
+uint32_t llvm::caseFoldingDjbHash(StringRef Buffer, uint32_t H) {
+  return llvm_djb_case_folding_hash(
+      reinterpret_cast<const uint8_t *>(Buffer.data()), Buffer.size(), H);
+}
+#else
+
 using namespace llvm;
 
 static UTF32 chopOneUTF32(StringRef &Buffer) {
@@ -81,3 +91,5 @@ uint32_t llvm::caseFoldingDjbHash(StringRef Buffer, uint32_t H) {
   }
   return H;
 }
+
+#endif

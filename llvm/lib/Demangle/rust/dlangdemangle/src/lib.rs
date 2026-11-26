@@ -13,7 +13,6 @@
 //===----------------------------------------------------------------------===//
 
 #![cfg_attr(not(test), no_std)]
-#![allow(clippy::missing_safety_doc)]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 #[cfg(not(test))]
@@ -757,6 +756,14 @@ impl<'a> Demangler<'a> {
     }
 }
 
+/// Demangles a D symbol into a newly allocated buffer.
+///
+/// # Safety
+///
+/// `input` must be readable for `input_len` bytes and may be null when
+/// `input_len` is zero. `output` must be a valid, writable pointer. On success
+/// the returned pointer is owned by the caller and must be released with
+/// `free`; the returned length excludes the NUL terminator.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn llvm_dlangdemangle_demangle(
     input: *const u8,
