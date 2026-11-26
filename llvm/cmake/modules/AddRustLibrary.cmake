@@ -97,14 +97,14 @@ function(add_llvm_rust_staticlib name manifest)
     else()
       set(strip_args --strip-debug)
     endif()
-    set(strip_command COMMAND "${CMAKE_STRIP}" ${strip_args} "${archive}")
+    set(strip_command COMMAND "${CMAKE_STRIP}" ${strip_args} "${staged}")
   endif()
 
   add_custom_command(OUTPUT "${staged}"
     COMMAND ${cargo_env} "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
             --manifest-path "${manifest}" --target-dir "${target_dir}"
-    ${strip_command}
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${archive}" "${staged}"
+    ${strip_command}
     DEPENDS ${crate_sources}
     COMMENT "Building Rust crate ${name}"
     VERBATIM)

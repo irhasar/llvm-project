@@ -238,24 +238,37 @@ Correctness coverage:
 
 Measured on this Zen 4 host with `g++ -O3` against `-C opt-level=3`, generic
 x86-64 on both sides, five pinned runs (`taskset -c 0`) over four million
-full-width 64-bit values through the public C++ API, median ns/op:
+full-width 64-bit values through the public C++ API, median (min-max) ns/op:
 
 | Operation | C++ | Rust | Rust speedup |
 |-----------|-----|------|--------------|
-| Decimal integer | 34.52 | 22.77 | 1.52x |
-| Grouped integer | 68.43 | 27.24 | 2.51x |
-| Hex, width 16 | 13.20 | 11.31 | 1.17x |
+| Decimal integer | 34.52 (34.44-36.84) | 22.77 (21.63-24.29) | 1.52x |
+| Grouped integer | 68.43 (67.80-71.32) | 27.24 (27.04-27.56) | 2.51x |
+| Hex, width 16 | 13.20 (13.14-13.53) | 11.31 (11.24-11.71) | 1.17x |
 
-The process-level benchmark took 464.60 ms wall / 463.08 ms CPU for C++ and
-245.26 ms / 244.84 ms for Rust, with 3.62 MiB peak RSS for both. A clean C++
-compile of `NativeFormatting.cpp` took 677.72 ms
-wall / 582.22 ms CPU / 127.60 MiB RSS and produced a 13,352-byte object; the
-clean Rust crate build took 195.41 ms / 123.14 ms / 114.00 MiB and produced a
-5,056,024-byte archive. `AddRustLibrary` strips debug sections from the staged
-archive with `strip --strip-debug`, reducing it to 2,522,592 bytes. The linked
-stable test still grew from 1,564,480 to 1,576,248 bytes (+11,768 bytes, +0.75%).
-That misses the final-linked-binary size gate; the port remains opt-in and is
-not claimed as a gate-clearing result.
+The process-level rows are the sum of the per-operation medians: C++ 464.60 ms
+wall (461.50-486.73), 461.07 ms user, 2.01 ms sys; Rust 245.26 ms wall
+(239.64-254.23), 241.84 ms user, 3.00 ms sys; peak RSS was 3.62 MiB for both.
+
+Compile rows are five pinned runs. C++ is the fallback build (option `OFF`);
+the Rust total sums the crate build and the C++ wrapper compiled with the
+option `ON`:
+
+| Backend | Mode | Wall ms | User ms | Sys ms | Peak RSS MiB | Object/archive bytes |
+|---------|------|---------|---------|--------|--------------|----------------------|
+| C++ | clean | 632.69 (629.96-649.06) | 548.93 | 88.11 | 128.13 | 13,208 |
+| C++ | incremental | 635.61 (632.57-655.84) | 539.80 | 101.21 | 128.02 | 13,208 |
+| Rust crate | clean | 205.67 (203.22-207.72) | 130.18 | 78.50 | 115.60 | 5,056,024 |
+| Rust crate | incremental | 177.63 (175.60-181.72) | 125.39 | 53.94 | 115.59 | 5,056,024 |
+| C++ wrapper (Rust ON) | clean | 622.39 (611.92-626.95) | 527.30 | 89.43 | 126.44 | 13,352 |
+| Rust total | clean | 828.06 | 657.48 | 167.93 | 126.44 | 5,056,024 + 13,352 |
+| Rust total | incremental | 800.02 | 652.69 | 143.36 | 126.44 | 5,056,024 + 13,352 |
+
+`AddRustLibrary` strips debug sections from the staged copy with
+`strip --strip-debug`, reducing the 5,056,024-byte archive to 2,522,592 bytes.
+The linked stable test still grew from 1,564,480 to 1,576,248 bytes (+11,768
+bytes, +0.75%). That misses the final-linked-binary size gate; the port remains
+opt-in and is not claimed as a gate-clearing result.
 
 ## Measurement policy
 
@@ -1031,7 +1044,7 @@ The differential target links `LLVMSupport` and measures the public
 `VersionTuple::tryParse` path. `test/reference.cpp` carries the original parse
 loop as a free function so it does not collide with the public method. The
 corpus covers valid boundaries, invalid separators and trailing bytes,
-oversized components, and 300,000 random ASCII strings: 300,086 inputs, 0
+oversized components, and 300,000 random ASCII strings: 300,093 inputs, 0
 mismatches. `test/stable.cpp` checks every component presence flag and that a
 failed parse leaves the destination unchanged.
 

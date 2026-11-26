@@ -72,7 +72,7 @@ def build_launcher(directory: Path) -> Path | None:
             stderr=subprocess.DEVNULL,
         )
         probe = subprocess.run(
-            [str(launcher), "/bin/true"],
+            [str(launcher), sys.executable, "-c", "pass"],
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,

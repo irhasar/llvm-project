@@ -222,19 +222,19 @@ ninja -C build llvm-rust-versiontuple-differential llvm-versiontuple-stable
 ./build/bin/llvm-rust-versiontuple-differential
 ```
 
-The differential target deliberately does not link `LLVMSupport`.
-`test/reference.cpp` carries the original parse loop as the oracle because
-`VersionTuple.cpp` also defines stream helpers that need `LLVMSupport`.
-Coverage is the boundary corpus plus 300,000 random ASCII strings; the
-observed result is 300,086 inputs and 0 mismatches. `test/stable.cpp` checks
-component presence and that a failed parse leaves the destination unchanged.
+The differential target links `LLVMSupport` and measures the public
+`VersionTuple::tryParse` path. `test/reference.cpp` carries the original parse
+loop as a free-function oracle. Coverage is the boundary corpus plus 300,000
+random ASCII strings; the observed result is 300,093 inputs and 0 mismatches.
+`test/stable.cpp` checks component presence and that a failed parse leaves the
+destination unchanged.
 
 Measured here with `g++ -O3` and `-C opt-level=3` on five-component versions,
-including the C++ wrapper's tuple construction in the Rust row: C++ 15.57 ns
-(15.51-16.89), Rust public wrapper 14.67 ns (14.38-15.85). Both rows consume all
+including the C++ wrapper's tuple construction in the Rust row: C++ 15.75 ns
+(15.50-16.04), Rust public wrapper 14.75 ns (14.47-15.48). Both rows consume all
 five tuple fields, so the compiler cannot drop the Rust tuple's unused fields.
 The raw C ABI parser is about 11.5 ns, but the public API must still build the
-`VersionTuple`; the public speedup is 1.04x-1.08x with a 1.07x median across
+`VersionTuple`; the public speedup is 1.02x-1.09x with a 1.07x median across
 five runs. The median clears the runtime gate, but one run was just under it,
 so this is a narrow win. The port stays opt-in because the archive-size and
 compile-resource gates still fail. The parser uses wrapping `u32` arithmetic

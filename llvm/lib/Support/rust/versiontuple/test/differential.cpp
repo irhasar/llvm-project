@@ -44,14 +44,22 @@ VersionTuple fromRust(const RustFields &F) {
   return VersionTuple(F.Major);
 }
 
+bool sameShape(const VersionTuple &A, const VersionTuple &B) {
+  return A.getMinor() == B.getMinor() &&
+         A.getSubminor() == B.getSubminor() && A.getBuild() == B.getBuild() &&
+         A.getSubbuild() == B.getSubbuild();
+}
+
 bool check(llvm::StringRef Input) {
   VersionTuple Cpp(9, 9, 9);
   bool CppError = referenceTryParse(Input, Cpp);
 
   VersionTuple Public(9, 9, 9);
   bool PublicError = Public.tryParse(Input);
-  if (PublicError != CppError || Public.asTuple() != Cpp.asTuple()) {
-    std::fprintf(stderr, "public API mismatch len=%zu reference=%d public=%d\n",
+  if (PublicError != CppError || Public.asTuple() != Cpp.asTuple() ||
+      !sameShape(Public, Cpp)) {
+    std::fprintf(stderr,
+                 "public API mismatch len=%zu reference=%d public=%d\n",
                  Input.size(), CppError, PublicError);
     return false;
   }
@@ -74,7 +82,7 @@ bool check(llvm::StringRef Input) {
     return true;
 
   VersionTuple Rust = fromRust(F);
-  if (Cpp.asTuple() != Rust.asTuple()) {
+  if (Cpp.asTuple() != Rust.asTuple() || !sameShape(Rust, Cpp)) {
     auto [CMaj, CMin, CSub, CBuild, CSubbuild] = Cpp.asTuple();
     auto [RMaj, RMin, RSub, RBuild, RSubbuild] = Rust.asTuple();
     std::fprintf(stderr,
@@ -148,7 +156,9 @@ void benchmark() {
 int main() {
   std::vector<std::string> Corpus = {
       "", "0", "1", "17", "1.2", "1.2.3", "1.2.3.4", "1.2.3.4.5",
-      "0.0.0.0.0", "1.", ".1", "1..2", "1.2.", "1.2.3.", "1.2.3.4.",
+      "1.0", "1.0.0", "1.0.0.0", "1.0.0.0.0", "0.0", "0.0.0",
+      "0.0.0.0", "0.0.0.0.0", "1.", ".1", "1..2", "1.2.", "1.2.3.",
+      "1.2.3.4.",
       "1.2.3.4.5.6", "1.2.3.4x", "a", "-1", "1.-2", "1.2.3.1048576",
       "1.2.3.1048575", "1.2.3.4.1024", "1.2.3.4.1023",
       "4294967295.4294967295.4294967295.1048575.1023",
