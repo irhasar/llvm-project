@@ -694,20 +694,21 @@ if(LLVM_ENABLE_RUST_UNICODE)
     ${LLVM_BINARY_DIR}/include)
   target_link_libraries(llvm-rust-unicode-differential PRIVATE llvm_unicode)
 
-  add_executable(llvm-unicode-stable EXCLUDE_FROM_ALL
-    rust/unicode/test/stable.cpp
-    "${CMAKE_CURRENT_SOURCE_DIR}/UnicodeCaseFoldRust.cpp")
-  target_include_directories(llvm-unicode-stable PRIVATE
-    ${LLVM_MAIN_INCLUDE_DIR}
-    ${LLVM_BINARY_DIR}/include)
-  target_link_libraries(llvm-unicode-stable PRIVATE llvm_unicode)
-
   add_custom_target(check-llvm-rust-unicode
     COMMAND llvm-rust-unicode-differential
     COMMAND llvm-unicode-stable
     DEPENDS llvm-rust-unicode-differential llvm-unicode-stable
     USES_TERMINAL)
 endif()
+
+add_executable(llvm-unicode-stable EXCLUDE_FROM_ALL
+  rust/unicode/test/stable.cpp)
+target_link_libraries(llvm-unicode-stable PRIVATE LLVMSupport)
+
+add_custom_target(check-llvm-unicode
+  COMMAND llvm-unicode-stable
+  DEPENDS llvm-unicode-stable
+  USES_TERMINAL)
 
 add_executable(llvm-nativeformatting-stable EXCLUDE_FROM_ALL
   rust/nativeformatting/test/stable.cpp)

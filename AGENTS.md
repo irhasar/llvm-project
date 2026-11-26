@@ -54,10 +54,10 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 ninja -C build LLVMSupport llvm-sha1-stable llvm-sha256-stable \
   llvm-convertutf-stable llvm-convertebcdic-stable llvm-djb-stable \
   llvm-versiontuple-stable llvm-optionstrcmp-stable \
-  llvm-rustdemangle-stable llvm-dlang-stable \
+  llvm-rustdemangle-stable llvm-dlang-stable llvm-unicode-stable \
   llvm-rust-rustdemangle-differential llvm-rust-dlang-differential \
   llvm-rust-djb-differential llvm-rust-versiontuple-differential \
-  llvm-rust-optionstrcmp-differential llc
+  llvm-rust-optionstrcmp-differential llvm-rust-unicode-differential llc
 ```
 
 Full LLVM builds are large; prefer building `LLVMSupport` and the specific
@@ -291,8 +291,10 @@ temporaries and the out-of-line `compare_insensitive` call.
 (default `OFF`). The generated `UnicodeCaseFold.cpp` stays untouched; with the
 option on, `UnicodeCaseFoldRust.cpp` replaces it and `foldCharSimple` is a
 C-ABI call to `llvm_unicode_fold_char_simple`. The Rust implementation uses
-691 sorted `(first, last, delta)` ranges and a binary search instead of the
-generated comparison chain, with an ASCII fast path.
+691 sorted ranges and a binary search instead of the generated comparison
+chain, with an ASCII fast path. Starts are stored as `u16` offsets from
+16-entry block bases, lengths are `u8`, and deltas are `i16`; the 14 deltas
+outside `i16` are selected by rank from a sparse `i32` table.
 
 ```sh
 (cd llvm/lib/Support/rust/unicode &&
@@ -306,10 +308,26 @@ ninja -C build llvm-rust-unicode-differential llvm-unicode-stable
 
 The differential target compiles the C++ fallback and compares every code
 point from -1 through 0x110000; the stable target exercises the public API
-with the option on. Five pinned runs over five million random code points:
-C++ 39.25 ns, Rust 10.35 ns, 3.79x faster. `llvm-min-tblgen` grows by 136
-bytes (+0.008%); the small stable test grows because it links the Rust support
-runtime.
+with the option on and is built in both configurations. Five pinned runs over
+five million random code points: C++ 40.22 ns, Rust 12.66 ns, 3.18x faster.
+The public CMake package must import the Rust archive, not leave a bare
+`llvm_unicode` name in `LLVMSupport`'s interface:
+
+```sh
+cmake -S /tmp/unicode-consumer -B /tmp/unicode-consumer-build -G Ninja \
+  -DLLVM_DIR=$PWD/build/lib/cmake/llvm
+ninja -C /tmp/unicode-consumer-build
+```
+
+The resource gate is not cleared. The C++ one-TU compile is 419 ms and
+96 MiB peak RSS; the Rust crate plus wrapper is 515 ms and 110 MiB peak RSS,
+so wall time is 1.23x higher and peak RSS 14% higher. `llvm-min-tblgen` grows
+by 136 bytes; most of that is the rustc `.comment` section and
+`compiler_builtins` fallbacks pulled from the archive, not the fold table.
+`llvm-unicode-stable` is 20,288 bytes with C++ and 21,088 bytes with Rust
+(+800); after `strip --strip-all` it is 18,616 bytes versus 18,576 for C++.
+Pruning the unused archive members closes that stripped gap, but the cleanup
+is not enabled by default. The option stays opt-in.
 
 ## Demangler port
 

@@ -8,6 +8,7 @@
 
 #include "llvm/Support/Unicode.h"
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <random>
 
@@ -19,14 +20,16 @@ int main() {
   for (int I = 0; I < N; ++I)
     Values[I] = Dist(RNG);
 
-  volatile int Sink = 0;
+  volatile std::uint64_t Sink = 0;
   auto Start = std::chrono::steady_clock::now();
   for (int I = 0; I < N; ++I)
-    Sink += llvm::sys::unicode::foldCharSimple(Values[I]);
+    Sink += static_cast<std::uint32_t>(
+        llvm::sys::unicode::foldCharSimple(Values[I]));
   auto End = std::chrono::steady_clock::now();
   double NsPerOp =
       std::chrono::duration<double, std::nano>(End - Start).count() / N;
-  std::printf("%.3f ns/op (sink=%d)\n", NsPerOp, Sink);
+  std::printf("%.3f ns/op (sink=%llu)\n", NsPerOp,
+              static_cast<unsigned long long>(Sink));
   delete[] Values;
   return 0;
 }
