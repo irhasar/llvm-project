@@ -1,15 +1,20 @@
 //! LLVM bitcode reader for the Track B IR subset.
 
+use std::collections::HashMap;
+
 use llvm_rust_ir::{
-    BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath, FcmpPred, FuncId, Function,
-    Global, GlobalId, IcmpPred, InstKind, IntFlags, Linkage, Module, Operand, OperandKind,
-    TailKind, Type, TypeId, Visibility,
+    Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath, FcmpPred, FuncId,
+    Function, Global, GlobalId, IcmpPred, InstKind, IntFlags, Linkage, Module, Operand,
+    OperandKind, TailKind, Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, Result};
 
+use crate::attrs::{PARAMATTR_CODE_ENTRY, PARAMATTR_GRP_CODE_ENTRY, decode_attribute_group};
 use crate::bitstream::{Bitstream, Block, Item, Record};
 
 const MODULE_BLOCK: u32 = 8;
+const PARAMATTR_BLOCK: u32 = 9;
+const PARAMATTR_GROUP_BLOCK: u32 = 10;
 const CONSTANTS_BLOCK: u32 = 11;
 const FUNCTION_BLOCK: u32 = 12;
 const VALUE_SYMTAB_BLOCK: u32 = 14;
@@ -123,6 +128,8 @@ pub fn read_bitcode(bytes: &[u8]) -> Result<Module> {
         pending_globals: Vec::new(),
         defined_functions: Vec::new(),
         next_body: 0,
+        attr_groups: HashMap::new(),
+        attr_lists: Vec::new(),
     };
     reader.read_module(module_block)?;
     reader.resolve_globals()?;
@@ -137,6 +144,8 @@ struct Reader {
     pending_globals: Vec<(GlobalId, u32)>,
     defined_functions: Vec<FuncId>,
     next_body: usize,
+    attr_groups: HashMap<u64, (u32, Vec<Attribute>)>,
+    attr_lists: Vec<Vec<(u32, Vec<Attribute>)>>,
 }
 
 impl Reader {
@@ -159,6 +168,8 @@ impl Reader {
                     _ => {}
                 },
                 Item::Block(child) => match child.id {
+                    PARAMATTR_GROUP_BLOCK => self.read_attr_groups(child)?,
+                    PARAMATTR_BLOCK => self.read_attr_lists(child)?,
                     TYPE_BLOCK => self.read_types(child)?,
                     CONSTANTS_BLOCK => {
                         self.read_constants(child, true)?;
@@ -169,6 +180,47 @@ impl Reader {
             }
         }
         Ok(())
+    }
+
+    fn read_attr_groups(&mut self, block: &Block) -> Result<()> {
+        for record in block.records() {
+            if record.code != PARAMATTR_GRP_CODE_ENTRY {
+                continue;
+            }
+            let (group, index, attrs) = decode_attribute_group(record)?;
+            self.attr_groups.insert(group, (index, attrs));
+        }
+        Ok(())
+    }
+
+    fn read_attr_lists(&mut self, block: &Block) -> Result<()> {
+        for record in block.records() {
+            if record.code != PARAMATTR_CODE_ENTRY {
+                continue;
+            }
+            let mut list = Vec::new();
+            for group in &record.operands {
+                let (index, attrs) =
+                    self.attr_groups.get(group).cloned().ok_or_else(|| {
+                        Error::bitcode(format!("unknown attribute group {group}"))
+                    })?;
+                list.push((index, attrs));
+            }
+            self.attr_lists.push(list);
+        }
+        Ok(())
+    }
+
+    fn attribute_list(&self, id: u64) -> Result<&[(u32, Vec<Attribute>)]> {
+        if id == 0 {
+            return Ok(&[]);
+        }
+        let index =
+            usize::try_from(id - 1).map_err(|_| Error::bitcode("attribute list index overflow"))?;
+        self.attr_lists
+            .get(index)
+            .map(Vec::as_slice)
+            .ok_or_else(|| Error::bitcode(format!("unknown attribute list {id}")))
     }
 
     fn read_types(&mut self, block: &Block) -> Result<()> {
@@ -336,6 +388,23 @@ impl Reader {
         if let Type::Function { params, .. } = self.module.types.get(ty).clone() {
             for param in params {
                 function.add_param(None, param, Vec::new());
+            }
+        }
+        let attr_list = self
+            .attribute_list(record.operands.get(6).copied().unwrap_or(0))?
+            .to_vec();
+        for (index, attrs) in attr_list {
+            match index {
+                0 => function.ret_attrs.extend(attrs),
+                u32::MAX => function.attrs.extend(attrs),
+                _ => {
+                    let Some(param) = function.params.get_mut(index as usize - 1) else {
+                        return Err(Error::bitcode(format!(
+                            "attribute index {index} is out of range"
+                        )));
+                    };
+                    param.attrs.extend(attrs);
+                }
             }
         }
         let id = self.module.function_or_insert(symbol);
@@ -806,6 +875,11 @@ impl Reader {
                 ))
             }
             FUNC_INST_CALL => {
+                let call_attrs: Vec<Attribute> = self
+                    .attribute_list(record.operands.first().copied().unwrap_or(0))?
+                    .iter()
+                    .flat_map(|(_, attrs)| attrs.iter().cloned())
+                    .collect();
                 let mut index = 1;
                 let flags = record.operands.get(index).copied().unwrap_or(0);
                 index += 1;
@@ -863,7 +937,7 @@ impl Reader {
                         callee,
                         args,
                         fastmath: fmf,
-                        attrs: Vec::new(),
+                        attrs: call_attrs,
                     },
                     result,
                 ))

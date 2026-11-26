@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -15,6 +16,29 @@ fn corpus() -> Vec<PathBuf> {
     files
 }
 
+/// Replaces `#N` attribute-group references with the group body so that a
+/// round trip through bitcode can be compared without preserving the original
+/// grouping layout.
+fn inline_attr_groups(text: &str) -> String {
+    let mut groups = HashMap::new();
+    let mut body = Vec::new();
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("attributes #")
+            && let Some((id, tail)) = rest.split_once(" = { ")
+            && let Some(inner) = tail.strip_suffix(" }")
+        {
+            groups.insert(format!("#{id}"), inner.to_string());
+            continue;
+        }
+        body.push(line);
+    }
+    let mut result = body.join("\n");
+    for (reference, expansion) in groups {
+        result = result.replace(&reference, &expansion);
+    }
+    result.trim_end().to_string()
+}
+
 #[test]
 fn rust_bitcode_round_trip_matches_text() {
     let files = corpus();
@@ -26,6 +50,11 @@ fn rust_bitcode_round_trip_matches_text() {
         let bytes = write_bitcode(&mut module).expect("write bitcode");
         let read = read_bitcode(&bytes).expect("read bitcode");
         let after = print_module(&read);
-        assert_eq!(before, after, "round trip changed {}", path.display());
+        assert_eq!(
+            inline_attr_groups(&before),
+            inline_attr_groups(&after),
+            "round trip changed {}",
+            path.display()
+        );
     }
 }

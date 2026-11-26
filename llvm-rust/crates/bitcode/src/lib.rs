@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod attrs;
 pub mod bitstream;
 pub mod reader;
 pub mod writer;

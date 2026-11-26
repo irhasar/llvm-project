@@ -151,6 +151,9 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
     if function.unnamed_addr {
         out.push_str("unnamed_addr ");
     }
+    for attr in &function.ret_attrs {
+        let _ = write!(out, "{attr} ");
+    }
     let _ = write!(
         out,
         "{} @{}(",
@@ -161,10 +164,10 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
         if index > 0 {
             out.push_str(", ");
         }
-        for attr in &param.attrs {
-            let _ = write!(out, "{} ", attr);
-        }
         let _ = write!(out, "{}", module.display_type(param.ty));
+        for attr in &param.attrs {
+            let _ = write!(out, " {attr}");
+        }
         if let Some(name) = param.name {
             let _ = write!(out, " %{}", quote_name(module.name(name)));
         }

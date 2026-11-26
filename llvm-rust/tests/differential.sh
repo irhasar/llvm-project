@@ -37,9 +37,18 @@ for input in tests/corpus/*.ll; do
         status=1
     fi
 
+    if ! "$LLVM_BIN/llvm-bcanalyzer" "$rust_bc" >/dev/null 2>&1; then
+        echo "FAIL bcanalyzer writer: $name"
+        status=1
+    fi
+
     ./target/debug/llvm-dis-rust "$cpp_bc" -o "$read_ll"
     "$LLVM_BIN/llvm-as" "$read_ll" -o "$read_bc"
     "$LLVM_BIN/llvm-dis" "$read_bc" -o "$read_canon"
+    if ! "$LLVM_BIN/llvm-bcanalyzer" "$read_bc" >/dev/null 2>&1; then
+        echo "FAIL bcanalyzer reader: $name"
+        status=1
+    fi
     if ! diff -u <(normalize "$cpp_ll") <(normalize "$read_canon") >"$TMP/$name-reader.diff"; then
         echo "FAIL reader: $name"
         cat "$TMP/$name-reader.diff"

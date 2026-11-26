@@ -3,15 +3,21 @@
 use std::collections::HashMap;
 
 use llvm_rust_ir::{
-    BinOp, BlockId, CastOp, ConstId, ConstKind, FastMath, FcmpPred, FuncId, Function, GlobalId,
-    IcmpPred, InstKind, IntFlags, Linkage, Module, Operand, OperandKind, TailKind, Type, TypeId,
-    Visibility,
+    Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, FastMath, FcmpPred, FuncId, Function,
+    GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand, OperandKind,
+    TailKind, Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, Result};
 
+use crate::attrs::{
+    PARAMATTR_CODE_ENTRY, PARAMATTR_GRP_CODE_ENTRY, encode_attribute, expand_attributes,
+    function_attr_index,
+};
 use crate::bitstream::{AbbrevOp, BitWriter};
 
 const MODULE_BLOCK: u32 = 8;
+const PARAMATTR_BLOCK: u32 = 9;
+const PARAMATTR_GROUP_BLOCK: u32 = 10;
 const CONSTANTS_BLOCK: u32 = 11;
 const FUNCTION_BLOCK: u32 = 12;
 const IDENTIFICATION_BLOCK: u32 = 13;
@@ -121,6 +127,10 @@ struct Writer<'a> {
     strtab: Vec<u8>,
     str_offsets: HashMap<String, u32>,
     i32_one: Option<ConstId>,
+    function_attr_lists: HashMap<FuncId, u32>,
+    call_attr_lists: HashMap<(FuncId, InstId), u32>,
+    paramattr_groups: Vec<(u32, Vec<Attribute>)>,
+    paramattr_lists: Vec<Vec<u64>>,
 }
 
 impl<'a> Writer<'a> {
@@ -172,6 +182,10 @@ impl<'a> Writer<'a> {
             strtab: Vec::new(),
             str_offsets: HashMap::new(),
             i32_one,
+            function_attr_lists: HashMap::new(),
+            call_attr_lists: HashMap::new(),
+            paramattr_groups: Vec::new(),
+            paramattr_lists: Vec::new(),
         };
         for (_, global) in module.globals.iter() {
             writer.add_string(module.name(global.name));
@@ -198,6 +212,7 @@ impl<'a> Writer<'a> {
         self.stream.enter_subblock(MODULE_BLOCK, 3);
         self.stream.emit_record(MODULE_VERSION, &[2]);
         self.write_types()?;
+        self.write_attributes()?;
         if let Some(triple) = &self.module.target_triple {
             let operands: Vec<u64> = triple.bytes().map(|b| b as u64).collect();
             self.stream.emit_record(MODULE_TRIPLE, &operands);
@@ -323,6 +338,86 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    fn write_attributes(&mut self) -> Result<()> {
+        let functions: Vec<(FuncId, Function)> = self
+            .module
+            .functions
+            .iter()
+            .map(|(id, function)| (id, function.clone()))
+            .collect();
+        for (function_id, function) in &functions {
+            let mut entries = Vec::new();
+            let ret_attrs = expand_attributes(self.module, &function.ret_attrs)?;
+            if !ret_attrs.is_empty() {
+                entries.push((0, ret_attrs));
+            }
+            for (index, param) in function.params.iter().enumerate() {
+                let attrs = expand_attributes(self.module, &param.attrs)?;
+                if !attrs.is_empty() {
+                    entries.push((index as u32 + 1, attrs));
+                }
+            }
+            let function_attrs = expand_attributes(self.module, &function.attrs)?;
+            if !function_attrs.is_empty() {
+                entries.push((function_attr_index(), function_attrs));
+            }
+            let list = self.add_attr_list(entries);
+            if list != 0 {
+                self.function_attr_lists.insert(*function_id, list);
+            }
+
+            for (inst_id, inst) in function.insts.iter() {
+                let InstKind::Call { attrs, .. } = &inst.kind else {
+                    continue;
+                };
+                let attrs = expand_attributes(self.module, attrs)?;
+                if attrs.is_empty() {
+                    continue;
+                }
+                let list = self.add_attr_list(vec![(function_attr_index(), attrs)]);
+                self.call_attr_lists.insert((*function_id, inst_id), list);
+            }
+        }
+
+        if self.paramattr_groups.is_empty() {
+            return Ok(());
+        }
+
+        self.stream.enter_subblock(PARAMATTR_GROUP_BLOCK, 3);
+        for (index, (attr_index, attrs)) in self.paramattr_groups.iter().enumerate() {
+            let mut operands = vec![(index + 1) as u64, *attr_index as u64];
+            for attr in attrs {
+                operands.extend(encode_attribute(attr)?);
+            }
+            self.stream
+                .emit_record(PARAMATTR_GRP_CODE_ENTRY as u32, &operands);
+        }
+        self.stream.exit_block();
+
+        self.stream.enter_subblock(PARAMATTR_BLOCK, 3);
+        for groups in &self.paramattr_lists {
+            self.stream.emit_record(PARAMATTR_CODE_ENTRY as u32, groups);
+        }
+        self.stream.exit_block();
+        Ok(())
+    }
+
+    fn add_attr_list(&mut self, entries: Vec<(u32, Vec<Attribute>)>) -> u32 {
+        let mut groups = Vec::new();
+        for (index, attrs) in entries {
+            if attrs.is_empty() {
+                continue;
+            }
+            self.paramattr_groups.push((index, attrs));
+            groups.push(self.paramattr_groups.len() as u64);
+        }
+        if groups.is_empty() {
+            return 0;
+        }
+        self.paramattr_lists.push(groups);
+        self.paramattr_lists.len() as u32
+    }
+
     fn write_globals(&mut self) -> Result<()> {
         let globals: Vec<(GlobalId, llvm_rust_ir::Global)> = self
             .module
@@ -373,10 +468,15 @@ impl<'a> Writer<'a> {
             .iter()
             .map(|(id, function)| (id, function.clone()))
             .collect();
-        for (_, function) in functions {
+        for (function_id, function) in functions {
             let name = self.module.name(function.name);
             let name_offset = self.add_string(name) as u64;
             let type_id = self.type_index(function.ty)? as u64;
+            let attr_list = self
+                .function_attr_lists
+                .get(&function_id)
+                .copied()
+                .unwrap_or(0) as u64;
             let operands = vec![
                 name_offset,
                 name.len() as u64,
@@ -384,7 +484,7 @@ impl<'a> Writer<'a> {
                 0,
                 function.is_declaration as u64,
                 linkage_code(function.linkage) as u64,
-                0,
+                attr_list,
                 0,
                 0,
                 visibility_code(function.visibility) as u64,
@@ -478,16 +578,16 @@ impl<'a> Writer<'a> {
             .iter()
             .map(|(id, function)| (id, function.clone()))
             .collect();
-        for (_, function) in functions {
+        for (function_id, function) in functions {
             if function.is_declaration {
                 continue;
             }
-            self.write_body(&function)?;
+            self.write_body(function_id, &function)?;
         }
         Ok(())
     }
 
-    fn write_body(&mut self, function: &Function) -> Result<()> {
+    fn write_body(&mut self, function_id: FuncId, function: &Function) -> Result<()> {
         self.stream.enter_subblock(FUNCTION_BLOCK, 4);
         self.stream
             .emit_record(FUNC_DECLAREBLOCKS, &[function.blocks.len() as u64]);
@@ -496,7 +596,7 @@ impl<'a> Writer<'a> {
             for inst_id in &block.insts {
                 let inst = function.insts.get(*inst_id);
                 let inst_value = self.base_local + next_local;
-                self.write_instruction(function, inst, inst_value)?;
+                self.write_instruction(function_id, function, inst, *inst_id, inst_value)?;
                 if inst.result.is_some() {
                     next_local += 1;
                 }
@@ -535,8 +635,10 @@ impl<'a> Writer<'a> {
 
     fn write_instruction(
         &mut self,
+        function_id: FuncId,
         function: &Function,
         inst: &llvm_rust_ir::Instruction,
+        arena_id: InstId,
         inst_id: u32,
     ) -> Result<()> {
         match &inst.kind {
@@ -671,7 +773,12 @@ impl<'a> Writer<'a> {
                 fastmath,
                 ..
             } => {
-                let mut operands = vec![0];
+                let attr_list = self
+                    .call_attr_lists
+                    .get(&(function_id, arena_id))
+                    .copied()
+                    .unwrap_or(0) as u64;
+                let mut operands = vec![attr_list];
                 let mut flags = match tail {
                     TailKind::None => 0,
                     TailKind::Tail => 1,

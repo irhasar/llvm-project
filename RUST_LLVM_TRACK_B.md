@@ -129,10 +129,13 @@ Do not start M3/M4 before M1/M2 prove the architecture.
 M1 spike status (2026-11-26): `llvm-rust/` implements `support`, `ir`, and a
 bitcode reader/writer plus `llvm-as-rust` and `llvm-dis-rust`. The differential
 corpus in `llvm-rust/tests/corpus/` matches LLVM 19.1.7 in both directions, and
-the build/runtime/memory numbers are recorded in `llvm-rust/README.md`. This is
-not an M2 parity claim: the upstream `llvm/test` suite is still not vendored,
-and the slice does not cover metadata, attributes, constant expressions,
-atomics, or aggregate/vector instructions.
+the build/runtime/memory numbers are recorded in `llvm-rust/README.md`. The
+bitcode layer now covers function, return, parameter, and call-site attributes,
+including `#N` groups, common enum/integer/string attributes, and the legacy
+memory attributes. This is not an M2 parity claim: the upstream `llvm/test`
+suite is still not vendored, and the slice does not cover metadata, type
+attributes (`byval`, `sret`, `elementtype`), constant expressions, atomics, or
+aggregate/vector instructions.
 
 ## Gates and kill criteria
 

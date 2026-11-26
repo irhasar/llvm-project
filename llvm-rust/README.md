@@ -42,14 +42,28 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   `call`, `phi`, `select`, casts, `ret`, `br`, `condbr`, `switch`,
   `unreachable`.
 - `bitcode`: LLVM bitstream writer and reader covering the module, type,
-  constants, function, value-symbol-table, and string-table blocks. The reader
-  handles abbreviations and block-info abbreviations emitted by LLVM 19.
+  constants, function, value-symbol-table, string-table, and
+  `PARAMATTR`/`PARAMATTR_GROUP` blocks. The reader handles abbreviations and
+  block-info abbreviations emitted by LLVM 19.
+- `bitcode` attributes: return, parameter, function, and call-site attributes;
+  `#N` group references; common enum attributes (`noundef`, `signext`,
+  `zeroext`, `nonnull`, `noalias`, `inreg`, `nounwind`, `noreturn`,
+  `willreturn`, `nofree`, `nosync`, `norecurse`, `cold`, `hot`, `optnone`,
+  `alwaysinline`, `noinline`, `inlinehint`, and the rest of the legacy enum
+  table); integer attributes (`align`, `dereferenceable`,
+  `dereferenceable_or_null`); string attributes such as
+  `"frame-pointer"="all"`; and the legacy memory attributes (`readnone`,
+  `readonly`, `writeonly`). LLVM 19 stores the memory attributes as
+  `ATTR_KIND_MEMORY`; the reader maps the three legacy values back to their
+  textual spellings.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
 
-This slice deliberately does not cover metadata, attribute/parameter-attribute
-records, comdats, debug info, constant expressions, atomics, `invoke`/
-`landingpad`, aggregate/vector instructions, or the exact `fp128`/`x86_fp80`
-payload. MC, object, X86, and codegen are still out of scope.
+This slice deliberately does not cover metadata, type attributes (`byval`,
+`sret`, `elementtype`, `byref`, `inalloca`), parameter-indexed call-site
+attributes, `allocsize`/`stackalign`/`vscale_range`-style integer attributes,
+comdats, debug info, constant expressions, atomics, `invoke`/`landingpad`,
+aggregate/vector instructions, or the exact `fp128`/`x86_fp80` payload. MC,
+object, X86, and codegen are still out of scope.
 
 ## Commands
 
@@ -83,7 +97,7 @@ python3 tests/bench.py --runs 5
 
 ## First-slice results
 
-Differential harness: all six modules in `tests/corpus/` match the C++ LLVM
+Differential harness: all seven modules in `tests/corpus/` match the C++ LLVM
 19.1.7 oracle in both directions after normalizing `source_filename` and
 `ModuleID`.
 

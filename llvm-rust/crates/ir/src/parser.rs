@@ -799,7 +799,7 @@ impl<'a> Parser<'a> {
         function.dso_local = dso_local;
         function.unnamed_addr = unnamed_addr;
         function.is_declaration = is_declaration;
-        function.attrs = attrs;
+        function.ret_attrs = attrs;
         self.expect_punct('(')?;
         let mut param_types = Vec::new();
         let mut varargs = false;
@@ -809,8 +809,8 @@ impl<'a> Parser<'a> {
                     varargs = true;
                     break;
                 }
-                let param_attrs = self.parse_param_attrs()?;
                 let ty = self.parse_type()?;
+                let param_attrs = self.parse_param_attrs()?;
                 let param_name = match self.peek_kind() {
                     TokenKind::Local(name) => {
                         let name = name.clone();
