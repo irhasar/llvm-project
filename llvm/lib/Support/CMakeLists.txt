@@ -142,6 +142,21 @@ endif()
 
 add_subdirectory(BLAKE3)
 
+# Targets that need the generated C++ fallback while the Rust option is on
+# compile this copy, because the original source is marked header-only then.
+set(UNICODE_CASE_FOLD_REFERENCE
+  "${CMAKE_CURRENT_BINARY_DIR}/UnicodeCaseFoldReference.cpp")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/UnicodeCaseFold.cpp"
+  "${UNICODE_CASE_FOLD_REFERENCE}" COPYONLY)
+
+# Keep both sources in the component list for llvm_check_source_file_list, but
+# compile only the selected one.
+if(LLVM_ENABLE_RUST_UNICODE)
+  set_source_files_properties(UnicodeCaseFold.cpp PROPERTIES HEADER_FILE_ONLY TRUE)
+else()
+  set_source_files_properties(UnicodeCaseFoldRust.cpp PROPERTIES HEADER_FILE_ONLY TRUE)
+endif()
+
 add_llvm_component_library(LLVMSupport
   ABIBreak.cpp
   AMDGPUMetadata.cpp
@@ -277,6 +292,7 @@ add_llvm_component_library(LLVMSupport
   Twine.cpp
   Unicode.cpp
   UnicodeCaseFold.cpp
+  UnicodeCaseFoldRust.cpp
   UnicodeNameToCodepoint.cpp
   UnicodeNameToCodepointGenerated.cpp
   VersionTuple.cpp
@@ -569,7 +585,7 @@ if(LLVM_ENABLE_RUST_DJB)
     rust/djb/test/differential.cpp
     "${CMAKE_CURRENT_SOURCE_DIR}/DJB.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ConvertUTF.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/UnicodeCaseFold.cpp"
+    "${UNICODE_CASE_FOLD_REFERENCE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/ABIBreak.cpp")
   target_include_directories(llvm-rust-djb-differential PRIVATE
     ${LLVM_MAIN_INCLUDE_DIR}
@@ -662,6 +678,37 @@ if(LLVM_ENABLE_RUST_NATIVEFORMATTING)
     USES_TERMINAL)
 endif()
 
+if(LLVM_ENABLE_RUST_UNICODE)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_unicode
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.toml"
+    STRIP_DEBUG)
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_UNICODE)
+  target_link_libraries(LLVMSupport PRIVATE llvm_unicode)
+
+  add_executable(llvm-rust-unicode-differential EXCLUDE_FROM_ALL
+    rust/unicode/test/differential.cpp
+    "${UNICODE_CASE_FOLD_REFERENCE}")
+  target_include_directories(llvm-rust-unicode-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-unicode-differential PRIVATE llvm_unicode)
+
+  add_executable(llvm-unicode-stable EXCLUDE_FROM_ALL
+    rust/unicode/test/stable.cpp
+    "${CMAKE_CURRENT_SOURCE_DIR}/UnicodeCaseFoldRust.cpp")
+  target_include_directories(llvm-unicode-stable PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-unicode-stable PRIVATE llvm_unicode)
+
+  add_custom_target(check-llvm-rust-unicode
+    COMMAND llvm-rust-unicode-differential
+    COMMAND llvm-unicode-stable
+    DEPENDS llvm-rust-unicode-differential llvm-unicode-stable
+    USES_TERMINAL)
+endif()
+
 add_executable(llvm-nativeformatting-stable EXCLUDE_FROM_ALL
   rust/nativeformatting/test/stable.cpp)
 target_link_libraries(llvm-nativeformatting-stable PRIVATE LLVMSupport)
@@ -713,7 +760,7 @@ set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${llvm_system_libs}")
 # The Rust ports are static archives installed next to the other LLVM
 # libraries, so downstream links need them in llvm-config --system-libs.
 foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF CONVERTEBCDIC
-                  XXHASH RUSTDEMANGLE DLANG NATIVEFORMATTING)
+                  XXHASH RUSTDEMANGLE DLANG NATIVEFORMATTING UNICODE)
   if(LLVM_ENABLE_RUST_${rust_port})
     if(rust_port STREQUAL "DLANG")
       set(rust_port_lower "dlangdemangle")

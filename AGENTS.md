@@ -42,7 +42,7 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON \
   -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON \
   -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON -DLLVM_ENABLE_RUST_OPTIONSTRCMP=ON \
-  -DLLVM_ENABLE_RUST_NATIVEFORMATTING=ON \
+  -DLLVM_ENABLE_RUST_NATIVEFORMATTING=ON -DLLVM_ENABLE_RUST_UNICODE=ON \
   -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
@@ -284,6 +284,32 @@ direct call to `llvm_optionstrcmp_name` is 4.74 ns; the 0.26 ns difference is
 the C++ wrapper and C-ABI call. The Rust loop folds ASCII in one pass, reads
 both lengths before the loop, and avoids the two `StringRef::substr`
 temporaries and the out-of-line `compare_insensitive` call.
+
+## Unicode case folding port
+
+`llvm/lib/Support/rust/unicode` is gated by `LLVM_ENABLE_RUST_UNICODE`
+(default `OFF`). The generated `UnicodeCaseFold.cpp` stays untouched; with the
+option on, `UnicodeCaseFoldRust.cpp` replaces it and `foldCharSimple` is a
+C-ABI call to `llvm_unicode_fold_char_simple`. The Rust implementation uses
+691 sorted `(first, last, delta)` ranges and a binary search instead of the
+generated comparison chain, with an ASCII fast path.
+
+```sh
+(cd llvm/lib/Support/rust/unicode &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build llvm-rust-unicode-differential llvm-unicode-stable
+./build/bin/llvm-unicode-stable
+./build/bin/llvm-rust-unicode-differential
+```
+
+The differential target compiles the C++ fallback and compares every code
+point from -1 through 0x110000; the stable target exercises the public API
+with the option on. Five pinned runs over five million random code points:
+C++ 39.25 ns, Rust 10.35 ns, 3.79x faster. `llvm-min-tblgen` grows by 136
+bytes (+0.008%); the small stable test grows because it links the Rust support
+runtime.
 
 ## Demangler port
 
