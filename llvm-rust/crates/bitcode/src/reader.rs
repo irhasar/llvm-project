@@ -1,6 +1,6 @@
 //! LLVM bitcode reader for the Track B IR subset.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use llvm_rust_ir::{
@@ -10,7 +10,10 @@ use llvm_rust_ir::{
 };
 use llvm_rust_support::{Error, Result};
 
-use crate::attrs::{PARAMATTR_CODE_ENTRY, PARAMATTR_GRP_CODE_ENTRY, decode_attribute_group};
+use crate::attrs::{
+    PARAMATTR_CODE_ENTRY, PARAMATTR_GRP_CODE_ENTRY, decode_attribute_group, deduplicate_attributes,
+    merge_attributes,
+};
 use crate::bitstream::{Bitstream, Block, Item, Record};
 
 const MODULE_BLOCK: u32 = 8;
@@ -212,8 +215,9 @@ impl Reader {
             if record.code != PARAMATTR_GRP_CODE_ENTRY {
                 continue;
             }
-            let (group, index, attrs) =
+            let (group, index, mut attrs) =
                 decode_attribute_group(record, &self.module.types, &self.types)?;
+            deduplicate_attributes(&mut attrs);
             self.attr_budget = self
                 .attr_budget
                 .checked_sub(attrs.len())
@@ -230,6 +234,7 @@ impl Reader {
             }
             let mut list: Vec<(u32, Arc<Vec<Attribute>>)> = Vec::new();
             let mut positions: HashMap<u32, usize> = HashMap::new();
+            let mut merged_slots: HashSet<u32> = HashSet::new();
             for group in &record.operands {
                 let (index, attrs) =
                     self.attr_groups.get(group).cloned().ok_or_else(|| {
@@ -240,13 +245,19 @@ impl Reader {
                     list.push((index, attrs));
                     continue;
                 };
-                if attrs.is_empty() {
+                if attrs.is_empty() || Arc::ptr_eq(&list[position].1, &attrs) {
                     continue;
                 }
-                let mut merged = Vec::with_capacity(list[position].1.len() + attrs.len());
+                let target_len = list[position].1.len();
+                let mut merged = Vec::with_capacity(target_len + attrs.len());
                 merged.extend(list[position].1.iter().cloned());
-                merged.extend(attrs.iter().cloned());
-                self.attr_budget = self.attr_budget.checked_sub(attrs.len()).ok_or_else(|| {
+                merge_attributes(&mut merged, &attrs);
+                let charge = if merged_slots.insert(index) {
+                    merged.len()
+                } else {
+                    merged.len().saturating_sub(target_len)
+                };
+                self.attr_budget = self.attr_budget.checked_sub(charge).ok_or_else(|| {
                     Error::bitcode("merged attribute lists exceed the input size budget")
                 })?;
                 list[position].1 = Arc::new(merged);
@@ -1521,4 +1532,77 @@ fn decode_align(value: u64) -> Option<u64> {
 fn bytes_to_utf8(bytes: &[u64]) -> Option<String> {
     let raw: Vec<u8> = bytes.iter().map(|b| *b as u8).collect();
     String::from_utf8(raw).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_reader(groups: Vec<(u64, u32, Vec<Attribute>)>) -> Reader {
+        let mut attr_groups = HashMap::new();
+        for (id, index, attrs) in groups {
+            attr_groups.insert(id, (index, Arc::new(attrs)));
+        }
+        Reader {
+            module: Module::new(),
+            strtab: Vec::new(),
+            sections: Vec::new(),
+            types: Vec::new(),
+            values: Vec::new(),
+            pending_globals: Vec::new(),
+            defined_functions: Vec::new(),
+            next_body: 0,
+            attr_groups,
+            attr_lists: Vec::new(),
+            attr_budget: 4096,
+            next_unnamed: 0,
+        }
+    }
+
+    fn attr(value: &str) -> Attribute {
+        Attribute(value.to_string())
+    }
+
+    fn attr_list_record(groups: &[u64]) -> Record {
+        Record {
+            code: PARAMATTR_CODE_ENTRY,
+            operands: groups.to_vec(),
+            blob: None,
+        }
+    }
+
+    #[test]
+    fn merges_repeated_slots_and_shares_repeated_groups() {
+        let mut reader = test_reader(vec![
+            (1, 1, vec![attr("align 8"), attr("noundef")]),
+            (2, 1, vec![attr("align 16")]),
+            (3, u32::MAX, vec![attr("nounwind")]),
+        ]);
+        let block = Block {
+            id: PARAMATTR_BLOCK,
+            code_len: 0,
+            items: vec![
+                Item::Record(attr_list_record(&[1, 2, 3])),
+                Item::Record(attr_list_record(&[3, 3])),
+            ],
+        };
+        reader.read_attr_lists(&block).expect("read attr lists");
+
+        let first = reader.attribute_list(1).expect("first list");
+        assert_eq!(first.len(), 2);
+        let arg = first
+            .iter()
+            .find(|(index, _)| *index == 1)
+            .expect("arg attrs");
+        assert_eq!(arg.1.as_ref(), &[attr("align 16"), attr("noundef")]);
+        let function = first
+            .iter()
+            .find(|(index, _)| *index == u32::MAX)
+            .expect("function attrs");
+        assert!(Arc::ptr_eq(&function.1, &reader.attr_groups[&3].1));
+
+        let second = reader.attribute_list(2).expect("second list");
+        assert_eq!(second.len(), 1);
+        assert!(Arc::ptr_eq(&second[0].1, &reader.attr_groups[&3].1));
+    }
 }

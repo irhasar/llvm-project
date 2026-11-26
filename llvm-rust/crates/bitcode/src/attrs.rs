@@ -3,6 +3,8 @@
 //! The IR keeps attributes as their textual spelling.  This module translates
 //! the spellings we support to and from the PARAMATTR records used by LLVM.
 
+use std::collections::HashMap;
+
 use llvm_rust_ir::names::{quote_bytes, unescape_bytes};
 use llvm_rust_ir::{Attribute, Module, TypeId, TypeTable};
 use llvm_rust_support::{Error, Result};
@@ -114,6 +116,108 @@ fn split_attributes(text: &str) -> Result<Vec<String>> {
         }
     }
     Ok(joined)
+}
+
+/// Identity used when LLVM merges two attribute groups for the same slot.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum AttributeKey {
+    Enum(u64),
+    Int(u64),
+    Type(u64),
+    String(Vec<u8>),
+    Raw(String),
+}
+
+fn attribute_key(attr: &Attribute) -> AttributeKey {
+    let text = attr.0.trim();
+    if text.starts_with('"') {
+        if let Ok(Some((kind, _))) = parse_string_attribute(text) {
+            return AttributeKey::String(kind);
+        }
+        return AttributeKey::Raw(text.to_string());
+    }
+    if let Some(code) = int_attribute_code(text) {
+        return AttributeKey::Int(code);
+    }
+    if let Some(code) = type_attribute_code(text) {
+        return AttributeKey::Type(code);
+    }
+    if let Some(code) = enum_attribute_code(text) {
+        return AttributeKey::Enum(code);
+    }
+    AttributeKey::Raw(text.to_string())
+}
+
+fn int_attribute_code(text: &str) -> Option<u64> {
+    if text.starts_with("align ") || text.starts_with("align(") || text.starts_with("align=") {
+        Some(1)
+    } else if text.starts_with("alignstack ")
+        || text.starts_with("alignstack(")
+        || text.starts_with("alignstack=")
+    {
+        Some(25)
+    } else if text.starts_with("dereferenceable(") {
+        Some(41)
+    } else if text.starts_with("dereferenceable_or_null(") {
+        Some(42)
+    } else {
+        None
+    }
+}
+
+fn type_attribute_code(text: &str) -> Option<u64> {
+    for (name, code) in [
+        ("byval", 3),
+        ("sret", 29),
+        ("inalloca", 38),
+        ("preallocated", 65),
+        ("byref", 69),
+        ("elementtype", 77),
+    ] {
+        if text == name || text.starts_with(&format!("{name}(")) {
+            return Some(code);
+        }
+    }
+    None
+}
+
+/// Merges `incoming` into `existing` with LLVM's last-writer-wins rule for
+/// attributes of the same kind or string key.
+pub(crate) fn merge_attributes(existing: &mut Vec<Attribute>, incoming: &[Attribute]) {
+    let mut positions: HashMap<AttributeKey, usize> = existing
+        .iter()
+        .enumerate()
+        .map(|(index, attr)| (attribute_key(attr), index))
+        .collect();
+    for attr in incoming {
+        let key = attribute_key(attr);
+        if let Some(&position) = positions.get(&key) {
+            existing[position] = attr.clone();
+        } else {
+            positions.insert(key, existing.len());
+            existing.push(attr.clone());
+        }
+    }
+}
+
+/// Collapses duplicate attributes in one decoded group, keeping the last value
+/// for each kind or string key.
+pub(crate) fn deduplicate_attributes(attrs: &mut Vec<Attribute>) {
+    let mut positions: HashMap<AttributeKey, usize> = HashMap::new();
+    let mut write = 0;
+    for read in 0..attrs.len() {
+        let key = attribute_key(&attrs[read]);
+        if let Some(&position) = positions.get(&key) {
+            attrs[position] = attrs[read].clone();
+        } else {
+            positions.insert(key, write);
+            if write != read {
+                attrs.swap(write, read);
+            }
+            write += 1;
+        }
+    }
+    attrs.truncate(write);
 }
 
 /// Encodes one attribute as the operands of a PARAMATTR group entry.
@@ -475,4 +579,64 @@ fn decode_int_attribute(code: u64, value: u64) -> Result<Attribute> {
 /// The index used for function-level attributes in a PARAMATTR list.
 pub(crate) const fn function_attr_index() -> u32 {
     FUNCTION_INDEX
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn attrs(values: &[&str]) -> Vec<Attribute> {
+        values
+            .iter()
+            .map(|value| Attribute((*value).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn merge_replaces_same_kind_or_string_key() {
+        let mut existing = attrs(&[
+            "align 8",
+            "noundef",
+            "\"key\"=\"a\"",
+            "byval(%A)",
+            "readnone",
+            "dereferenceable(8)",
+        ]);
+        merge_attributes(
+            &mut existing,
+            &attrs(&[
+                "align 16",
+                "\"key\"=\"b\"",
+                "byval(%B)",
+                "memory(none)",
+                "dereferenceable_or_null(16)",
+            ]),
+        );
+        assert_eq!(
+            existing,
+            attrs(&[
+                "align 16",
+                "noundef",
+                "\"key\"=\"b\"",
+                "byval(%B)",
+                "memory(none)",
+                "dereferenceable(8)",
+                "dereferenceable_or_null(16)",
+            ])
+        );
+    }
+
+    #[test]
+    fn merge_keeps_last_duplicate_from_incoming() {
+        let mut existing = attrs(&["align 8"]);
+        merge_attributes(&mut existing, &attrs(&["align 16", "align 32"]));
+        assert_eq!(existing, attrs(&["align 32"]));
+    }
+
+    #[test]
+    fn deduplicate_keeps_last_value_in_first_position() {
+        let mut values = attrs(&["align 8", "noundef", "align 16", r#""k"="a""#, r#""k"="b""#]);
+        deduplicate_attributes(&mut values);
+        assert_eq!(values, attrs(&["align 16", "noundef", r#""k"="b""#]));
+    }
 }

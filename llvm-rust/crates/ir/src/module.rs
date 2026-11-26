@@ -370,7 +370,9 @@ impl Module {
     }
 
     fn record_global_order(&mut self, id: GlobalId) {
-        self.invalidate_unnamed_slots();
+        if self.unnamed_globals.contains(&id) {
+            self.invalidate_unnamed_slots();
+        }
         if !self.global_order.contains_key(&id) {
             self.global_order.insert(id, self.next_order);
             self.next_order += 1;
@@ -378,7 +380,9 @@ impl Module {
     }
 
     fn record_function_order(&mut self, id: FuncId) {
-        self.invalidate_unnamed_slots();
+        if self.unnamed_functions.contains(&id) {
+            self.invalidate_unnamed_slots();
+        }
         if !self.function_order.contains_key(&id) {
             self.function_order.insert(id, self.next_order);
             self.next_order += 1;
@@ -570,8 +574,28 @@ mod tests {
         };
         let global_id = module.add_global(global);
         module.mark_unnamed_global(global_id);
+        module.assign_unnamed_slots();
 
         assert_eq!(module.unnamed_global_slot(global_id), Some(0));
+        assert_eq!(module.unnamed_function_slot(function_id), Some(1));
+
+        let named_name = module.intern("named");
+        let named = Global {
+            name: named_name,
+            ty: i32_ty,
+            init: None,
+            linkage: Linkage::External,
+            visibility: Visibility::Default,
+            is_const: false,
+            tls_model: ThreadLocal::None,
+            unnamed_addr: false,
+            local_unnamed_addr: false,
+            dso_local: false,
+            align: None,
+            section: None,
+        };
+        module.add_global(named);
+        assert!(!module.unnamed_function_slots.is_empty());
         assert_eq!(module.unnamed_function_slot(function_id), Some(1));
     }
 
