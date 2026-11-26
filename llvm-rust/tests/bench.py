@@ -18,7 +18,9 @@ def run(cmd):
     return time.perf_counter() - start, usage.ru_maxrss
 
 
-def measure(name, cmd, runs):
+def measure(name, cmd, runs, warmup):
+    for _ in range(warmup):
+        run(cmd)
     samples = [run(cmd) for _ in range(runs)]
     times = [sample[0] for sample in samples]
     rss = max(sample[1] for sample in samples)
@@ -35,6 +37,7 @@ def main():
     parser.add_argument("--rust-bin", default="/tmp/llvm-rust-target/release")
     parser.add_argument("--functions", type=int, default=1000)
     parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--warmup", type=int, default=1)
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -55,14 +58,14 @@ def main():
         prefix = ["taskset", "-c", "0"]
         cpp_as = [*prefix, os.path.join(args.llvm_bin, "llvm-as"), source, "-o", cpp_bc]
         rust_as = [*prefix, os.path.join(args.rust_bin, "llvm-as-rust"), source, "-o", rust_bc]
-        measure("llvm-as (C++)", cpp_as, args.runs)
-        measure("llvm-as-rust", rust_as, args.runs)
+        measure("llvm-as (C++)", cpp_as, args.runs, args.warmup)
+        measure("llvm-as-rust", rust_as, args.runs, args.warmup)
         # Both disassemblers consume the same C++-produced bitcode so the
         # comparison isolates decoder work from writer record layout.
         cpp_dis = [*prefix, os.path.join(args.llvm_bin, "llvm-dis"), cpp_bc, "-o", os.devnull]
         rust_dis = [*prefix, os.path.join(args.rust_bin, "llvm-dis-rust"), cpp_bc, "-o", os.devnull]
-        measure("llvm-dis (C++) on C++ bitcode", cpp_dis, args.runs)
-        measure("llvm-dis-rust on C++ bitcode", rust_dis, args.runs)
+        measure("llvm-dis (C++) on C++ bitcode", cpp_dis, args.runs, args.warmup)
+        measure("llvm-dis-rust on C++ bitcode", rust_dis, args.runs, args.warmup)
         print(f"input: {os.path.getsize(source)} bytes, {args.functions} functions")
 
 

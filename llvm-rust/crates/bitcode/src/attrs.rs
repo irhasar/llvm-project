@@ -125,6 +125,7 @@ enum AttributeKey {
     Int(u64),
     Type(u64),
     String(Vec<u8>),
+    Memory,
     Raw(String),
 }
 
@@ -136,6 +137,9 @@ fn attribute_key(attr: &Attribute) -> AttributeKey {
         }
         return AttributeKey::Raw(text.to_string());
     }
+    if text.starts_with("memory(") {
+        return AttributeKey::Memory;
+    }
     if let Some(code) = int_attribute_code(text) {
         return AttributeKey::Int(code);
     }
@@ -146,6 +150,14 @@ fn attribute_key(attr: &Attribute) -> AttributeKey {
         return AttributeKey::Enum(code);
     }
     AttributeKey::Raw(text.to_string())
+}
+
+fn insert_memory_attribute(attrs: &mut Vec<Attribute>, attr: Attribute) {
+    let position = attrs
+        .iter()
+        .position(|existing| !matches!(attribute_key(existing), AttributeKey::Enum(_)))
+        .unwrap_or(attrs.len());
+    attrs.insert(position, attr);
 }
 
 fn int_attribute_code(text: &str) -> Option<u64> {
@@ -262,21 +274,10 @@ pub(crate) fn encode_attribute(attr: &Attribute) -> Result<Vec<u64>> {
     {
         return Ok(vec![1, 42, parse_u64(value, "dereferenceable_or_null")?]);
     }
-    if let Some(value) = text
-        .strip_prefix("memory(")
-        .and_then(|value| value.strip_suffix(')'))
-    {
-        let code = match value {
-            "none" => 20,
-            "read" => 21,
-            "write" => 52,
-            _ => {
-                return Err(Error::bitcode(format!(
-                    "unsupported memory attribute `{text}`"
-                )));
-            }
-        };
-        return Ok(vec![0, code]);
+    if text.starts_with("memory(") {
+        let effects = parse_memory_attribute(text)
+            .ok_or_else(|| Error::bitcode(format!("unsupported memory attribute `{text}`")))?;
+        return Ok(vec![1, 86, (1u64 << 56) | u64::from(effects.0)]);
     }
 
     if let Some(code) = enum_attribute_code(text) {
@@ -421,6 +422,153 @@ fn enum_attribute_code(text: &str) -> Option<u64> {
         .find_map(|(name, code)| (*name == text).then_some(*code))
 }
 
+/// Memory effects as a 2-bit mod/ref mask for each LLVM memory location.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MemoryEffects(u8);
+
+const MEM_ARG: u8 = 0;
+const MEM_INACCESSIBLE: u8 = 2;
+const MEM_ERRNO: u8 = 4;
+const MEM_OTHER: u8 = 6;
+
+impl MemoryEffects {
+    const fn none() -> Self {
+        Self(0)
+    }
+
+    const fn unknown() -> Self {
+        Self(0xFF)
+    }
+
+    fn all(modref: u8) -> Self {
+        let mut effects = Self::none();
+        for location in [MEM_ARG, MEM_INACCESSIBLE, MEM_ERRNO, MEM_OTHER] {
+            effects.set(location, modref);
+        }
+        effects
+    }
+
+    fn only(location: u8) -> Self {
+        let mut effects = Self::none();
+        effects.set(location, 3);
+        effects
+    }
+
+    fn get(self, location: u8) -> u8 {
+        (self.0 >> location) & 3
+    }
+
+    fn set(&mut self, location: u8, modref: u8) {
+        self.0 = (self.0 & !(3 << location)) | ((modref & 3) << location);
+    }
+
+    fn intersect(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    fn union_modref(self) -> u8 {
+        [MEM_ARG, MEM_INACCESSIBLE, MEM_ERRNO, MEM_OTHER]
+            .into_iter()
+            .fold(0, |acc, location| acc | self.get(location))
+    }
+
+    fn from_int(value: u64) -> Self {
+        if value >> 56 == 0 {
+            let arg = ((value >> MEM_ARG) & 3) as u8;
+            let inaccessible = ((value >> MEM_INACCESSIBLE) & 3) as u8;
+            let other = ((value >> 4) & 3) as u8;
+            let mut effects = Self::none();
+            effects.set(MEM_ARG, arg);
+            effects.set(MEM_INACCESSIBLE, inaccessible);
+            effects.set(MEM_ERRNO, other);
+            effects.set(MEM_OTHER, other);
+            effects
+        } else {
+            Self((value & 0xFF) as u8)
+        }
+    }
+
+    fn text(self) -> String {
+        let other = self.get(MEM_OTHER);
+        let union = self.union_modref();
+        let mut parts = Vec::new();
+        if other != 0 || union == other {
+            parts.push(modref_name(other).to_string());
+        }
+        for (location, name) in [
+            (MEM_ARG, "argmem"),
+            (MEM_INACCESSIBLE, "inaccessiblemem"),
+            (MEM_ERRNO, "errnomem"),
+        ] {
+            let modref = self.get(location);
+            if modref != other {
+                parts.push(format!("{name}: {}", modref_name(modref)));
+            }
+        }
+        format!("memory({})", parts.join(", "))
+    }
+}
+
+fn modref_name(modref: u8) -> &'static str {
+    match modref {
+        0 => "none",
+        1 => "read",
+        2 => "write",
+        _ => "readwrite",
+    }
+}
+
+fn legacy_memory_effect(code: u64) -> Option<MemoryEffects> {
+    match code {
+        20 => Some(MemoryEffects::none()),
+        21 => Some(MemoryEffects::all(1)),
+        52 => Some(MemoryEffects::all(2)),
+        45 => Some(MemoryEffects::only(MEM_ARG)),
+        49 => Some(MemoryEffects::only(MEM_INACCESSIBLE)),
+        50 => {
+            let mut effects = MemoryEffects::only(MEM_ARG);
+            effects.set(MEM_INACCESSIBLE, 3);
+            Some(effects)
+        }
+        _ => None,
+    }
+}
+
+fn parse_modref(text: &str) -> Option<u8> {
+    match text {
+        "none" => Some(0),
+        "read" => Some(1),
+        "write" => Some(2),
+        "readwrite" => Some(3),
+        _ => None,
+    }
+}
+
+fn parse_memory_attribute(text: &str) -> Option<MemoryEffects> {
+    let inner = text.strip_prefix("memory(")?.strip_suffix(')')?;
+    let mut effects = MemoryEffects::none();
+    let mut seen_location = false;
+    for part in inner.split(',') {
+        let part = part.trim();
+        if let Some((location, modref)) = part.split_once(':') {
+            let location = match location.trim() {
+                "argmem" => MEM_ARG,
+                "inaccessiblemem" => MEM_INACCESSIBLE,
+                "errnomem" => MEM_ERRNO,
+                _ => return None,
+            };
+            effects.set(location, parse_modref(modref.trim())?);
+            seen_location = true;
+        } else {
+            if seen_location {
+                return None;
+            }
+            effects = MemoryEffects::all(parse_modref(part)?);
+        }
+    }
+    Some(effects)
+}
+
 /// Decodes one PARAMATTR group entry.
 pub(crate) fn decode_attribute_group(
     record: &Record,
@@ -434,6 +582,9 @@ pub(crate) fn decode_attribute_group(
     let index = u32::try_from(record.operands[1])
         .map_err(|_| Error::bitcode("parameter attribute index overflow"))?;
     let mut attrs = Vec::new();
+    let mut legacy_memory = MemoryEffects::unknown();
+    let mut legacy_memory_seen = false;
+    let mut modern_memory = None;
     let mut cursor = 2;
     while cursor < record.operands.len() {
         match record.operands[cursor] {
@@ -442,6 +593,14 @@ pub(crate) fn decode_attribute_group(
                     .operands
                     .get(cursor + 1)
                     .ok_or_else(|| Error::bitcode("truncated enum attribute"))?;
+                if index == FUNCTION_INDEX {
+                    if let Some(effect) = legacy_memory_effect(code) {
+                        legacy_memory = legacy_memory.intersect(effect);
+                        legacy_memory_seen = true;
+                        cursor += 2;
+                        continue;
+                    }
+                }
                 attrs.push(Attribute(decode_enum_attribute(code, index)?.to_string()));
                 cursor += 2;
             }
@@ -454,6 +613,16 @@ pub(crate) fn decode_attribute_group(
                     .operands
                     .get(cursor + 2)
                     .ok_or_else(|| Error::bitcode("truncated integer attribute"))?;
+                if code == 86 {
+                    let effects = MemoryEffects::from_int(value);
+                    if index == FUNCTION_INDEX {
+                        modern_memory = Some(effects);
+                    } else {
+                        attrs.push(Attribute(effects.text()));
+                    }
+                    cursor += 3;
+                    continue;
+                }
                 attrs.push(decode_int_attribute(code, value)?);
                 cursor += 3;
             }
@@ -500,6 +669,12 @@ pub(crate) fn decode_attribute_group(
                 )));
             }
         }
+    }
+    if legacy_memory_seen {
+        modern_memory = Some(legacy_memory);
+    }
+    if let Some(effects) = modern_memory {
+        insert_memory_attribute(&mut attrs, Attribute(effects.text()));
     }
     Ok((group_id, index, attrs))
 }
@@ -558,16 +733,7 @@ fn decode_int_attribute(code: u64, value: u64) -> Result<Attribute> {
         25 => format!("alignstack({value})"),
         41 => format!("dereferenceable({value})"),
         42 => format!("dereferenceable_or_null({value})"),
-        86 => match value {
-            0 => "readnone".to_string(),
-            21 => "readonly".to_string(),
-            42 => "writeonly".to_string(),
-            _ => {
-                return Err(Error::bitcode(format!(
-                    "unsupported memory attribute encoding {value}"
-                )));
-            }
-        },
+        86 => MemoryEffects::from_int(value).text(),
         _ => {
             return Err(Error::bitcode(format!(
                 "unsupported integer attribute code {code}"
@@ -599,7 +765,6 @@ mod tests {
             "noundef",
             "\"key\"=\"a\"",
             "byval(%A)",
-            "readnone",
             "dereferenceable(8)",
         ]);
         merge_attributes(
@@ -608,7 +773,6 @@ mod tests {
                 "align 16",
                 "\"key\"=\"b\"",
                 "byval(%B)",
-                "memory(none)",
                 "dereferenceable_or_null(16)",
             ]),
         );
@@ -619,7 +783,6 @@ mod tests {
                 "noundef",
                 "\"key\"=\"b\"",
                 "byval(%B)",
-                "memory(none)",
                 "dereferenceable(8)",
                 "dereferenceable_or_null(16)",
             ])
@@ -631,6 +794,67 @@ mod tests {
         let mut existing = attrs(&["align 8"]);
         merge_attributes(&mut existing, &attrs(&["align 16", "align 32"]));
         assert_eq!(existing, attrs(&["align 32"]));
+    }
+
+    #[test]
+    fn memory_attributes_merge_by_kind_but_legacy_flags_stay_distinct() {
+        let mut existing = attrs(&["memory(none)", "noundef"]);
+        merge_attributes(&mut existing, &attrs(&["memory(read)"]));
+        assert_eq!(existing, attrs(&["memory(read)", "noundef"]));
+
+        let mut parameter = attrs(&["readnone"]);
+        merge_attributes(&mut parameter, &attrs(&["memory(none)"]));
+        assert_eq!(parameter, attrs(&["readnone", "memory(none)"]));
+    }
+
+    #[test]
+    fn legacy_function_memory_effects_intersect() {
+        let mut effects = MemoryEffects::unknown();
+        for code in [20, 21, 20] {
+            effects = effects.intersect(legacy_memory_effect(code).unwrap());
+        }
+        assert_eq!(effects.text(), "memory(none)");
+
+        let mut effects = MemoryEffects::unknown();
+        for code in [21, 21] {
+            effects = effects.intersect(legacy_memory_effect(code).unwrap());
+        }
+        assert_eq!(effects.text(), "memory(read)");
+
+        let mut effects = MemoryEffects::unknown();
+        for code in [21, 52] {
+            effects = effects.intersect(legacy_memory_effect(code).unwrap());
+        }
+        assert_eq!(effects.text(), "memory(none)");
+    }
+
+    #[test]
+    fn decodes_legacy_function_memory_intersection() {
+        let record = Record {
+            code: PARAMATTR_GRP_CODE_ENTRY,
+            operands: vec![1, u64::from(u32::MAX), 0, 20, 0, 21, 0, 20],
+            blob: None,
+        };
+        let (_, index, attrs) =
+            decode_attribute_group(&record, &TypeTable::new(), &[]).expect("decode");
+        assert_eq!(index, u32::MAX);
+        assert_eq!(attrs, vec![Attribute("memory(none)".to_string())]);
+    }
+
+    #[test]
+    fn modern_memory_attributes_round_trip_through_text() {
+        for text in [
+            "memory(none)",
+            "memory(read)",
+            "memory(write)",
+            "memory(readwrite)",
+            "memory(argmem: read)",
+            "memory(inaccessiblemem: write)",
+            "memory(argmem: read, inaccessiblemem: write)",
+        ] {
+            let effects = parse_memory_attribute(text).expect(text);
+            assert_eq!(effects.text(), text);
+        }
     }
 
     #[test]

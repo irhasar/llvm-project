@@ -16,8 +16,9 @@ normalize() {
 }
 
 status=0
-for input in tests/corpus/*.ll; do
-    name=$(basename "$input" .ll)
+for input in tests/corpus/*.ll tests/corpus/*.bc; do
+    name=$(basename "$input")
+    name=${name%.*}
     cpp_bc="$TMP/$name-cpp.bc"
     rust_bc="$TMP/$name-rust.bc"
     cpp_ll="$TMP/$name-cpp.ll"
@@ -25,6 +26,26 @@ for input in tests/corpus/*.ll; do
     read_ll="$TMP/$name-read.ll"
     read_bc="$TMP/$name-read.bc"
     read_canon="$TMP/$name-read-canon.ll"
+
+    if [[ "$input" == *.bc ]]; then
+        "$LLVM_BIN/llvm-dis" "$input" -o "$cpp_ll"
+        ./target/debug/llvm-dis-rust "$input" -o "$rust_ll"
+        if ! "$LLVM_BIN/llvm-bcanalyzer" "$input" >/dev/null 2>&1; then
+            echo "FAIL bcanalyzer fixture: $name"
+            status=1
+        fi
+        "$LLVM_BIN/llvm-as" "$rust_ll" -o "$read_bc"
+        "$LLVM_BIN/llvm-dis" "$read_bc" -o "$read_canon"
+        if ! diff -u <(normalize "$cpp_ll") <(normalize "$read_canon") >"$TMP/$name-reader-canon.diff"; then
+            echo "FAIL reader fixture canonical: $name"
+            cat "$TMP/$name-reader-canon.diff"
+            status=1
+        fi
+        if [ "$status" -eq 0 ]; then
+            echo "PASS $name"
+        fi
+        continue
+    fi
 
     "$LLVM_BIN/llvm-as" "$input" -o "$cpp_bc"
     ./target/debug/llvm-as-rust "$input" -o "$rust_bc"

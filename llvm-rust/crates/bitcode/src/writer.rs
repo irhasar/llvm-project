@@ -1453,6 +1453,9 @@ mod tests {
         writer.split_attr_slots = true;
         writer.write().expect("write");
         let bytes = writer.finish();
+        if let Ok(path) = std::env::var("LLVM_RUST_DUPLICATE_FIXTURE") {
+            std::fs::write(path, &bytes).expect("write fixture");
+        }
         let read = read_bitcode(&bytes).expect("read");
         let dup = read
             .functions

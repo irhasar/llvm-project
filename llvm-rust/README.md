@@ -89,7 +89,10 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   stored group, not once per referencing declaration. Lists that repeat a
   slot are merged once with LLVM's last-wins rule for the same attribute kind
   or string key, and call-site attribute lists use the same shared
-  representation.
+  representation. Legacy function memory flags are intersected while a group
+  is decoded, then emitted as one modern `memory(...)` attribute keyed by the
+  memory kind; parameter and return `readnone`/`readonly`/`writeonly` remain
+  distinct flags.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
 
 Half and bfloat conversion handles subnormals, infinities, quiet NaNs, and
@@ -140,7 +143,7 @@ python3 tests/bench.py --runs 5
 
 ## M1 results
 
-Differential harness: all 27 modules in `tests/corpus/` match the C++ LLVM
+Differential harness: all 29 modules in `tests/corpus/` match the C++ LLVM
 19.1.7 oracle in both directions after normalizing `source_filename` and
 `ModuleID`. The corpus covers TLS models, sections, opaque types, `i128`
 constants, hexadecimal floats and subnormal/signaling-NaN cases, float and
@@ -151,12 +154,19 @@ memory attributes, argument-indexed call-site attributes,
 UTF-8 section names, unnamed globals/functions, explicit quoted numeric
 global/function names, unnamed/global slot ordering, unnamed/name collisions,
 forward numbered references that must not consume definition slots, direct
-calls without pointer type records, unnamed value/block numbering, exact
-shift/divide flags, and `phi` self references.
+calls without pointer type records, repeated function memory effects, modern
+`memory(argmem: ...)`/`memory(inaccessiblemem: ...)` forms, duplicate
+attribute groups in a checked-in bitcode fixture, unnamed value/block
+numbering, exact shift/divide flags, and `phi` self references.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
   result matches the oracle byte-for-byte (after the same normalization).
+- `tests/corpus/duplicate_attrs.bc` is a checked-in bitcode fixture with two
+  groups for one parameter slot and a repeated group reference for a
+  declaration. It is produced by the round-trip test when
+  `LLVM_RUST_DUPLICATE_FIXTURE` is set; the differential harness reads it with
+  both disassemblers and canonicalizes the Rust output through C++ `llvm-as`.
 
 Benchmark on a synthetic corpus of 1000 functions, 10 arithmetic instructions
 and one attributed call each (342,956 bytes), LLVM 19.1.7, `taskset -c 0`,
@@ -164,20 +174,21 @@ five runs:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 37.8 ms | 36.4-37.9 ms | 55.7 MiB |
-| `llvm-as-rust` | 24.4 ms | 23.8-25.1 ms | 14.8 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 31.5 ms | 31.2-31.7 ms | 55.0 MiB |
-| `llvm-dis-rust` on C++ bitcode | 20.5 ms | 19.5-22.0 ms | 14.8 MiB |
+| `llvm-as` (C++) | 36.1 ms | 35.8-36.6 ms | 55.7 MiB |
+| `llvm-as-rust` | 24.2 ms | 23.5-25.2 ms | 14.6 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 30.5 ms | 29.9-30.8 ms | 54.5 MiB |
+| `llvm-dis-rust` on C++ bitcode | 18.8 ms | 18.8-19.7 ms | 14.6 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer-only
-corpus, Rust throughput was about 1.6x both C++ tools, and peak RSS was about
-3.8x lower. These are throughput and memory measurements, not a generated-code
-performance claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.3 MiB
+corpus, Rust throughput was about 1.5x the C++ assembler and 1.6x the C++
+disassembler, and peak RSS was about 3.8x lower. Each tool gets one discarded
+warmup run before the five measured runs. These are throughput and memory
+measurements, not a generated-code performance claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.3 MiB
 (`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 A clean release build of the two Rust tools, using a separate target
-directory, took 9.8 s wall, 32.3 s user, and 2.0 s system time. This is a
+directory, took 9.5 s wall, 31.3 s user, and 2.0 s system time. This is a
 Rust-only observation, not a cross-toolchain build-time result. A C++ compile
 baseline is not available in this workspace: only the installed LLVM 19.1.7
 tools and `libLLVM.so` are present, without LLVM development headers or a

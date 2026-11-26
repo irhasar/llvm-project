@@ -1,0 +1,7 @@
+declare void @none() memory(none) memory(read) memory(none)
+declare void @read() memory(read) memory(read)
+declare void @write() memory(write) memory(write)
+declare void @conflict() memory(read) memory(write)
+declare void @arg_read() memory(argmem: read)
+declare void @mixed() memory(argmem: read, inaccessiblemem: write)
+declare void @inacc() inaccessiblememonly memory(read)
