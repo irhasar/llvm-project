@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use llvm_rust_ir::{
     Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, FastMath, FcmpPred, FuncId, Function,
-    GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand, OperandKind,
+    GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, LocalId, Module, Operand, OperandKind,
     TailKind, Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, Result};
@@ -132,9 +132,11 @@ struct Writer<'a> {
     sections: Vec<String>,
     section_ids: HashMap<String, u32>,
     function_attr_lists: HashMap<FuncId, u32>,
+    function_aligns: HashMap<FuncId, u64>,
     call_attr_lists: HashMap<(FuncId, InstId), u32>,
     paramattr_groups: Vec<(u32, Vec<Attribute>)>,
     paramattr_lists: Vec<Vec<u64>>,
+    local_values: HashMap<LocalId, u32>,
 }
 
 impl<'a> Writer<'a> {
@@ -144,12 +146,18 @@ impl<'a> Writer<'a> {
             type_ids.insert(id, index as u32);
         }
         let mut globals = HashMap::new();
-        for (index, (id, _)) in module.globals.iter().enumerate() {
-            globals.insert(id, index as u32);
+        for (id, global) in module.globals.iter() {
+            if module.types.is_valid(global.ty) {
+                let index = globals.len() as u32;
+                globals.insert(id, index);
+            }
         }
         let mut functions = HashMap::new();
-        for (index, (id, _)) in module.functions.iter().enumerate() {
-            functions.insert(id, globals.len() as u32 + index as u32);
+        for (id, function) in module.functions.iter() {
+            if module.types.is_valid(function.ty) {
+                let index = functions.len() as u32;
+                functions.insert(id, globals.len() as u32 + index);
+            }
         }
         let mut constants = Vec::new();
         for (id, constant) in module.constants.iter() {
@@ -189,18 +197,26 @@ impl<'a> Writer<'a> {
             sections: Vec::new(),
             section_ids: HashMap::new(),
             function_attr_lists: HashMap::new(),
+            function_aligns: HashMap::new(),
             call_attr_lists: HashMap::new(),
             paramattr_groups: Vec::new(),
             paramattr_lists: Vec::new(),
+            local_values: HashMap::new(),
         };
         for (_, global) in module.globals.iter() {
-            writer.add_string(module.name(global.name));
+            if module.types.is_valid(global.ty) {
+                writer.add_string(module.name(global.name));
+            }
         }
         for (_, function) in module.functions.iter() {
-            writer.add_string(module.name(function.name));
+            if module.types.is_valid(function.ty) {
+                writer.add_string(module.name(function.name));
+            }
         }
         for (_, global) in module.globals.iter() {
-            if let Some(section) = &global.section {
+            if module.types.is_valid(global.ty)
+                && let Some(section) = &global.section
+            {
                 writer.section_id(section);
             }
         }
@@ -377,6 +393,9 @@ impl<'a> Writer<'a> {
             .map(|(id, function)| (id, function.clone()))
             .collect();
         for (function_id, function) in &functions {
+            if !self.module.types.is_valid(function.ty) {
+                continue;
+            }
             let mut entries = Vec::new();
             let ret_attrs = expand_attributes(self.module, &function.ret_attrs)?;
             if !ret_attrs.is_empty() {
@@ -388,7 +407,23 @@ impl<'a> Writer<'a> {
                     entries.push((index as u32 + 1, attrs));
                 }
             }
-            let function_attrs = expand_attributes(self.module, &function.attrs)?;
+            let mut function_attrs = expand_attributes(self.module, &function.attrs)?;
+            if let Some(index) = function_attrs
+                .iter()
+                .position(|attr| attr.0.starts_with("align ") || attr.0.starts_with("align("))
+            {
+                let attr = function_attrs.remove(index);
+                let value = attr
+                    .0
+                    .trim_start_matches("align")
+                    .trim()
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .trim();
+                if let Ok(value) = value.parse::<u64>() {
+                    self.function_aligns.insert(*function_id, value);
+                }
+            }
             if !function_attrs.is_empty() {
                 entries.push((function_attr_index(), function_attrs));
             }
@@ -464,18 +499,26 @@ impl<'a> Writer<'a> {
     }
 
     fn resolve_type_text(&self, text: &str) -> Result<u32> {
-        let needle: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+        let needle = text.trim();
         for (id, _) in self.module.types.iter() {
-            let candidate: String = self
-                .module
-                .types
-                .display(id)
-                .to_string()
-                .chars()
-                .filter(|ch| !ch.is_whitespace())
-                .collect();
-            if candidate == needle {
+            if self.module.types.display(id).to_string() == needle {
                 return self.type_index(id);
+            }
+        }
+        if !needle.contains('"') {
+            let compact: String = needle.chars().filter(|ch| !ch.is_whitespace()).collect();
+            for (id, _) in self.module.types.iter() {
+                let candidate: String = self
+                    .module
+                    .types
+                    .display(id)
+                    .to_string()
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace())
+                    .collect();
+                if candidate == compact {
+                    return self.type_index(id);
+                }
             }
         }
         Err(Error::bitcode(format!(
@@ -507,6 +550,9 @@ impl<'a> Writer<'a> {
             .map(|(id, global)| (id, global.clone()))
             .collect();
         for (_, global) in globals {
+            if !self.module.types.is_valid(global.ty) {
+                continue;
+            }
             let name = self.module.name(global.name);
             let name_offset = self.add_string(name) as u64;
             let type_id = self.type_index(global.ty)? as u64;
@@ -530,7 +576,7 @@ impl<'a> Writer<'a> {
                     .unwrap_or(0),
                 visibility_code(global.visibility) as u64,
                 global.tls_model.bitcode_code(),
-                global.unnamed_addr as u64,
+                unnamed_addr_code(global.unnamed_addr, global.local_unnamed_addr),
                 0,
                 0,
                 0,
@@ -554,6 +600,9 @@ impl<'a> Writer<'a> {
             .map(|(id, function)| (id, function.clone()))
             .collect();
         for (function_id, function) in functions {
+            if !self.module.types.is_valid(function.ty) {
+                continue;
+            }
             let name = self.module.name(function.name);
             let name_offset = self.add_string(name) as u64;
             let type_id = self.type_index(function.ty)? as u64;
@@ -570,11 +619,16 @@ impl<'a> Writer<'a> {
                 function.is_declaration as u64,
                 linkage_code(function.linkage) as u64,
                 attr_list,
-                encode_align(function.align) as u64,
+                encode_align(
+                    self.function_aligns
+                        .get(&function_id)
+                        .copied()
+                        .or(function.align),
+                ) as u64,
                 0,
                 visibility_code(function.visibility) as u64,
                 0,
-                function.unnamed_addr as u64,
+                unnamed_addr_code(function.unnamed_addr, function.local_unnamed_addr),
                 0,
                 0,
                 0,
@@ -684,7 +738,7 @@ impl<'a> Writer<'a> {
             .map(|(id, function)| (id, function.clone()))
             .collect();
         for (function_id, function) in functions {
-            if function.is_declaration {
+            if function.is_declaration || !self.module.types.is_valid(function.ty) {
                 continue;
             }
             self.write_body(function_id, &function)?;
@@ -696,6 +750,22 @@ impl<'a> Writer<'a> {
         self.stream.enter_subblock(FUNCTION_BLOCK, 4);
         self.stream
             .emit_record(FUNC_DECLAREBLOCKS, &[function.blocks.len() as u64]);
+        self.local_values.clear();
+        let mut next_local = function.params.len() as u32;
+        for index in 0..function.params.len() {
+            self.local_values
+                .insert(index as LocalId, self.base_local + index as u32);
+        }
+        for (_, block) in function.blocks_in_order() {
+            for inst_id in &block.insts {
+                let inst = function.insts.get(*inst_id);
+                if let Some(local) = inst.result {
+                    self.local_values
+                        .insert(local, self.base_local + next_local);
+                    next_local += 1;
+                }
+            }
+        }
         let mut next_local = function.params.len() as u32;
         for (_, block) in function.blocks_in_order() {
             for inst_id in &block.insts {
@@ -707,18 +777,18 @@ impl<'a> Writer<'a> {
                 }
             }
         }
-        self.write_function_vst(function);
+        self.write_function_vst(function)?;
         self.stream.exit_block();
         Ok(())
     }
 
-    fn write_function_vst(&mut self, function: &Function) {
+    fn write_function_vst(&mut self, function: &Function) -> Result<()> {
         let has_names = function.locals.iter().any(|local| local.name.is_some())
             || function
                 .blocks_in_order()
                 .any(|(_, block)| block.name.is_some());
         if !has_names {
-            return;
+            return Ok(());
         }
         self.stream.enter_subblock(VALUE_SYMTAB_BLOCK, 4);
         for (local_id, local) in function.locals.iter().enumerate() {
@@ -726,7 +796,14 @@ impl<'a> Writer<'a> {
                 if is_unnamed_slot(self.module.name(name)) {
                     continue;
                 }
-                let mut operands = vec![(self.base_local + local_id as u32) as u64];
+                let value = self
+                    .local_values
+                    .get(&(local_id as LocalId))
+                    .copied()
+                    .ok_or_else(|| {
+                        Error::bitcode("local value is missing from the bitcode value map")
+                    })?;
+                let mut operands = vec![value as u64];
                 operands.extend(self.module.name(name).bytes().map(|b| b as u64));
                 self.stream.emit_record(VST_ENTRY, &operands);
             }
@@ -742,6 +819,7 @@ impl<'a> Writer<'a> {
             }
         }
         self.stream.exit_block();
+        Ok(())
     }
 
     fn write_instruction(
@@ -1022,7 +1100,11 @@ impl<'a> Writer<'a> {
 
     fn operand_value_id(&self, value: &Operand) -> Result<u32> {
         match value.kind {
-            OperandKind::Local(id) => Ok(self.base_local + id),
+            OperandKind::Local(id) => self
+                .local_values
+                .get(&id)
+                .copied()
+                .ok_or_else(|| Error::bitcode("local operand is missing from the value map")),
             OperandKind::Const(id) => self.const_value_id(id),
             OperandKind::Global(id) => self
                 .globals
@@ -1076,6 +1158,16 @@ impl<'a> Writer<'a> {
 
     fn finish(self) -> Vec<u8> {
         self.stream.finish()
+    }
+}
+
+fn unnamed_addr_code(unnamed: bool, local: bool) -> u64 {
+    if local {
+        2
+    } else if unnamed {
+        1
+    } else {
+        0
     }
 }
 

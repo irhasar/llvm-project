@@ -29,6 +29,7 @@ pub fn parse_module(source: &str) -> core::result::Result<Module, ParseError> {
     let tokens = Lexer::new(source).tokenize()?;
     let mut parser = Parser::new(source, tokens);
     parser.parse_top_level()?;
+    parser.module.resolve_forward_references();
     Ok(parser.module)
 }
 
@@ -342,59 +343,157 @@ fn parse_float_bits(text: &str, kind: FloatKind) -> Option<u64> {
 }
 
 fn float_bits_from_f64(value: f64, kind: FloatKind) -> u64 {
+    let bits = value.to_bits();
     match kind {
-        FloatKind::Half => (f64_to_half(value) as u64) & 0xffff,
-        FloatKind::BFloat => (f64_to_bfloat(value) as u64) & 0xffff,
-        FloatKind::Float => (value as f32).to_bits() as u64,
-        FloatKind::Double => value.to_bits(),
-        _ => value.to_bits(),
+        FloatKind::Half => f64_to_half_bits(bits) as u64,
+        FloatKind::BFloat => f64_to_bfloat_bits(bits) as u64,
+        FloatKind::Float => f64_to_f32_bits(bits) as u64,
+        FloatKind::Double => bits,
+        _ => bits,
     }
 }
 
-fn f64_to_bfloat(value: f64) -> u16 {
-    let bits = (value as f32).to_bits();
+fn round_shift(value: u64, shift: u32) -> u64 {
+    if shift == 0 {
+        return value;
+    }
+    let truncated = value >> shift;
+    let mask = (1u64 << shift) - 1;
+    let remainder = value & mask;
+    let halfway = 1u64 << (shift - 1);
+    if remainder > halfway || (remainder == halfway && truncated & 1 == 1) {
+        truncated + 1
+    } else {
+        truncated
+    }
+}
+
+fn f64_to_f32_bits(bits: u64) -> u32 {
+    let sign = ((bits >> 63) as u32) << 31;
+    let exp = ((bits >> 52) & 0x7ff) as u32;
+    let frac = bits & 0x000f_ffff_ffff_ffff;
+    if exp == 0x7ff {
+        if frac == 0 {
+            return sign | 0x7f80_0000;
+        }
+        let payload = ((frac >> 29) as u32) & 0x007f_ffff;
+        return sign | 0x7f80_0000 | payload.max(1);
+    }
+    (f64::from_bits(bits) as f32).to_bits()
+}
+
+fn f32_to_bfloat_bits(bits: u32) -> u16 {
     let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xff) as i32;
-    let mantissa = bits & 0x7f_ffff;
+    let exp = ((bits >> 23) & 0xff) as u32;
+    let mant = bits & 0x007f_ffff;
     if exp == 0xff {
-        return sign | 0x7f80 | if mantissa != 0 { 0x40 } else { 0 };
+        if mant == 0 {
+            return sign | 0x7f80;
+        }
+        let payload = ((mant >> 16) as u16) & 0x007f;
+        return sign | 0x7f80 | payload.max(1);
     }
-    let unbiased = exp - 127 + 127;
-    if unbiased >= 0xff {
-        return sign | 0x7f80;
-    }
-    if unbiased <= 0 {
-        if unbiased < -7 {
+    if exp == 0 {
+        if mant == 0 {
             return sign;
         }
-        let mantissa = mantissa | 0x80_0000;
-        let shift = (7 - unbiased) as u32;
-        return sign | (mantissa >> shift) as u16;
+        let rounded = round_shift(mant as u64, 16) as u32;
+        return if rounded >= 0x80 {
+            sign | 0x0080
+        } else {
+            sign | rounded as u16
+        };
     }
-    sign | ((unbiased as u16) << 7) | (mantissa >> 16) as u16
+    let mut mantissa = round_shift(mant as u64, 16) as u32;
+    let mut exponent = exp;
+    if mantissa == 0x80 {
+        mantissa = 0;
+        exponent += 1;
+        if exponent >= 0xff {
+            return sign | 0x7f80;
+        }
+    }
+    sign | ((exponent as u16) << 7) | mantissa as u16
 }
 
-fn f64_to_half(value: f64) -> u16 {
-    let bits = (value as f32).to_bits();
+fn f64_to_bfloat_bits(bits: u64) -> u16 {
+    let exp = ((bits >> 52) & 0x7ff) as u32;
+    let frac = bits & 0x000f_ffff_ffff_ffff;
+    if exp == 0x7ff && frac != 0 {
+        let sign = ((bits >> 48) & 0x8000) as u16;
+        let payload = ((frac >> 45) as u16) & 0x007f;
+        return sign | 0x7f80 | payload.max(1);
+    }
+    f32_to_bfloat_bits(f64_to_f32_bits(bits))
+}
+
+fn f32_to_half_bits(bits: u32) -> u16 {
     let sign = ((bits >> 16) & 0x8000) as u16;
     let exp = ((bits >> 23) & 0xff) as i32;
-    let mantissa = bits & 0x7f_ffff;
+    let mant = bits & 0x007f_ffff;
     if exp == 0xff {
-        return sign | 0x7c00 | if mantissa != 0 { 0x200 } else { 0 };
+        if mant == 0 {
+            return sign | 0x7c00;
+        }
+        let payload = ((mant >> 13) as u16) & 0x03ff;
+        return sign | 0x7c00 | payload.max(1);
     }
-    let unbiased = exp - 127 + 15;
-    if unbiased >= 0x1f {
+    if exp == 0 {
+        return sign;
+    }
+    let unbiased = exp - 127;
+    if unbiased > 15 {
         return sign | 0x7c00;
     }
-    if unbiased <= 0 {
-        if unbiased < -10 {
-            return sign;
+    if unbiased >= -14 {
+        let mut mantissa = round_shift(mant as u64, 13) as u32;
+        let mut exponent = unbiased + 15;
+        if mantissa == 0x400 {
+            mantissa = 0;
+            exponent += 1;
         }
-        let mantissa = mantissa | 0x80_0000;
-        let shift = (14 - unbiased) as u32;
-        return sign | (mantissa >> shift) as u16;
+        if exponent >= 0x1f {
+            return sign | 0x7c00;
+        }
+        return sign | ((exponent as u16) << 10) | mantissa as u16;
     }
-    sign | ((unbiased as u16) << 10) | (mantissa >> 13) as u16
+    let shift = (-unbiased - 1) as u32;
+    let significand = 0x0080_0000u64 | mant as u64;
+    let rounded = round_shift(significand, shift);
+    if rounded >= 0x400 {
+        sign | 0x0400
+    } else {
+        sign | rounded as u16
+    }
+}
+
+fn f64_to_half_bits(bits: u64) -> u16 {
+    let exp = ((bits >> 52) & 0x7ff) as u32;
+    let frac = bits & 0x000f_ffff_ffff_ffff;
+    if exp == 0x7ff && frac != 0 {
+        let sign = ((bits >> 48) & 0x8000) as u16;
+        let payload = ((frac >> 42) as u16) & 0x03ff;
+        return sign | 0x7c00 | payload.max(1);
+    }
+    f32_to_half_bits(f64_to_f32_bits(bits))
+}
+
+fn is_type_attribute(name: &str) -> bool {
+    matches!(
+        name,
+        "byval" | "sret" | "inalloca" | "preallocated" | "byref" | "elementtype"
+    )
+}
+
+fn normalize_group_attribute(attr: Attribute) -> Attribute {
+    let text = attr.0;
+    if let Some(value) = text
+        .strip_prefix("alignstack(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        return Attribute(format!("alignstack={value}"));
+    }
+    Attribute(text)
 }
 
 fn token_text(kind: &TokenKind) -> String {
@@ -472,6 +571,7 @@ fn is_attr_keyword(text: &str) -> bool {
             | "noalias"
             | "nonnull"
             | "align"
+            | "alignstack"
             | "dereferenceable"
             | "dereferenceable_or_null"
             | "byval"
@@ -625,52 +725,26 @@ impl<'a> Parser<'a> {
         self.advance();
         self.expect_punct('=')?;
         self.expect_punct('{')?;
-        let mut depth = 1usize;
-        let mut text = String::new();
-        while depth > 0 {
+        let mut attrs = Vec::new();
+        loop {
+            self.skip_eol();
+            if self.eat_punct('}') {
+                break;
+            }
             if self.at_eof() {
                 return Err(self.error("unterminated attribute group"));
             }
-            let token = self.tokens[self.pos].clone();
-            self.pos += 1;
-            match token.kind {
-                TokenKind::Punct('{') => {
-                    depth += 1;
-                    text.push('{');
-                }
-                TokenKind::Punct('}') => {
-                    depth -= 1;
-                    if depth > 0 {
-                        text.push('}');
-                    }
-                }
-                TokenKind::Punct('=') => {
-                    while text.ends_with(' ') {
-                        text.pop();
-                    }
-                    text.push('=');
-                }
-                other => {
-                    let piece = token_text(&other);
-                    let no_space_before = matches!(
-                        other,
-                        TokenKind::Punct(')') | TokenKind::Punct(',') | TokenKind::Punct('=')
-                    );
-                    let no_space_after_previous = text
-                        .chars()
-                        .last()
-                        .is_some_and(|last| matches!(last, '(' | '=' | ','));
-                    if !text.is_empty()
-                        && !no_space_before
-                        && !no_space_after_previous
-                        && !matches!(other, TokenKind::Punct('('))
-                    {
-                        text.push(' ');
-                    }
-                    text.push_str(&piece);
-                }
-            }
+            let attr = match self.peek_kind() {
+                TokenKind::Str(_) | TokenKind::AttrGroup(_) => self.parse_attribute_token()?,
+                _ => self.parse_attribute()?,
+            };
+            attrs.push(normalize_group_attribute(attr));
         }
+        let text = attrs
+            .into_iter()
+            .map(|attr| attr.0)
+            .collect::<Vec<_>>()
+            .join(" ");
         self.module.attr_groups.push((group, text));
         self.expect_eol()
     }
@@ -684,6 +758,7 @@ impl<'a> Parser<'a> {
         let mut dso_local = false;
         let mut tls_model = ThreadLocal::None;
         let mut unnamed_addr = false;
+        let mut local_unnamed_addr = false;
         let mut is_const = false;
         let mut saw_kind = false;
         loop {
@@ -723,8 +798,12 @@ impl<'a> Parser<'a> {
                         self.expect_punct(')')?;
                     }
                 }
-                "unnamed_addr" | "local_unnamed_addr" => {
+                "unnamed_addr" => {
                     unnamed_addr = true;
+                    self.advance();
+                }
+                "local_unnamed_addr" => {
+                    local_unnamed_addr = true;
                     self.advance();
                 }
                 "externally_initialized" => {
@@ -733,8 +812,11 @@ impl<'a> Parser<'a> {
                 "addrspace" => {
                     self.advance();
                     self.expect_punct('(')?;
-                    let _ = self.expect_int()?;
+                    let address_space = self.expect_int()?;
                     self.expect_punct(')')?;
+                    if address_space != 0 {
+                        return Err(self.error("nonzero global address spaces are not supported"));
+                    }
                 }
                 "global" => {
                     is_const = false;
@@ -794,6 +876,7 @@ impl<'a> Parser<'a> {
             is_const,
             tls_model,
             unnamed_addr,
+            local_unnamed_addr,
             dso_local,
             align,
             section,
@@ -811,6 +894,7 @@ impl<'a> Parser<'a> {
         let mut visibility = Visibility::Default;
         let mut dso_local = false;
         let mut unnamed_addr = false;
+        let mut local_unnamed_addr = false;
         let mut attrs = Vec::new();
         loop {
             let text = match self.peek_kind() {
@@ -836,8 +920,12 @@ impl<'a> Parser<'a> {
                     dso_local = text == "dso_local";
                     self.advance();
                 }
-                "unnamed_addr" | "local_unnamed_addr" => {
+                "unnamed_addr" => {
                     unnamed_addr = true;
+                    self.advance();
+                }
+                "local_unnamed_addr" => {
+                    local_unnamed_addr = true;
                     self.advance();
                 }
                 other if is_attr_keyword(other) => {
@@ -854,6 +942,7 @@ impl<'a> Parser<'a> {
         function.visibility = visibility;
         function.dso_local = dso_local;
         function.unnamed_addr = unnamed_addr;
+        function.local_unnamed_addr = local_unnamed_addr;
         function.is_declaration = is_declaration;
         function.ret_attrs = attrs;
         self.expect_punct('(')?;
@@ -893,6 +982,22 @@ impl<'a> Parser<'a> {
         self.expect_punct(')')?;
         function.ty = self.module.types.function(ret_ty, param_types, varargs);
         self.parse_trailing_attrs(&mut function.attrs, !is_declaration)?;
+        if let Some(index) = function
+            .attrs
+            .iter()
+            .position(|attr| attr.0 == "local_unnamed_addr")
+        {
+            function.attrs.remove(index);
+            function.local_unnamed_addr = true;
+        }
+        if let Some(index) = function
+            .attrs
+            .iter()
+            .position(|attr| attr.0 == "unnamed_addr")
+        {
+            function.attrs.remove(index);
+            function.unnamed_addr = true;
+        }
         if let Some(index) = function
             .attrs
             .iter()
@@ -980,6 +1085,10 @@ impl<'a> Parser<'a> {
                                 let value = self.expect_int()?;
                                 attrs.push(Attribute(format!("align {value}")));
                             }
+                            "unnamed_addr" | "local_unnamed_addr" => {
+                                attrs.push(Attribute(text.clone()));
+                                self.advance();
+                            }
                             "comdat" => {
                                 let mut text = String::from("comdat");
                                 if self.eat_punct('(') {
@@ -1031,8 +1140,25 @@ impl<'a> Parser<'a> {
     fn parse_attribute(&mut self) -> Result<Attribute> {
         let name = self.expect_ident()?;
         let mut text = name.clone();
+        if is_type_attribute(&name) && self.at_punct('(') {
+            self.expect_punct('(')?;
+            let ty = self.parse_type()?;
+            self.expect_punct(')')?;
+            return Ok(Attribute(format!(
+                "{name}({})",
+                self.module.types.display(ty)
+            )));
+        }
         if self.at_punct('(') {
             self.consume_balanced_text(&mut text)?;
+        } else if self.at_punct('=') {
+            self.advance();
+            let value = self.expect_int()?;
+            text = if name == "align" {
+                format!("align {value}")
+            } else {
+                format!("{name}({value})")
+            };
         } else if name == "align" {
             let value = self.expect_int()?;
             text.push_str(&format!(" {value}"));
@@ -1212,8 +1338,13 @@ impl<'a> Parser<'a> {
                     "ptr" => {
                         if self.eat_ident("addrspace") {
                             self.expect_punct('(')?;
-                            let _ = self.expect_int()?;
+                            let address_space = self.expect_int()?;
                             self.expect_punct(')')?;
+                            if address_space != 0 {
+                                return Err(
+                                    self.error("nonzero pointer address spaces are not supported")
+                                );
+                            }
                         }
                         self.module.types.pointer()
                     }
@@ -2199,6 +2330,48 @@ mod tests {
             .expect("lex");
         assert_eq!(tokens[0].kind, TokenKind::Ident("attributes".to_string()));
         assert_eq!(tokens[1].kind, TokenKind::AttrGroup(0));
+    }
+
+    #[test]
+    fn rejects_nonzero_address_spaces() {
+        assert!(parse_module("@g = addrspace(1) global i32 0\n").is_err());
+        let source = "define ptr @f(ptr addrspace(1) %p) {\nentry:\n  ret ptr %p\n}\n";
+        assert!(parse_module(source).is_err());
+    }
+
+    #[test]
+    fn parses_quoted_type_attributes() {
+        let source = r#"
+%"a b" = type { i64 }
+%ab = type { i8 }
+
+declare void @take(ptr byval(%"a b"), ptr byval([8 x i8]))
+declare void @other(ptr byval(%ab))
+declare void @aligned() alignstack(16)
+
+attributes #0 = { memory(none) alignstack=16 }
+"#;
+        let module = parse_module(source).expect("parse");
+        assert!(verify_module(&module).is_ok());
+        let printed = print_module(&module);
+        assert!(printed.contains(r#"byval(%"a b")"#));
+        assert!(printed.contains("byval([8 x i8])"));
+        assert!(printed.contains("byval(%ab)"));
+        assert!(printed.contains("alignstack(16)"));
+        assert!(printed.contains("memory(none) alignstack=16"));
+    }
+
+    #[test]
+    fn resolves_forward_global_reference() {
+        let source = r#"
+@g = global ptr @later
+@later = global i32 7
+"#;
+        let module = parse_module(source).expect("parse");
+        assert!(verify_module(&module).is_ok());
+        let printed = print_module(&module);
+        assert!(printed.contains("@g = global ptr @later"));
+        assert!(printed.contains("@later = global i32 7"));
     }
 
     #[test]

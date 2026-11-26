@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use llvm_rust_ir::{
     Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath, FcmpPred, FuncId,
-    Function, Global, GlobalId, IcmpPred, InstKind, IntFlags, Linkage, Module, Operand,
+    Function, Global, GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand,
     OperandKind, TailKind, ThreadLocal, Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, Result};
@@ -101,9 +101,11 @@ enum LocalRef {
 struct FuncState {
     id: FuncId,
     base: u32,
+    next_value: u32,
     locals: Vec<LocalRef>,
     blocks: Vec<BlockId>,
     current_block: usize,
+    deferred_phis: Vec<(InstId, Record, u32, TypeId)>,
 }
 
 /// Reads a bitcode file into a module.
@@ -158,16 +160,27 @@ impl Reader {
                 Item::Record(record) => match record.code {
                     MODULE_VERSION => {}
                     MODULE_TRIPLE => {
-                        self.module.target_triple = Some(bytes_to_string(&record.operands));
+                        self.module.target_triple =
+                            Some(bytes_to_utf8(&record.operands).ok_or_else(|| {
+                                Error::bitcode("target triple is not valid UTF-8")
+                            })?);
                     }
                     MODULE_DATALAYOUT => {
-                        self.module.data_layout = Some(bytes_to_string(&record.operands));
+                        self.module.data_layout = Some(
+                            bytes_to_utf8(&record.operands)
+                                .ok_or_else(|| Error::bitcode("data layout is not valid UTF-8"))?,
+                        );
                     }
                     MODULE_SOURCE_FILENAME => {
-                        self.module.source_filename = Some(bytes_to_string(&record.operands));
+                        self.module.source_filename =
+                            Some(bytes_to_utf8(&record.operands).ok_or_else(|| {
+                                Error::bitcode("source filename is not valid UTF-8")
+                            })?);
                     }
                     MODULE_SECTIONNAME => {
-                        self.sections.push(bytes_to_string(&record.operands));
+                        let name = bytes_to_utf8(&record.operands)
+                            .ok_or_else(|| Error::bitcode("section name is not valid UTF-8"))?;
+                        self.sections.push(name);
                     }
                     MODULE_GLOBALVAR => self.read_global(record)?,
                     MODULE_FUNCTION => self.read_function(record)?,
@@ -235,7 +248,12 @@ impl Reader {
         for record in block.records() {
             match record.code {
                 1 => {}
-                TYPE_STRUCT_NAME => pending_name = Some(bytes_to_string(&record.operands)),
+                TYPE_STRUCT_NAME => {
+                    pending_name = Some(
+                        bytes_to_utf8(&record.operands)
+                            .ok_or_else(|| Error::bitcode("type name is not valid UTF-8"))?,
+                    )
+                }
                 TYPE_OPAQUE if pending_name.is_some() => {
                     let name = pending_name.take().expect("checked above");
                     let id = self.module.types.define_named_opaque(&name);
@@ -289,7 +307,15 @@ impl Reader {
             TYPE_X86_FP80 => Type::Float(llvm_rust_ir::FloatKind::X86Fp80),
             TYPE_FP128 => Type::Float(llvm_rust_ir::FloatKind::Fp128),
             TYPE_PPC_FP128 => Type::Float(llvm_rust_ir::FloatKind::PpcFp128),
-            TYPE_OPAQUE_POINTER => Type::Pointer,
+            TYPE_OPAQUE_POINTER => {
+                let address_space = record.operands.first().copied().unwrap_or(0);
+                if address_space != 0 {
+                    return Err(Error::bitcode(
+                        "nonzero pointer address spaces are not supported",
+                    ));
+                }
+                Type::Pointer
+            }
             TYPE_ARRAY => {
                 let len = record.operands.first().copied().unwrap_or(0);
                 let elem = self.type_at(*record.operands.get(1).unwrap_or(&0))?;
@@ -349,6 +375,11 @@ impl Reader {
         )?;
         let ty = self.type_at(record.operands.get(2).copied().unwrap_or(0))?;
         let flags = record.operands.get(3).copied().unwrap_or(0);
+        if flags >> 2 != 0 {
+            return Err(Error::bitcode(
+                "nonzero global address spaces are not supported",
+            ));
+        }
         let is_const = flags & 1 != 0;
         let init = record.operands.get(4).copied().unwrap_or(0);
         let linkage = decode_linkage(record.operands.get(5).copied().unwrap_or(0));
@@ -356,7 +387,9 @@ impl Reader {
         let section = self.section_at(record.operands.get(7).copied().unwrap_or(0));
         let visibility = decode_visibility(record.operands.get(8).copied().unwrap_or(0));
         let tls_model = ThreadLocal::from_bitcode(record.operands.get(9).copied().unwrap_or(0));
-        let unnamed_addr = record.operands.get(10).copied().unwrap_or(0) != 0;
+        let unnamed_code = record.operands.get(10).copied().unwrap_or(0);
+        let unnamed_addr = unnamed_code == 1;
+        let local_unnamed_addr = unnamed_code == 2;
         let dso_local = record.operands.get(15).copied().unwrap_or(0) != 0;
         let symbol = self.module.intern(&name);
         let id = self.module.global_or_insert(symbol);
@@ -371,6 +404,7 @@ impl Reader {
                 is_const,
                 tls_model,
                 unnamed_addr,
+                local_unnamed_addr,
                 dso_local,
                 align,
                 section,
@@ -393,7 +427,9 @@ impl Reader {
         let linkage = decode_linkage(record.operands.get(5).copied().unwrap_or(0));
         let align = decode_align(record.operands.get(7).copied().unwrap_or(0));
         let visibility = decode_visibility(record.operands.get(9).copied().unwrap_or(0));
-        let unnamed_addr = record.operands.get(11).copied().unwrap_or(0) != 0;
+        let unnamed_code = record.operands.get(11).copied().unwrap_or(0);
+        let unnamed_addr = unnamed_code == 1;
+        let local_unnamed_addr = unnamed_code == 2;
         let dso_local = record.operands.get(17).copied().unwrap_or(0) != 0;
         let symbol = self.module.intern(&name);
         let mut function = Function::new(symbol, ty);
@@ -402,6 +438,7 @@ impl Reader {
         function.align = align;
         function.visibility = visibility;
         function.unnamed_addr = unnamed_addr;
+        function.local_unnamed_addr = local_unnamed_addr;
         function.dso_local = dso_local;
         if let Type::Function { params, .. } = self.module.types.get(ty).clone() {
             for param in params {
@@ -492,7 +529,25 @@ impl Reader {
                 }
                 ConstKind::Int(value)
             }
-            CST_FLOAT => ConstKind::Float(record.operands.first().copied().unwrap_or(0)),
+            CST_FLOAT => {
+                let kind = match self.module.types.get(ty) {
+                    Type::Float(kind) => *kind,
+                    _ => return Err(Error::bitcode("float constant without a float type")),
+                };
+                match kind {
+                    llvm_rust_ir::FloatKind::Half
+                    | llvm_rust_ir::FloatKind::BFloat
+                    | llvm_rust_ir::FloatKind::Float
+                    | llvm_rust_ir::FloatKind::Double => {
+                        ConstKind::Float(record.operands.first().copied().unwrap_or(0))
+                    }
+                    _ => {
+                        return Err(Error::bitcode(format!(
+                            "constants of type {kind:?} are not supported"
+                        )));
+                    }
+                }
+            }
             CST_STRING | CST_CSTRING => {
                 let mut bytes: Vec<u8> = record.operands.iter().map(|b| *b as u8).collect();
                 if code == CST_CSTRING {
@@ -563,7 +618,8 @@ impl Reader {
         if end > self.strtab.len() {
             return Ok(String::new());
         }
-        Ok(String::from_utf8_lossy(&self.strtab[start..end]).into_owned())
+        String::from_utf8(self.strtab[start..end].to_vec())
+            .map_err(|_| Error::bitcode("bitcode name is not valid UTF-8"))
     }
 
     fn section_at(&self, index: u64) -> Option<String> {
@@ -584,9 +640,11 @@ impl Reader {
         let mut state = FuncState {
             id,
             base,
+            next_value: base + param_count,
             locals: (0..param_count).map(LocalRef::Local).collect(),
             blocks: Vec::new(),
             current_block: 0,
+            deferred_phis: Vec::new(),
         };
         let mut items = block.items.clone();
         let mut saw_declare_blocks = false;
@@ -610,12 +668,24 @@ impl Reader {
                 Item::Block(child) => match child.id {
                     CONSTANTS_BLOCK => {
                         let ids = self.read_constants(&child, false)?;
+                        state.next_value = state
+                            .next_value
+                            .checked_add(ids.len() as u32)
+                            .ok_or_else(|| Error::bitcode("too many function values"))?;
                         state.locals.extend(ids.into_iter().map(LocalRef::Constant));
                     }
                     VALUE_SYMTAB_BLOCK => self.read_vst(&child, &mut state)?,
                     _ => {}
                 },
             }
+        }
+        let deferred = std::mem::take(&mut state.deferred_phis);
+        for (inst, record, value_id, ty) in deferred {
+            let (kind, result_ty) = self.decode_instruction(&record, value_id, &state)?;
+            if result_ty != Some(ty) {
+                return Err(Error::bitcode("phi result type mismatch"));
+            }
+            self.module.functions[id].insts[inst].kind = kind;
         }
         if saw_declare_blocks {
             self.assign_unnamed_slots(state.id)?;
@@ -683,7 +753,8 @@ impl Reader {
                     if value >= state.base {
                         let index = (value - state.base) as usize;
                         if let Some(LocalRef::Local(local)) = state.locals.get(index).copied() {
-                            let name = bytes_to_string(&record.operands[1..]);
+                            let name = bytes_to_utf8(&record.operands[1..])
+                                .ok_or_else(|| Error::bitcode("value name is not valid UTF-8"))?;
                             let symbol = self.module.intern(&name);
                             let function = &mut self.module.functions[state.id];
                             function.locals[local as usize].name = Some(symbol);
@@ -696,7 +767,8 @@ impl Reader {
                 VST_BBENTRY => {
                     let index = record.operands.first().copied().unwrap_or(0) as usize;
                     if let Some(block) = state.blocks.get(index).copied() {
-                        let name = bytes_to_string(&record.operands[1..]);
+                        let name = bytes_to_utf8(&record.operands[1..])
+                            .ok_or_else(|| Error::bitcode("block name is not valid UTF-8"))?;
                         let symbol = self.module.intern(&name);
                         self.module.functions[state.id].blocks[block].name = Some(symbol);
                     }
@@ -772,8 +844,12 @@ impl Reader {
     }
 
     fn read_instruction(&mut self, record: &Record, state: &mut FuncState) -> Result<()> {
-        let inst_id = state.base + state.locals.len() as u32;
-        let pending = if record.code == FUNC_INST_PHI {
+        let inst_id = state.next_value;
+        let block = *state
+            .blocks
+            .get(state.current_block)
+            .ok_or_else(|| Error::bitcode("instruction after the last block"))?;
+        if record.code == FUNC_INST_PHI {
             let ty = self.type_at(
                 record
                     .operands
@@ -781,18 +857,37 @@ impl Reader {
                     .copied()
                     .ok_or_else(|| Error::bitcode("phi without a type"))?,
             )?;
+            let index = (inst_id - state.base) as usize;
             let function = &mut self.module.functions[state.id];
-            let local = function.reserve_local(None, ty);
-            state.locals.push(LocalRef::Local(local));
-            Some((local, ty))
-        } else {
-            None
-        };
+            let local = match state.locals.get(index).copied() {
+                Some(LocalRef::Local(local)) => local,
+                Some(LocalRef::Constant(_)) => {
+                    return Err(Error::bitcode("phi result slot is a constant"));
+                }
+                None if index == state.locals.len() => {
+                    let local = function.reserve_local(None, ty);
+                    state.locals.push(LocalRef::Local(local));
+                    local
+                }
+                None => return Err(Error::bitcode("phi result slot is out of range")),
+            };
+            state.next_value = state
+                .next_value
+                .checked_add(1)
+                .ok_or_else(|| Error::bitcode("too many function values"))?;
+            let inst = function.add_inst(
+                block,
+                llvm_rust_ir::Instruction {
+                    result: Some(local),
+                    kind: InstKind::Unreachable,
+                },
+            );
+            state
+                .deferred_phis
+                .push((inst, record.clone(), inst_id, ty));
+            return Ok(());
+        }
         let (kind, result_ty) = self.decode_instruction(record, inst_id, state)?;
-        let block = *state
-            .blocks
-            .get(state.current_block)
-            .ok_or_else(|| Error::bitcode("instruction after the last block"))?;
         let function = &mut self.module.functions[state.id];
         let inst = function.add_inst(
             block,
@@ -801,13 +896,26 @@ impl Reader {
                 kind: kind.clone(),
             },
         );
-        if let Some((local, ty)) = pending {
+        if let Some(ty) = result_ty {
+            let index = (inst_id - state.base) as usize;
+            let local = match state.locals.get(index).copied() {
+                Some(LocalRef::Local(local)) => local,
+                Some(LocalRef::Constant(_)) => {
+                    return Err(Error::bitcode("instruction result slot is a constant"));
+                }
+                None if index == state.locals.len() => {
+                    let local = function.add_local(None, ty, inst);
+                    state.locals.push(LocalRef::Local(local));
+                    local
+                }
+                None => return Err(Error::bitcode("instruction result slot is out of range")),
+            };
             function.define_local(local, ty, inst);
             function.insts[inst].result = Some(local);
-        } else if let Some(ty) = result_ty {
-            let local = function.add_local(None, ty, inst);
-            function.insts[inst].result = Some(local);
-            state.locals.push(LocalRef::Local(local));
+            state.next_value = state
+                .next_value
+                .checked_add(1)
+                .ok_or_else(|| Error::bitcode("too many function values"))?;
         }
         if kind.is_terminator() {
             state.current_block += 1;
@@ -1370,6 +1478,7 @@ fn decode_align(value: u64) -> Option<u64> {
     }
 }
 
-fn bytes_to_string(bytes: &[u64]) -> String {
-    bytes.iter().map(|b| *b as u8 as char).collect()
+fn bytes_to_utf8(bytes: &[u64]) -> Option<String> {
+    let raw: Vec<u8> = bytes.iter().map(|b| *b as u8).collect();
+    String::from_utf8(raw).ok()
 }

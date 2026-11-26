@@ -23,6 +23,7 @@ pub struct Global {
     pub is_const: bool,
     pub tls_model: ThreadLocal,
     pub unnamed_addr: bool,
+    pub local_unnamed_addr: bool,
     pub dso_local: bool,
     pub align: Option<u64>,
     pub section: Option<String>,
@@ -135,6 +136,7 @@ impl Module {
             is_const: false,
             tls_model: ThreadLocal::None,
             unnamed_addr: false,
+            local_unnamed_addr: false,
             dso_local: false,
             align: None,
             section: None,
@@ -169,6 +171,37 @@ impl Module {
         let id = self.functions.alloc(Function::new(name, INVALID_TYPE));
         self.function_names.insert(name, id);
         id
+    }
+
+    /// Resolves constants that named a symbol before its kind was known.
+    ///
+    /// Forward references start as function placeholders. Once parsing is
+    /// complete, constants pointing at an unresolved placeholder are retargeted
+    /// to the real global or function with the same name.
+    pub fn resolve_forward_references(&mut self) {
+        let mut rewrites = Vec::new();
+        for (id, constant) in self.constants.iter() {
+            match constant.kind {
+                ConstKind::Function(function)
+                    if !self.types.is_valid(self.functions[function].ty) =>
+                {
+                    let name = self.functions[function].name;
+                    if let Some(global) = self.global_named(name) {
+                        rewrites.push((id, ConstKind::Global(global)));
+                    }
+                }
+                ConstKind::Global(global) if !self.types.is_valid(self.globals[global].ty) => {
+                    let name = self.globals[global].name;
+                    if let Some(function) = self.function_named(name) {
+                        rewrites.push((id, ConstKind::Function(function)));
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (id, kind) in rewrites {
+            self.constants[id].kind = kind;
+        }
     }
 
     /// Replaces a placeholder function with its definition.

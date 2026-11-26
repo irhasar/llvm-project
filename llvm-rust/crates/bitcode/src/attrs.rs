@@ -133,10 +133,14 @@ pub(crate) fn encode_attribute(attr: &Attribute) -> Result<Vec<u64>> {
     }) {
         return Ok(vec![1, 1, parse_u64(value.trim(), "align")?]);
     }
-    if let Some(value) = text.strip_prefix("alignstack ").or_else(|| {
-        text.strip_prefix("alignstack(")
-            .and_then(|value| value.strip_suffix(')'))
-    }) {
+    if let Some(value) = text
+        .strip_prefix("alignstack ")
+        .or_else(|| {
+            text.strip_prefix("alignstack(")
+                .and_then(|value| value.strip_suffix(')'))
+        })
+        .or_else(|| text.strip_prefix("alignstack="))
+    {
         return Ok(vec![1, 25, parse_u64(value.trim(), "alignstack")?]);
     }
     if let Some(value) = text
@@ -225,8 +229,8 @@ const ENUM_ATTRIBUTES: &[(&str, u64)] = &[
     ("noreturn", 17),
     ("nounwind", 18),
     ("optsize", 19),
-    ("readnone", 20),
-    ("readonly", 21),
+    ("memory(none)", 20),
+    ("memory(read)", 21),
     ("returned", 22),
     ("returns_twice", 23),
     ("signext", 24),
@@ -251,7 +255,7 @@ const ENUM_ATTRIBUTES: &[(&str, u64)] = &[
     ("norecurse", 48),
     ("inaccessiblememonly", 49),
     ("inaccessiblemem_or_argmemonly", 50),
-    ("writeonly", 52),
+    ("memory(write)", 52),
     ("speculatable", 53),
     ("strictfp", 54),
     ("sanitize_hwaddress", 55),
@@ -299,6 +303,12 @@ const ENUM_ATTRIBUTES: &[(&str, u64)] = &[
 ];
 
 fn enum_attribute_code(text: &str) -> Option<u64> {
+    match text {
+        "readnone" => return Some(20),
+        "readonly" => return Some(21),
+        "writeonly" => return Some(52),
+        _ => {}
+    }
     ENUM_ATTRIBUTES
         .iter()
         .find_map(|(name, code)| (*name == text).then_some(*code))
@@ -423,7 +433,7 @@ fn type_attribute_name(code: u64) -> Result<&'static str> {
 fn decode_int_attribute(code: u64, value: u64) -> Result<Attribute> {
     Ok(Attribute(match code {
         1 => format!("align {value}"),
-        25 => format!("alignstack {value}"),
+        25 => format!("alignstack({value})"),
         41 => format!("dereferenceable({value})"),
         42 => format!("dereferenceable_or_null({value})"),
         86 => match value {

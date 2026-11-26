@@ -43,6 +43,10 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   `store`, `getelementptr`, `call`, `phi`, `select`, casts, `ret`, `br`,
   `condbr`, `switch`, `unreachable`. Unnamed values and blocks share one
   numbering sequence, and `phi` accepts forward and self references.
+  `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
+  functions. Forward global/function references are resolved after parsing.
+  Nonzero global and pointer address spaces are rejected explicitly instead
+  of being dropped.
 - `bitcode`: LLVM bitstream writer and reader covering the module, type,
   constants, function, value-symbol-table, string-table, and
   `PARAMATTR`/`PARAMATTR_GROUP` blocks. The reader handles abbreviations and
@@ -55,18 +59,28 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   rest of the legacy enum table); integer attributes (`align`, `alignstack`,
   `dereferenceable`, `dereferenceable_or_null`); type attributes (`byval`,
   `byref`, `sret`, `inalloca`, `preallocated`, `elementtype`); string
-  attributes such as `"frame-pointer"="all"`; and the legacy memory
-  attributes (`readnone`, `readonly`, `writeonly`). LLVM 19 stores the memory
-  attributes as `ATTR_KIND_MEMORY`; the reader maps the three legacy values
-  back to their textual spellings.
+  attributes such as `"frame-pointer"="all"`; and `memory(none|read|write)`
+  plus the legacy `readnone`/`readonly`/`writeonly` spellings. Type attributes
+  are parsed as real types, so quoted names such as `byval(%"a b")` and
+  type-only arguments such as `byval([8 x i8])` resolve correctly. Group-only
+  spellings such as `alignstack=16` are accepted and written back inline. The
+  reader canonicalizes the legacy memory enum values to
+  `memory(none|read|write)`.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
+
+Half and bfloat conversion handles subnormals, infinities, quiet NaNs, and
+signaling NaNs with round-to-nearest-even; float printing preserves signaling
+NaN payloads. Section, source filename, triple, data layout, and symbol names
+must be valid UTF-8 in bitcode and are rejected otherwise instead of being
+lossily rewritten.
 
 This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
 debug info, constant expressions, atomics, `invoke`/`landingpad`,
-aggregate/vector instructions, or the exact `fp128`/`x86_fp80` payload. MC,
-object, X86, and codegen are still out of scope.
+aggregate/vector instructions, or `fp128`/`x86_fp80`/`ppc_fp128` constants
+(wide float records are rejected). MC, object, X86, and codegen are still out
+of scope.
 
 ## Commands
 
@@ -100,12 +114,13 @@ python3 tests/bench.py --runs 5
 
 ## First-slice results
 
-Differential harness: all eight modules in `tests/corpus/` match the C++ LLVM
-19.1.7 oracle in both directions after normalizing `source_filename` and
-`ModuleID`. The advanced module covers TLS models, sections, opaque types,
-`i128` constants, hexadecimal floats, function alignment, type attributes,
-argument-indexed call-site attributes, unnamed value/block numbering, and
-`phi` self references.
+Differential harness: all fifteen modules in `tests/corpus/` match the C++
+LLVM 19.1.7 oracle in both directions after normalizing `source_filename` and
+`ModuleID`. The corpus covers TLS models, sections, opaque types, `i128`
+constants, hexadecimal floats and subnormal/signaling-NaN cases, function
+alignment, type attributes with quoted names, argument-indexed call-site
+attributes, `local_unnamed_addr`, forward references, UTF-8 section names,
+unnamed value/block numbering, and `phi` self references.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that

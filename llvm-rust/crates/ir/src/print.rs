@@ -109,7 +109,9 @@ fn print_global(module: &Module, global: &Global, out: &mut String) {
     if global.tls_model.is_thread_local() {
         let _ = write!(out, "{} ", global.tls_model.as_str());
     }
-    if global.unnamed_addr {
+    if global.local_unnamed_addr {
+        out.push_str("local_unnamed_addr ");
+    } else if global.unnamed_addr {
         out.push_str("unnamed_addr ");
     }
     if global.init.is_none() && global.linkage == Linkage::External {
@@ -152,9 +154,6 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
     if function.dso_local {
         out.push_str("dso_local ");
     }
-    if function.unnamed_addr {
-        out.push_str("unnamed_addr ");
-    }
     for attr in &function.ret_attrs {
         let _ = write!(out, "{attr} ");
     }
@@ -183,6 +182,11 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
         out.push_str("...");
     }
     out.push(')');
+    if function.local_unnamed_addr {
+        out.push_str(" local_unnamed_addr");
+    } else if function.unnamed_addr {
+        out.push_str(" unnamed_addr");
+    }
     if let Some(align) = function.align {
         let _ = write!(out, " align {align}");
     }
@@ -646,8 +650,7 @@ fn write_float(module: &Module, ty: TypeId, bits: u64, out: &mut String) {
             let _ = write!(out, "0xR{:04X}", bits & 0xffff);
         }
         FloatKind::Float => {
-            let value = f32::from_bits(bits as u32) as f64;
-            let _ = write!(out, "0x{:016X}", value.to_bits());
+            let _ = write!(out, "0x{:016X}", f32_bits_to_f64_bits(bits as u32));
         }
         FloatKind::Double => {
             let _ = write!(out, "0x{:016X}", bits);
@@ -662,6 +665,20 @@ fn write_float(module: &Module, ty: TypeId, bits: u64, out: &mut String) {
             let _ = write!(out, "0xM{:032X}", bits);
         }
     }
+}
+
+fn f32_bits_to_f64_bits(bits: u32) -> u64 {
+    let sign = ((bits >> 31) as u64) << 63;
+    let exp = ((bits >> 23) & 0xff) as u64;
+    let frac = (bits & 0x007f_ffff) as u64;
+    if exp == 0xff {
+        if frac == 0 {
+            return sign | 0x7ff0_0000_0000_0000;
+        }
+        let payload = (frac << 29).max(1);
+        return sign | 0x7ff0_0000_0000_0000 | payload;
+    }
+    (f32::from_bits(bits) as f64).to_bits()
 }
 
 fn write_int_flags(flags: IntFlags, out: &mut String) {

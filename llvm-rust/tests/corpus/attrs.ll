@@ -17,4 +17,4 @@ entry:
   ret i32 %r
 }
 
-attributes #0 = { nounwind readonly }
+attributes #0 = { nounwind memory(read) }

@@ -32,6 +32,9 @@ pub fn verify_module(module: &Module) -> Result<(), Vec<VerifyError>> {
 
     for (_, global) in module.globals.iter() {
         if !module.types.is_valid(global.ty) {
+            if module.function_named(global.name).is_some() {
+                continue;
+            }
             errors.push(Error::verify(format!(
                 "global @{} is referenced but never defined",
                 module.name(global.name)
@@ -61,6 +64,9 @@ pub fn verify_module(module: &Module) -> Result<(), Vec<VerifyError>> {
 
     for (id, function) in module.functions.iter() {
         if !module.types.is_valid(function.ty) {
+            if module.global_named(function.name).is_some() {
+                continue;
+            }
             errors.push(Error::verify(format!(
                 "function @{} is referenced but never defined",
                 module.name(function.name)

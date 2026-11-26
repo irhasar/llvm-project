@@ -19,6 +19,24 @@ fn corpus() -> Vec<PathBuf> {
 /// Replaces `#N` attribute-group references with the group body so that a
 /// round trip through bitcode can be compared without preserving the original
 /// grouping layout.
+/// Rewrites group-only spellings (`alignstack=16`) to the inline spelling
+/// (`alignstack(16)`) used after groups are expanded.
+fn normalize_group_body(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(index) = rest.find("alignstack=") {
+        out.push_str(&rest[..index]);
+        let tail = &rest[index + "alignstack=".len()..];
+        let digits = tail.chars().take_while(|ch| ch.is_ascii_digit()).count();
+        out.push_str("alignstack(");
+        out.push_str(&tail[..digits]);
+        out.push(')');
+        rest = &tail[digits..];
+    }
+    out.push_str(rest);
+    out
+}
+
 fn inline_attr_groups(text: &str) -> String {
     let mut groups = HashMap::new();
     let mut body = Vec::new();
@@ -27,7 +45,7 @@ fn inline_attr_groups(text: &str) -> String {
             && let Some((id, tail)) = rest.split_once(" = { ")
             && let Some(inner) = tail.strip_suffix(" }")
         {
-            groups.insert(format!("#{id}"), inner.to_string());
+            groups.insert(format!("#{id}"), normalize_group_body(inner));
             continue;
         }
         body.push(line);
