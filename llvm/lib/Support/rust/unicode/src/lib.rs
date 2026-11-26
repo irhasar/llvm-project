@@ -152,9 +152,9 @@ fn block_at(mid: usize) -> usize {
     let bit = mid * 5;
     let byte = bit >> 3;
     let shift = bit & 7;
-    let mut value = (unsafe { *BLOCK_INDEX_PACKED.get_unchecked(byte) } as u16) >> shift;
+    let mut value = (BLOCK_INDEX_PACKED.get(byte).copied().unwrap_or(0) as u16) >> shift;
     if shift > 3 {
-        value |= (unsafe { *BLOCK_INDEX_PACKED.get_unchecked(byte + 1) } as u16) << (8 - shift);
+        value |= (BLOCK_INDEX_PACKED.get(byte + 1).copied().unwrap_or(0) as u16) << (8 - shift);
     }
     (value & 0x1f) as usize
 }
@@ -166,14 +166,14 @@ fn sparse_rank(index: &[u16], mid: usize) -> usize {
     let mut hi = index.len();
     while lo < hi {
         let probe = (lo + hi) / 2;
-        let value = unsafe { *index.get_unchecked(probe) };
+        let value = index.get(probe).copied().unwrap_or(0);
         if value < target {
             lo = probe + 1;
         } else {
             hi = probe;
         }
     }
-    if lo < index.len() && unsafe { *index.get_unchecked(lo) } == target {
+    if lo < index.len() && index.get(lo).copied().unwrap_or(0) == target {
         lo
     } else {
         0
@@ -182,12 +182,12 @@ fn sparse_rank(index: &[u16], mid: usize) -> usize {
 
 #[inline]
 fn delta_at(mid: usize) -> i32 {
-    let bits = unsafe { *DELTA_ONE.get_unchecked(mid >> 3) };
+    let bits = DELTA_ONE.get(mid >> 3).copied().unwrap_or(0);
     if bits & (1 << (mid & 7)) != 0 {
         return 1;
     }
     let rank = sparse_rank(&OTHER_DELTA_INDEX, mid);
-    unsafe { *OTHER_DELTA.get_unchecked(rank) }
+    OTHER_DELTA.get(rank).copied().unwrap_or(0)
 }
 
 #[unsafe(no_mangle)]
@@ -208,9 +208,9 @@ pub extern "C" fn llvm_unicode_fold_char_simple(c: i32) -> i32 {
     while lo < hi {
         let mid = (lo + hi) / 2;
         let block = block_at(mid);
-        let first = unsafe { *BLOCK_STARTS.get_unchecked(block) }
-            + unsafe { *OFFSETS.get_unchecked(mid) } as u32;
-        let last = first + unsafe { *LENGTHS.get_unchecked(mid) } as u32;
+        let first = BLOCK_STARTS.get(block).copied().unwrap_or(0)
+            + OFFSETS.get(mid).copied().unwrap_or(0) as u32;
+        let last = first + LENGTHS.get(mid).copied().unwrap_or(0) as u32;
         if value < first {
             hi = mid;
         } else if value > last {

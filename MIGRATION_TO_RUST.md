@@ -1188,9 +1188,23 @@ one-codegen-unit profile as the other ports. LTO is disabled: it did not
 improve this table-driven function and was the peak-RSS bottleneck.
 
 `add_llvm_rust_staticlib` now has a `PRUNE_ARCHIVE` mode. The Unicode port uses
-it to remove `core` and `compiler_builtins` members that a dependency-free
-crate never references and to strip the rustc `.comment` section. The staged
-archive drops from 5,054,122 bytes to 6,136 bytes.
+it to remove `core` and `compiler_builtins` members that the default release
+object never references. Pruning is conditional: the script inspects the
+retained object's undefined symbols and keeps the complete archive when any of
+them is outside a small libc/panic allowlist. That keeps overflow checks and
+debug assertions linkable, where the object references `core`'s overflow and
+bounds panic routines, instead of producing an archive that only links with
+the default release flags. Pruning runs before stripping, so an incremental
+rebuild strips the retained six-kilobyte object rather than the full archive.
+The default staged archive drops from 5,054,122 bytes to 6,304 bytes; the
+overflow-checked configuration keeps the complete archive.
+
+A full archive pulls in `core` references to `rust_eh_personality`.
+`UnicodeCaseFoldRust.cpp` provides a weak definition when the compiler supports
+it; the crate uses `panic=abort`, so no unwind path reaches the stub, and a
+real Rust runtime still overrides it. `llvm-rust-unicode-overflow-stable`
+builds the crate with `-Coverflow-checks=yes`, runs the same pruning script,
+links the public C++ API, and checks the golden cases.
 
 `UnicodeCaseFoldRust.cpp` includes only `Compiler.h` and repeats the
 `LLVM_ABI` declaration. Including `Unicode.h` made the one-line wrapper take
@@ -1207,6 +1221,10 @@ Correctness coverage:
   the DWARF-adjacent dotless-I cases and the highest assigned fold range. The
   target links `LLVMSupport`, so it is built with the option both `ON` and
   `OFF`.
+* `llvm-rust-unicode-overflow-stable` configures the crate with overflow checks,
+  links the public C++ API against the resulting archive, and runs the golden
+  checks. A separate `-DLLVM_RUST_FLAGS=-Coverflow-checks=yes` configure also
+  links `llvm-unicode-stable`.
 * A static CMake consumer built with `find_package(LLVM CONFIG)` links
   `LLVMSupport` without adding a library search path. `LLVMConfig` imports
   `llvm_unicode` because `UNICODE` is in `LLVM_CONFIG_RUST_SUPPORT_PORTS`; the
@@ -1219,18 +1237,21 @@ points through the public C++ API, median (min-max) ns/code point:
 
 | Backend | ns/code point | Rust speedup |
 |---------|---------------|--------------|
-| C++ | 40.38 (39.28-41.84) | 1.00x |
-| Rust | 18.62 (18.41-20.54) | **2.17x** |
+| C++ | 40.47 (38.82-46.04) | 1.00x |
+| Rust | 18.68 (18.37-18.95) | **2.17x** |
 
 The random corpus is mostly non-ASCII, which is the expensive path for the
 generated comparison chain; ASCII input takes the early `A-Z` branch on both
 sides. The table is 2,877 bytes of `.rodata`. The pruned staged archive is
-6,136 bytes; `llvm-min-tblgen` is byte-identical with the option on and off
-(1,796,632 bytes). `llvm-unicode-stable` is 16,368 bytes with Rust versus
-20,288 bytes with C++ (-3,920 bytes). Compile and peak RSS also clear the
+6,304 bytes; `llvm-min-tblgen` is byte-identical with the option on and off
+(1,796,632 bytes). `llvm-unicode-stable` is 16,408 bytes with Rust versus
+20,288 bytes with C++ (-3,880 bytes). Compile and peak RSS also clear the
 resource gate: C++ is 418.98 ms and 95.93 MiB, while the Rust crate plus
-wrapper is 139.85 ms and 93.95 MiB (0.33x wall, -2.1% peak RSS). The option
-stays opt-in by policy, but this port is a gate-clearing result.
+wrapper is 141.77 ms and 94.31 MiB (0.34x wall, -1.7% peak RSS). Incremental
+rebuilds, including the copy, prune, strip, and wrapper compile, are 336.84 ms
+and 94.32 MiB against 414.38 ms and 96.00 MiB for the C++ recompile (0.81x
+wall, -1.8% peak RSS). The option stays opt-in by policy, but this port is a
+gate-clearing result.
 
 ## Resource measurements for EBCDIC, D, DJB, and Unicode
 
@@ -1240,9 +1261,10 @@ median and min-max in each cell, using the CMake Release compile command
 wall/user/sys totals sum the crate build and the C++ wrapper object; the C++
 row is the original one-TU object. C++ has no incremental cache, so its
 "incremental" row is another full compile of the same source. Rust incremental
-rows touch `src/lib.rs` and rebuild without cleaning. Object/archive bytes are
-before linking; the Rust cell lists archive plus wrapper object. Linked bytes
-are the `*-stable` test binaries.
+rows touch `src/lib.rs` and rebuild without cleaning; Unicode's includes the
+copy, conditional prune, strip, and wrapper compile, but not the final link.
+Object/archive bytes are before linking; the Rust cell lists archive plus
+wrapper object. Linked bytes are the `*-stable` test binaries.
 
 | Port | Backend | Mode | Wall ms | User ms | Sys ms | Peak RSS MiB | Object/archive bytes | Linked bytes |
 |------|---------|------|---------|---------|--------|--------------|----------------------|--------------|
@@ -1259,7 +1281,9 @@ are the `*-stable` test binaries.
 | DJB | Rust | clean | 738.71 (728.50-780.66) | 581.29 (566.08-592.49) | 163.55 (140.12-185.72) | 117.51 (117.27-117.59) | 5,058,270 + 1,720 | 20,640 |
 | DJB | Rust | incremental | 703.14 (696.26-739.07) | 572.07 (557.88-589.57) | 135.21 (111.88-159.60) | 117.63 (117.35-118.39) | 5,058,270 + 1,720 | 20,640 |
 | Unicode | C++ | clean | 418.98 (410.59-444.87) | 346.90 (338.66-353.45) | 71.77 (65.30-89.97) | 95.93 (95.91-96.03) | 8,296 | 20,288 |
-| Unicode | Rust | clean | 139.85 (138.08-144.33) | 61.59 (55.93-64.06) | 82.14 (76.41-83.97) | 93.95 (93.70-93.95) | 6,136 + 1,280 | 16,368 |
+| Unicode | C++ | incremental | 414.38 (410.34-429.75) | 348.12 (339.89-353.49) | 68.20 (61.96-79.04) | 96.00 (95.98-96.00) | 8,296 | 20,288 |
+| Unicode | Rust | clean | 141.77 (139.95-153.85) | 66.06 (62.53-68.27) | 79.98 (73.76-83.35) | 94.31 (94.13-94.31) | 6,304 + 1,592 | 16,408 |
+| Unicode | Rust | incremental | 336.84 (334.73-339.64) | 171.83 (168.70-179.48) | 165.42 (160.88-170.97) | 94.32 (94.19-94.32) | 6,304 + 1,592 | 16,408 |
 
 The Rust archive is about 5 MiB for EBCDIC, D, and DJB because `staticlib`
 carries `compiler_builtins` bitcode; the linked D stable binary is nevertheless
@@ -1270,15 +1294,20 @@ build with a complete C++ object; adding DJB's wrapper makes the full Rust
 compile 1.7x slower. Only the totals in this table are comparable.
 
 Unicode is the exception: the `PRUNE_ARCHIVE` path removes the unused
-`compiler_builtins` members, so its archive is 6,136 bytes, its compile is
-3.0x faster than the C++ object, and its peak RSS is 2.1% lower. The Unicode
-row clears the archive-size, compile-time, peak-RSS, linked-binary, and runtime
-gates. EBCDIC, D, and DJB still do not clear the resource gate: their archive
-is about 5 MiB, peak RSS is +19%, +77%, and +17% against the 2% limit, and
-compile time is 1.3x to 1.7x higher. The gate is not waived by a runtime win
-or by a smaller linked binary. Those three ports stay behind their
-default-`OFF` options as opt-in experiments; reducing their `compiler_builtins`
-payload and crate build footprint is a prerequisite for changing that status.
+`compiler_builtins` members, so its default archive is 6,304 bytes, its clean
+compile is 2.96x faster than the C++ object, and its peak RSS is 1.7% lower.
+Its incremental row, which includes copying, pruning, stripping, and compiling
+the wrapper, is 0.81x wall and 1.8% lower RSS, so the staging work does not
+turn the compile gate into a loss. The Unicode row clears the archive-size,
+compile-time, peak-RSS, linked-binary, incremental, and runtime gates. The
+overflow-checked configuration deliberately keeps the full archive; it is
+tested for linking, not used as the default size result. EBCDIC, D, and DJB
+still do not clear the resource gate: their archive is about 5 MiB, peak RSS is
++19%, +77%, and +17% against the 2% limit, and compile time is 1.3x to 1.7x
+higher. The gate is not waived by a runtime win or by a smaller linked binary.
+Those three ports stay behind their default-`OFF` options as opt-in
+experiments; reducing their `compiler_builtins` payload and crate build
+footprint is a prerequisite for changing that status.
 
 Runtime process rows use `--no-checks --bench-backend=cpp|rust`, five pinned
 runs, and include startup plus the five benchmark rounds. Throughput is the

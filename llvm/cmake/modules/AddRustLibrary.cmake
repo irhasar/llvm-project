@@ -94,22 +94,12 @@ function(add_llvm_rust_staticlib name manifest)
   # stage the processed copy with copy_if_different so an unchanged archive
   # does not rewrite the output and force dependents to relink.
   set(staging_source "${archive}")
+  set(copy_command "")
   set(strip_command "")
   if((ARG_STRIP_DEBUG OR ARG_PRUNE_ARCHIVE) AND NOT MSVC)
     set(staging_source "${target_dir}/release/${rust_lib_name}.stripped")
-    set(strip_command
+    set(copy_command
       COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${archive}" "${staging_source}")
-    if(ARG_STRIP_DEBUG AND CMAKE_STRIP)
-      if(APPLE)
-        set(strip_args -S)
-      elseif(ARG_PRUNE_ARCHIVE)
-        set(strip_args --strip-unneeded --remove-section=.comment)
-      else()
-        set(strip_args --strip-debug)
-      endif()
-      list(APPEND strip_command
-        COMMAND "${CMAKE_STRIP}" ${strip_args} "${staging_source}")
-    endif()
   endif()
 
   set(prune_command "")
@@ -128,7 +118,22 @@ function(add_llvm_rust_staticlib name manifest)
     set(prune_command
       COMMAND "${CMAKE_COMMAND}"
               "-DARCHIVE=${staging_source}" "-DCRATE=${name}" "-DAR=${CMAKE_AR}"
-              -P "${prune_archive_script}")
+              "-DNM=${CMAKE_NM}" -P "${prune_archive_script}")
+    list(APPEND crate_sources "${prune_archive_script}")
+  endif()
+
+  # Prune first, then strip: stripping the complete archive dominates an
+  # incremental rebuild, while the retained object is only a few kilobytes.
+  if(ARG_STRIP_DEBUG AND CMAKE_STRIP AND NOT MSVC)
+    if(APPLE)
+      set(strip_args -S)
+    elseif(ARG_PRUNE_ARCHIVE)
+      set(strip_args --strip-unneeded --remove-section=.comment)
+    else()
+      set(strip_args --strip-debug)
+    endif()
+    set(strip_command
+      COMMAND "${CMAKE_STRIP}" ${strip_args} "${staging_source}")
   endif()
 
   # Separate the Cargo build, content check, and staging stamps. The build
@@ -152,8 +157,9 @@ function(add_llvm_rust_staticlib name manifest)
     BYPRODUCTS "${staging_source}"
     COMMAND ${cargo_env} "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
             --manifest-path "${manifest}" --target-dir "${target_dir}"
-    ${strip_command}
+    ${copy_command}
     ${prune_command}
+    ${strip_command}
     COMMAND "${CMAKE_COMMAND}" -E touch "${build_stamp}"
     DEPENDS ${crate_sources}
     COMMENT "Building Rust crate ${name}"

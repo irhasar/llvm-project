@@ -16,6 +16,13 @@ LLVM_ABI int foldCharSimple(int C);
 
 extern "C" int llvm_unicode_fold_char_simple(int C);
 
+#if defined(__GNUC__) || defined(__clang__)
+// A full Rust archive pulled in by overflow checks carries core references to
+// this personality routine. The crate uses panic=abort, so unwinding never
+// reaches it. Keep the definition weak so a real Rust runtime still wins.
+extern "C" __attribute__((weak)) void rust_eh_personality() {}
+#endif
+
 namespace llvm::sys::unicode {
 int foldCharSimple(int C) { return llvm_unicode_fold_char_simple(C); }
 }

@@ -699,6 +699,60 @@ if(LLVM_ENABLE_RUST_UNICODE)
     COMMAND llvm-unicode-stable
     DEPENDS llvm-rust-unicode-differential llvm-unicode-stable
     USES_TERMINAL)
+
+  # Overflow checks make the crate reference core's panic routines.  The
+  # pruning script must keep those providers instead of producing an archive
+  # that only links with the default release flags.
+  if(NOT MSVC)
+    set(unicode_overflow_dir
+      "${CMAKE_CURRENT_BINARY_DIR}/rust-unicode-overflow")
+    set(unicode_overflow_archive
+      "${unicode_overflow_dir}/release/${CMAKE_STATIC_LIBRARY_PREFIX}llvm_unicode${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    set(unicode_overflow_staged
+      "${unicode_overflow_dir}/release/libllvm_unicode.pruned.a")
+    set(unicode_prune_script
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/modules/RustPruneArchive.cmake")
+    file(GLOB_RECURSE unicode_overflow_sources CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/src/*.rs"
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.lock")
+    list(APPEND unicode_overflow_sources
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.toml")
+    add_custom_command(OUTPUT "${unicode_overflow_archive}"
+      COMMAND "${CMAKE_COMMAND}" -E env
+              "RUSTFLAGS=${LLVM_RUST_FLAGS} -Coverflow-checks=yes"
+              "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
+              --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.toml"
+              --target-dir "${unicode_overflow_dir}"
+      DEPENDS ${unicode_overflow_sources}
+      COMMENT "Building Unicode crate with overflow checks")
+    add_custom_command(OUTPUT "${unicode_overflow_staged}"
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "${unicode_overflow_archive}" "${unicode_overflow_staged}"
+      COMMAND "${CMAKE_COMMAND}"
+              "-DARCHIVE=${unicode_overflow_staged}" "-DCRATE=llvm_unicode"
+              "-DAR=${CMAKE_AR}" "-DNM=${CMAKE_NM}" -P "${unicode_prune_script}"
+      DEPENDS "${unicode_overflow_archive}" "${unicode_prune_script}"
+      COMMENT "Pruning overflow-checked Unicode archive")
+    add_custom_target(llvm-rust-unicode-overflow-archive
+      DEPENDS "${unicode_overflow_staged}")
+    add_executable(llvm-rust-unicode-overflow-stable EXCLUDE_FROM_ALL
+      rust/unicode/test/stable.cpp
+      UnicodeCaseFoldRust.cpp)
+    add_dependencies(llvm-rust-unicode-overflow-stable
+      llvm-rust-unicode-overflow-archive)
+    target_include_directories(llvm-rust-unicode-overflow-stable PRIVATE
+      ${LLVM_MAIN_INCLUDE_DIR}
+      ${LLVM_BINARY_DIR}/include)
+    target_link_libraries(llvm-rust-unicode-overflow-stable PRIVATE
+      "${unicode_overflow_staged}" ${CMAKE_DL_LIBS})
+    if(UNIX)
+      target_link_libraries(llvm-rust-unicode-overflow-stable PRIVATE m pthread)
+    endif()
+    add_custom_target(check-llvm-rust-unicode-overflow
+      COMMAND llvm-rust-unicode-overflow-stable
+      DEPENDS llvm-rust-unicode-overflow-stable
+      USES_TERMINAL)
+  endif()
 endif()
 
 add_executable(llvm-unicode-stable EXCLUDE_FROM_ALL
