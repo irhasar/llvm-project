@@ -42,7 +42,7 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_CONVERTUTF=ON -DLLVM_ENABLE_RUST_CONVERTEBCDIC=ON \
   -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON \
   -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON -DLLVM_ENABLE_RUST_OPTIONSTRCMP=ON \
-  -DLLVM_ENABLE_RUST_NATIVEFORMATTING=ON \
+  -DLLVM_ENABLE_RUST_NATIVEFORMATTING=ON -DLLVM_ENABLE_RUST_UNICODE=ON \
   -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
@@ -54,10 +54,10 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 ninja -C build LLVMSupport llvm-sha1-stable llvm-sha256-stable \
   llvm-convertutf-stable llvm-convertebcdic-stable llvm-djb-stable \
   llvm-versiontuple-stable llvm-optionstrcmp-stable \
-  llvm-rustdemangle-stable llvm-dlang-stable \
+  llvm-rustdemangle-stable llvm-dlang-stable llvm-unicode-stable \
   llvm-rust-rustdemangle-differential llvm-rust-dlang-differential \
   llvm-rust-djb-differential llvm-rust-versiontuple-differential \
-  llvm-rust-optionstrcmp-differential llc
+  llvm-rust-optionstrcmp-differential llvm-rust-unicode-differential llc
 ```
 
 Full LLVM builds are large; prefer building `LLVMSupport` and the specific
@@ -95,6 +95,10 @@ Every crate under `llvm/lib/*/rust/` follows the same rules:
   binaries use LTO off; larger ones try thin LTO first. Development and test
   builds use the incremental dev profile. See `MIGRATION_TO_RUST.md` for the
   measured rationale.
+- Exception: `llvm/lib/Support/rust/unicode` uses `lto = false`. Its
+  table-driven function gains nothing from cross-crate LTO, and rustc's LTO
+  pass was the peak-RSS bottleneck for this small crate. The exception is
+  measured in the Unicode resource table; new crates still require fat LTO.
 
 ## Migration policy (agreed 2026-11-25)
 
@@ -285,6 +289,68 @@ the C++ wrapper and C-ABI call. The Rust loop folds ASCII in one pass, reads
 both lengths before the loop, and avoids the two `StringRef::substr`
 temporaries and the out-of-line `compare_insensitive` call.
 
+## Unicode case folding port
+
+`llvm/lib/Support/rust/unicode` is gated by `LLVM_ENABLE_RUST_UNICODE`
+(default `OFF`). The generated `UnicodeCaseFold.cpp` stays untouched; with the
+option on, `UnicodeCaseFoldRust.cpp` replaces it and `foldCharSimple` is a
+C-ABI call to `llvm_unicode_fold_char_simple`. The Rust implementation uses
+691 sorted ranges and a binary search instead of the generated comparison
+chain, with an ASCII fast path. Starts are stored as `u8` offsets from
+256-code-point block bases selected by a packed 5-bit block index; lengths are
+`u8`. Delta 1 is a bit in a bitset, and the other 146 deltas are selected by
+rank from a sparse `i32` table. All table reads use checked slice access with
+non-panicking fallbacks; there is no `get_unchecked` in the lookup path.
+`PRUNE_ARCHIVE` removes unused `compiler_builtins` members, so the default
+staged archive is 6,304 bytes instead of 5 MiB. Pruning is conditional: if the
+retained object references any symbol outside a small libc/panic allowlist,
+the script keeps the complete archive. Overflow checks trigger that fallback,
+and the wrapper supplies a weak `rust_eh_personality` for the pulled-in `core`.
+The script uses `list(FIND)` rather than policy-dependent `IN_LIST`, so its
+standalone `cmake -P` invocation works with CMake 3.x; it accepts both GNU
+`nm` and `llvm-nm` POSIX records. The overflow test tracks `LLVM_RUST_FLAGS`
+through a generated dependency, matching the production rule.
+
+```sh
+(cd llvm/lib/Support/rust/unicode &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build llvm-rust-unicode-differential llvm-unicode-stable
+./build/bin/llvm-unicode-stable
+./build/bin/llvm-rust-unicode-differential
+
+# Overflow/debug-check regression: prunes the checks-enabled archive and links.
+ninja -C build check-llvm-rust-unicode-overflow
+```
+
+The differential target compiles the C++ fallback and compares every code
+point from -1 through 0x110000; the stable target exercises the public API
+with the option on and is built in both configurations. Five pinned runs over
+five million random code points: C++ 40.47 ns, Rust 18.68 ns, 2.17x faster.
+The overflow target builds the crate with `-Coverflow-checks=yes`; a separate
+configure with `-DLLVM_RUST_FLAGS=-Coverflow-checks=yes` links
+`llvm-unicode-stable` as well.
+
+The public CMake package must import the Rust archive, not leave a bare
+`llvm_unicode` name in `LLVMSupport`'s interface:
+
+```sh
+cmake -S /tmp/unicode-consumer -B /tmp/unicode-consumer-build -G Ninja \
+  -DLLVM_DIR=$PWD/build/lib/cmake/llvm
+ninja -C /tmp/unicode-consumer-build
+```
+
+The resource gate is cleared. The C++ one-TU compile is 418.98 ms and 95.93
+MiB peak RSS; the Rust crate plus wrapper is 141.77 ms and 94.31 MiB peak RSS
+(0.34x wall, -1.7% RSS). Incremental rebuilds, including copy, prune, strip,
+and wrapper compile, are 336.84 ms and 94.32 MiB against 414.38 ms and 96.00
+MiB for the C++ recompile (0.81x wall, -1.8% RSS). The wrapper includes only
+`Compiler.h`; pulling in `Unicode.h` costs 354 ms for the one-line wrapper and
+breaks the compile gate. `llvm-min-tblgen` is byte-identical (1,796,632
+bytes). `llvm-unicode-stable` is 20,288 bytes with C++ and 16,408 bytes with
+Rust (-3,880). The option stays opt-in by policy.
+
 ## Demangler port
 
 `llvm/lib/Demangle/rust/rustdemangle` is the Phase 2 port of
@@ -452,6 +518,9 @@ its checks locally instead.
 ```sh
 ninja -C build llvm-rust-sha1-differential llvm-sha1-stable
 ./build/bin/llvm-rust-sha1-differential && ./build/bin/llvm-sha1-stable
+
+# The Unicode archive must also link when Rust checks are enabled.
+ninja -C build check-llvm-rust-unicode-overflow
 
 ninja -C build llvm-rust-xxhash-differential llvm-xxhash-stable
 ./build/bin/llvm-rust-xxhash-differential && ./build/bin/llvm-xxhash-stable

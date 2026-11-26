@@ -142,6 +142,21 @@ endif()
 
 add_subdirectory(BLAKE3)
 
+# Targets that need the generated C++ fallback while the Rust option is on
+# compile this copy, because the original source is marked header-only then.
+set(UNICODE_CASE_FOLD_REFERENCE
+  "${CMAKE_CURRENT_BINARY_DIR}/UnicodeCaseFoldReference.cpp")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/UnicodeCaseFold.cpp"
+  "${UNICODE_CASE_FOLD_REFERENCE}" COPYONLY)
+
+# Keep both sources in the component list for llvm_check_source_file_list, but
+# compile only the selected one.
+if(LLVM_ENABLE_RUST_UNICODE)
+  set_source_files_properties(UnicodeCaseFold.cpp PROPERTIES HEADER_FILE_ONLY TRUE)
+else()
+  set_source_files_properties(UnicodeCaseFoldRust.cpp PROPERTIES HEADER_FILE_ONLY TRUE)
+endif()
+
 add_llvm_component_library(LLVMSupport
   ABIBreak.cpp
   AMDGPUMetadata.cpp
@@ -277,6 +292,7 @@ add_llvm_component_library(LLVMSupport
   Twine.cpp
   Unicode.cpp
   UnicodeCaseFold.cpp
+  UnicodeCaseFoldRust.cpp
   UnicodeNameToCodepoint.cpp
   UnicodeNameToCodepointGenerated.cpp
   VersionTuple.cpp
@@ -569,7 +585,7 @@ if(LLVM_ENABLE_RUST_DJB)
     rust/djb/test/differential.cpp
     "${CMAKE_CURRENT_SOURCE_DIR}/DJB.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ConvertUTF.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/UnicodeCaseFold.cpp"
+    "${UNICODE_CASE_FOLD_REFERENCE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/ABIBreak.cpp")
   target_include_directories(llvm-rust-djb-differential PRIVATE
     ${LLVM_MAIN_INCLUDE_DIR}
@@ -662,6 +678,99 @@ if(LLVM_ENABLE_RUST_NATIVEFORMATTING)
     USES_TERMINAL)
 endif()
 
+if(LLVM_ENABLE_RUST_UNICODE)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_unicode
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.toml"
+    STRIP_DEBUG PRUNE_ARCHIVE)
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_UNICODE)
+  target_link_libraries(LLVMSupport PRIVATE llvm_unicode)
+
+  add_executable(llvm-rust-unicode-differential EXCLUDE_FROM_ALL
+    rust/unicode/test/differential.cpp
+    "${UNICODE_CASE_FOLD_REFERENCE}")
+  target_include_directories(llvm-rust-unicode-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-unicode-differential PRIVATE llvm_unicode)
+
+  add_custom_target(check-llvm-rust-unicode
+    COMMAND llvm-rust-unicode-differential
+    COMMAND llvm-unicode-stable
+    DEPENDS llvm-rust-unicode-differential llvm-unicode-stable
+    USES_TERMINAL)
+
+  # Overflow checks make the crate reference core's panic routines.  The
+  # pruning script must keep those providers instead of producing an archive
+  # that only links with the default release flags.
+  if(NOT MSVC)
+    set(unicode_overflow_dir
+      "${CMAKE_CURRENT_BINARY_DIR}/rust-unicode-overflow")
+    set(unicode_overflow_archive
+      "${unicode_overflow_dir}/release/${CMAKE_STATIC_LIBRARY_PREFIX}llvm_unicode${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    set(unicode_overflow_staged
+      "${unicode_overflow_dir}/release/libllvm_unicode.pruned.a")
+    set(unicode_prune_script
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/modules/RustPruneArchive.cmake")
+    file(GLOB_RECURSE unicode_overflow_sources CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/src/*.rs"
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.lock")
+    list(APPEND unicode_overflow_sources
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.toml")
+    # Keep the test rule honest when LLVM_RUST_FLAGS changes, especially with
+    # Unix Makefiles, which do not rerun a command just because its recipe did.
+    set(unicode_overflow_flags
+      "${CMAKE_CURRENT_BINARY_DIR}/rust-unicode-overflow-flags.txt")
+    file(GENERATE OUTPUT "${unicode_overflow_flags}"
+      CONTENT "${LLVM_RUST_FLAGS}\n")
+    list(APPEND unicode_overflow_sources "${unicode_overflow_flags}")
+    add_custom_command(OUTPUT "${unicode_overflow_archive}"
+      COMMAND "${CMAKE_COMMAND}" -E env
+              "RUSTFLAGS=${LLVM_RUST_FLAGS} -Coverflow-checks=yes"
+              "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
+              --manifest-path "${CMAKE_CURRENT_SOURCE_DIR}/rust/unicode/Cargo.toml"
+              --target-dir "${unicode_overflow_dir}"
+      DEPENDS ${unicode_overflow_sources}
+      COMMENT "Building Unicode crate with overflow checks")
+    add_custom_command(OUTPUT "${unicode_overflow_staged}"
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "${unicode_overflow_archive}" "${unicode_overflow_staged}"
+      COMMAND "${CMAKE_COMMAND}"
+              "-DARCHIVE=${unicode_overflow_staged}" "-DCRATE=llvm_unicode"
+              "-DAR=${CMAKE_AR}" "-DNM=${CMAKE_NM}" -P "${unicode_prune_script}"
+      DEPENDS "${unicode_overflow_archive}" "${unicode_prune_script}"
+      COMMENT "Pruning overflow-checked Unicode archive")
+    add_custom_target(llvm-rust-unicode-overflow-archive
+      DEPENDS "${unicode_overflow_staged}")
+    add_executable(llvm-rust-unicode-overflow-stable EXCLUDE_FROM_ALL
+      rust/unicode/test/stable.cpp
+      UnicodeCaseFoldRust.cpp)
+    add_dependencies(llvm-rust-unicode-overflow-stable
+      llvm-rust-unicode-overflow-archive)
+    target_include_directories(llvm-rust-unicode-overflow-stable PRIVATE
+      ${LLVM_MAIN_INCLUDE_DIR}
+      ${LLVM_BINARY_DIR}/include)
+    target_link_libraries(llvm-rust-unicode-overflow-stable PRIVATE
+      "${unicode_overflow_staged}" ${CMAKE_DL_LIBS})
+    if(UNIX)
+      target_link_libraries(llvm-rust-unicode-overflow-stable PRIVATE m pthread)
+    endif()
+    add_custom_target(check-llvm-rust-unicode-overflow
+      COMMAND llvm-rust-unicode-overflow-stable
+      DEPENDS llvm-rust-unicode-overflow-stable
+      USES_TERMINAL)
+  endif()
+endif()
+
+add_executable(llvm-unicode-stable EXCLUDE_FROM_ALL
+  rust/unicode/test/stable.cpp)
+target_link_libraries(llvm-unicode-stable PRIVATE LLVMSupport)
+
+add_custom_target(check-llvm-unicode
+  COMMAND llvm-unicode-stable
+  DEPENDS llvm-unicode-stable
+  USES_TERMINAL)
+
 add_executable(llvm-nativeformatting-stable EXCLUDE_FROM_ALL
   rust/nativeformatting/test/stable.cpp)
 target_link_libraries(llvm-nativeformatting-stable PRIVATE LLVMSupport)
@@ -713,7 +822,7 @@ set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${llvm_system_libs}")
 # The Rust ports are static archives installed next to the other LLVM
 # libraries, so downstream links need them in llvm-config --system-libs.
 foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF CONVERTEBCDIC
-                  XXHASH RUSTDEMANGLE DLANG NATIVEFORMATTING)
+                  XXHASH RUSTDEMANGLE DLANG NATIVEFORMATTING UNICODE)
   if(LLVM_ENABLE_RUST_${rust_port})
     if(rust_port STREQUAL "DLANG")
       set(rust_port_lower "dlangdemangle")

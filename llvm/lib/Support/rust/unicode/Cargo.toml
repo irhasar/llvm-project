@@ -1,0 +1,24 @@
+[package]
+name = "llvm-unicode"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+license = "Apache-2.0 WITH LLVM-exception"
+
+[lib]
+name = "llvm_unicode"
+crate-type = ["staticlib"]
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+# The table-driven function does not benefit from cross-crate LTO, and rustc's
+# LTO pass is the peak-RSS bottleneck for this small component.
+lto = false
+codegen-units = 1
