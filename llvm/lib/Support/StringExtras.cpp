@@ -17,6 +17,13 @@
 
 using namespace llvm;
 
+#if defined(LLVM_RUST_STRINGEXTRAS)
+extern "C" size_t llvm_stringextras_snake(const char *Src, size_t Len,
+                                          char *Dst);
+extern "C" size_t llvm_stringextras_camel(const char *Src, size_t Len,
+                                          char *Dst, uint8_t CapitalizeFirst);
+#endif
+
 /// getToken - This function extracts one token from source, ignoring any
 /// leading characters that appear in the Delimiters string, and ending the
 /// token at any of the characters that appear in the Delimiters string.  If
@@ -88,6 +95,36 @@ void llvm::printPercentEncoded(StringRef String, raw_ostream &Out) {
   }
 }
 
+#if defined(LLVM_RUST_STRINGEXTRAS)
+
+std::string llvm::convertToSnakeFromCamelCase(StringRef input) {
+  if (input.empty())
+    return "";
+
+  std::string snakeCase;
+  snakeCase.resize(input.size() * 2);
+  size_t Written = llvm_stringextras_snake(input.data(), input.size(),
+                                           snakeCase.data());
+  snakeCase.resize(Written);
+  return snakeCase;
+}
+
+std::string llvm::convertToCamelFromSnakeCase(StringRef input,
+                                              bool capitalizeFirst) {
+  if (input.empty())
+    return "";
+
+  std::string output;
+  output.resize(input.size());
+  size_t Written = llvm_stringextras_camel(input.data(), input.size(),
+                                           output.data(),
+                                           capitalizeFirst ? 1 : 0);
+  output.resize(Written);
+  return output;
+}
+
+#else
+
 std::string llvm::convertToSnakeFromCamelCase(StringRef input) {
   if (input.empty())
     return "";
@@ -131,3 +168,5 @@ std::string llvm::convertToCamelFromSnakeCase(StringRef input,
   }
   return output;
 }
+
+#endif

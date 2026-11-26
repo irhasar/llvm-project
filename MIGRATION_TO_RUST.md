@@ -204,8 +204,9 @@ Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
 (`LLVM_ENABLE_RUST_XXHASH`), `DJB.cpp` (`LLVM_ENABLE_RUST_DJB`),
 `VersionTuple.cpp` (`LLVM_ENABLE_RUST_VERSIONTUPLE`),
 `OptionStrCmp.cpp` (`LLVM_ENABLE_RUST_OPTIONSTRCMP`), the integer/hex core
-of `NativeFormatting.cpp` (`LLVM_ENABLE_RUST_NATIVEFORMATTING`), and Unicode
-simple case folding (`LLVM_ENABLE_RUST_UNICODE`).
+of `NativeFormatting.cpp` (`LLVM_ENABLE_RUST_NATIVEFORMATTING`), Unicode
+simple case folding (`LLVM_ENABLE_RUST_UNICODE`), and the StringExtras
+camel/snake case conversions (`LLVM_ENABLE_RUST_STRINGEXTRAS`).
 Selection criteria: small, deterministic,
 byte-buffer in / byte-buffer out, no LLVM types in the interface, existing unit
 tests.
@@ -1252,6 +1253,73 @@ rebuilds, including the copy, prune, strip, and wrapper compile, are 336.84 ms
 and 94.32 MiB against 414.38 ms and 96.00 MiB for the C++ recompile (0.81x
 wall, -1.8% peak RSS). The option stays opt-in by policy, but this port is a
 gate-clearing result.
+
+## Thirteenth port: StringExtras case conversion
+
+Implementation: `llvm/lib/Support/rust/stringextras`, behind
+`LLVM_ENABLE_RUST_STRINGEXTRAS` (default `OFF`). The public functions remain
+`llvm::convertToSnakeFromCamelCase` and
+`llvm::convertToCamelFromSnakeCase`; only their bodies change. The C++ wrapper
+allocates the result string, and the Rust crate receives `(pointer, length)`
+and a pre-sized output buffer. This keeps `StringRef`, `std::string`, and
+allocator ownership in C++, and leaves the other `StringExtras.cpp` functions
+unchanged. The crate uses the usual `no_std`, aborting panic handler and one
+codegen unit, with LTO disabled because the loops are short and LTO is the
+peak-RSS bottleneck for tiny crates. `PRUNE_ARCHIVE` and `STRIP_DEBUG` reduce
+the staged archive to 2,344 bytes; the full crate archive is 8,078,524 bytes.
+The staged archive is installed with `LLVMSupport`, and
+`llvm-config --link-static --system-libs support` emits
+`-lllvm_stringextras`; a `g++` consumer linked through `llvm-config` prints
+`http_server FooBar`.
+
+The two operations are ASCII case conversions. The Rust loop tests bytes
+directly instead of calling locale-sensitive `std::tolower`/`isupper`/
+`islower` for every position and avoids the temporary `StringRef` slices used
+by the C++ fallback. High bytes are left unchanged, matching the C locale used
+by the LLVM build; the differential test checks every single byte.
+
+Correctness coverage:
+
+* Four crate tests cover capital runs, digit-to-capital boundaries, leading and
+  trailing underscores, empty input, high bytes, and a short output buffer.
+* `llvm-rust-stringextras-differential` compares the public Rust path against
+  an exact C++ fallback over 300,810 inputs, including every single byte,
+  100,000 random mixed-case strings, and both camel-case modes: 0 mismatches.
+* `llvm-stringextras-stable` checks the public API with the option on and off;
+  `check-llvm-rust-stringextras` runs both the differential and golden tests.
+
+Measured on this Zen 4 host with `g++ -O3` against `-C opt-level=3`, five pinned
+runs (`taskset -c 0`) over the 100,014-string corpus through the public C++ API,
+median (min-max) ns/call:
+
+| Operation | C++ | Rust | Rust speedup |
+|-----------|-----|------|--------------|
+| Camel to snake | 144.34 (141.34-149.97) | 74.16 (73.67-74.96) | **1.95x** |
+| Snake to camel | 28.00 (27.88-28.14) | 25.06 (24.84-25.19) | **1.12x** |
+
+The C++ numbers come from the separately compiled reference implementation in
+the differential target, which is the same code as the option-off body; the
+Rust numbers time the public wrapper, including its allocation and resize.
+
+The staged Rust archive is 2,344 bytes. The public stable test is 1,558,608
+bytes with Rust versus 1,558,560 bytes with C++ (+48 bytes, +0.003%). The
+C++ fallback object is 12,560 bytes; the Rust wrapper object is 10,904 bytes.
+Compile rows are medians of five pinned runs, using the CMake Release compile
+command and `cargo build --release --locked`. Rust wall/user/sys totals sum the
+crate and wrapper objects; peak RSS is the larger peak, not a sum:
+
+| Backend | Wall ms | User ms | Sys ms | Peak RSS MiB | Object/archive bytes |
+|---------|---------|---------|--------|--------------|----------------------|
+| C++ | 591 | 492 | 99 | 116.54 | 12,560 |
+| Rust crate | 119 | 65 | 56 | 93.72 | 8,078,524 |
+| Rust wrapper (option ON) | 602 | 488 | 113 | 115.23 | 10,904 |
+| Rust total | 721 | 553 | 169 | 115.23 | 2,344 staged |
+
+The clean compile total is 1.22x the C++ wall time because the crate and the
+wrapper are separate cache entries; the runtime and size gates are the reasons
+this port is useful. Ninja can overlap the crate build with the wrapper
+compile, so the process sum is a conservative bound. The option remains
+opt-in under the migration policy.
 
 ## Resource measurements for EBCDIC, D, DJB, and Unicode
 

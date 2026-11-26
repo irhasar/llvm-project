@@ -771,6 +771,32 @@ add_custom_target(check-llvm-unicode
   DEPENDS llvm-unicode-stable
   USES_TERMINAL)
 
+if(LLVM_ENABLE_RUST_STRINGEXTRAS)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_stringextras
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/stringextras/Cargo.toml"
+    STRIP_DEBUG PRUNE_ARCHIVE)
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_STRINGEXTRAS)
+  target_link_libraries(LLVMSupport PRIVATE llvm_stringextras)
+
+  add_executable(llvm-rust-stringextras-differential EXCLUDE_FROM_ALL
+    rust/stringextras/test/differential.cpp
+    rust/stringextras/test/reference.cpp)
+  target_include_directories(llvm-rust-stringextras-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-stringextras-differential PRIVATE LLVMSupport)
+  add_custom_target(check-llvm-rust-stringextras
+    COMMAND llvm-rust-stringextras-differential
+    COMMAND llvm-stringextras-stable
+    DEPENDS llvm-rust-stringextras-differential llvm-stringextras-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-stringextras-stable EXCLUDE_FROM_ALL
+  rust/stringextras/test/stable.cpp)
+target_link_libraries(llvm-stringextras-stable PRIVATE LLVMSupport)
+
 add_executable(llvm-nativeformatting-stable EXCLUDE_FROM_ALL
   rust/nativeformatting/test/stable.cpp)
 target_link_libraries(llvm-nativeformatting-stable PRIVATE LLVMSupport)
@@ -822,7 +848,8 @@ set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${llvm_system_libs}")
 # The Rust ports are static archives installed next to the other LLVM
 # libraries, so downstream links need them in llvm-config --system-libs.
 foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF CONVERTEBCDIC
-                  XXHASH RUSTDEMANGLE DLANG NATIVEFORMATTING UNICODE)
+                  XXHASH RUSTDEMANGLE DLANG NATIVEFORMATTING UNICODE
+                  STRINGEXTRAS)
   if(LLVM_ENABLE_RUST_${rust_port})
     if(rust_port STREQUAL "DLANG")
       set(rust_port_lower "dlangdemangle")

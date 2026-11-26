@@ -43,6 +43,7 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON \
   -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON -DLLVM_ENABLE_RUST_OPTIONSTRCMP=ON \
   -DLLVM_ENABLE_RUST_NATIVEFORMATTING=ON -DLLVM_ENABLE_RUST_UNICODE=ON \
+  -DLLVM_ENABLE_RUST_STRINGEXTRAS=ON \
   -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
@@ -350,6 +351,35 @@ MiB for the C++ recompile (0.81x wall, -1.8% RSS). The wrapper includes only
 breaks the compile gate. `llvm-min-tblgen` is byte-identical (1,796,632
 bytes). `llvm-unicode-stable` is 20,288 bytes with C++ and 16,408 bytes with
 Rust (-3,880). The option stays opt-in by policy.
+
+## StringExtras port
+
+`llvm/lib/Support/rust/stringextras` ports the ASCII camel/snake conversions
+behind `LLVM_ENABLE_RUST_STRINGEXTRAS` (default `OFF`). The public
+`StringExtras.h` API and the other `StringExtras.cpp` functions are unchanged;
+the C++ wrapper owns the `std::string` and the Rust crate writes into a
+caller-sized buffer. The crate uses `PRUNE_ARCHIVE` and `STRIP_DEBUG`, so the
+staged archive is 2,344 bytes. The archive is installed with `LLVMSupport`,
+and `llvm-config --system-libs support` emits `-lllvm_stringextras`.
+
+```sh
+(cd llvm/lib/Support/rust/stringextras &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build check-llvm-rust-stringextras
+```
+
+`test/differential.cpp` compares the public Rust path with an exact C++
+reference over 300,810 inputs, including all 256 single bytes and 100,000
+random strings; `test/stable.cpp` is built with the option on and off. Five
+pinned runs on this Zen 4 host: camel-to-snake is 1.95x faster
+(144.34 ns -> 74.16 ns), snake-to-camel is 1.12x faster (28.00 ns -> 25.06 ns).
+The Rust stable binary is 48 bytes larger (1,558,608 vs 1,558,560 bytes); the
+staged archive is 2,344 bytes. The clean compile total is 721 ms versus 591 ms
+for the C++ one-TU object, so the compile process sum is a conservative 1.22x;
+Ninja can overlap the crate build with the wrapper compile. The option stays
+opt-in.
 
 ## Demangler port
 

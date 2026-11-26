@@ -694,6 +694,8 @@ option(LLVM_ENABLE_RUST_NATIVEFORMATTING
   "Use the Rust implementation of NativeFormatting in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_UNICODE
   "Use the Rust implementation of Unicode case folding in LLVM Support (experimental)" OFF)
+option(LLVM_ENABLE_RUST_STRINGEXTRAS
+  "Use the Rust implementation of StringExtras case conversion in LLVM Support (experimental)" OFF)
 option(LLVM_ENABLE_RUST_RUSTDEMANGLE
   "Use the Rust implementation of the Rust v0 demangler in LLVMDemangle (experimental)" OFF)
 option(LLVM_ENABLE_RUST_DLANG
