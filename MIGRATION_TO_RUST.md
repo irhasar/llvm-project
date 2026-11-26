@@ -60,6 +60,12 @@ Non-goals (for now):
 
 * locates `cargo` (or `LLVM_RUST_CARGO_EXECUTABLE`),
 * builds the crate into the CMake binary tree with `--release --locked`,
+* records a per-configuration `build-<CONFIG>.stamp` so Debug and Release do
+  not share build freshness,
+* records the staged archive hash separately, so unchanged content does not
+  relink dependents,
+* stages a restorable `copy_if_different` archive that Make can recreate
+  without rerunning Cargo,
 * exposes the archive as a `STATIC IMPORTED` target that components link.
 
 Crates live next to the component they replace
