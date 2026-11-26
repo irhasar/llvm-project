@@ -138,11 +138,15 @@ backends with the same optimization level and corpus:
   codegen.
 
 `llvm/utils/rust-migration/bench_metrics.py` measures a command with `wait4`.
-On Linux it first builds `measure_exec.c`, a small launcher that forks a
-distinct benchmark child, so `ru_maxrss` does not include Python's pre-exec
-resident pages. The launcher is verified against `/proc/self/status`: the floor
-is about 1.3-1.8 MiB instead of Python's ~15 MiB. Use `--rss-backend=wait4`
-only when a compiler is unavailable, and report the resulting RSS floor.
+On Linux it builds and probes `measure_exec.c` in a temporary directory, a
+small launcher that forks a distinct benchmark child, so `ru_maxrss` does not
+include Python's pre-exec resident pages. The launcher is verified against
+`/proc/self/status`: the floor is about 1.3-1.8 MiB instead of Python's ~15 MiB.
+If the temporary directory is on a `noexec` mount, `auto` falls back to
+`wait4` with a warning; `--rss-backend=launcher` fails instead of running
+without measurements. The temporary directory is removed after every run.
+Report the resulting RSS floor and median/min-max values for wall, user, and
+system time.
 
 ```sh
 python3 llvm/utils/rust-migration/bench_metrics.py \
@@ -891,20 +895,21 @@ strings: 300,086 inputs, 0 mismatches. `test/stable.cpp` checks every component
 presence flag and that a failed parse leaves the destination unchanged.
 
 Measured on this Zen 4 host with `g++ -O3` and `-C opt-level=3`, five-component
-versions. The Rust row now includes the C++ wrapper's tuple construction, so it
-times the same public API shape as the C++ row:
+versions. Both rows construct the public `VersionTuple` and consume all five
+components, so the compiler cannot drop the Rust tuple's unused fields:
 
-| Backend | ns/parse |
-|---------|----------|
-| C++ | 13.58 |
-| Rust public wrapper | 14.04 |
+| Backend | ns/parse, median (min-max) |
+|---------|----------------------------|
+| C++ | 15.57 (15.51-16.89) |
+| Rust public wrapper | 14.67 (14.38-15.85) |
 
 The raw C ABI parser alone is about 11.5 ns, but the public wrapper must still
-build the `VersionTuple`. Across five runs the public result ranges from 0.92x
-to 1.08x, with a median around 0.97x. That is parity, not a reliable speedup:
-this port does not clear the 1.05x runtime gate and remains opt-in. The linked
-stable test and `LLVMSupport` were not rebuilt for this measurement; the CMake
-differential target and standalone stable binaries were built.
+build the `VersionTuple`. Across five runs the speedup is 1.04x to 1.08x, with
+a median of 1.07x. The median clears the 1.05x runtime gate, but one run was
+just under it, so this is a narrow win rather than a comfortable margin. It
+remains opt-in because the archive-size and compile-resource gates still fail.
+The linked stable test and `LLVMSupport` were not rebuilt for this measurement;
+the CMake differential target and standalone stable binaries were built.
 
 ## Eleventh port: OptionStrCmp
 
@@ -938,34 +943,43 @@ and needs no intermediate string objects.
 
 ## Resource measurements for EBCDIC, D, and DJB
 
-Compile rows are medians of five pinned runs (`taskset -c 0`), using the
-CMake Release compile command (`-O3`) and `cargo build --release --locked` with
-`-C opt-level=3`. Rust compile wall/CPU totals sum the crate build and the C++
-wrapper object; the C++ row is the original one-TU object. Object/archive bytes
-are before linking. Linked bytes are the `*-stable` test binaries. The DJB
-compile rows are a clean `cargo build` and a standalone `g++ -O3` object.
+Compile rows are medians of five pinned runs (`taskset -c 0`), with the
+median and min-max in each cell, using the CMake Release compile command
+(`-O3`) and `cargo build --release --locked` with `-C opt-level=3`. Rust
+wall/user/sys totals sum the crate build and the C++ wrapper object; the C++
+row is the original one-TU object. C++ has no incremental cache, so its
+"incremental" row is another full compile of the same source. Rust incremental
+rows touch `src/lib.rs` and rebuild without cleaning. Object/archive bytes are
+before linking; the Rust cell lists archive plus wrapper object. Linked bytes
+are the `*-stable` test binaries.
 
-| Port | Backend | Compile wall ms | Compile CPU ms | Peak RSS MiB | Object/archive bytes | Linked bytes |
-|------|---------|-----------------|----------------|--------------|----------------------|--------------|
-| EBCDIC | C++ | 405.15 | 403.24 | 92.70 | 4,192 | 17,960 |
-| EBCDIC | Rust | 561.23 | 560.76 | 117.57 | 5,048,012 | 18,048 |
-| D | C++ | 342.99 | 350.50 | 68.35 | 15,232 | 229,408 |
-| D | Rust | 501.56 | 498.34 | 128.20 | 5,083,878 | 27,120 |
-| DJB | C++ | 409.44 | 411.84 | 100.45 | 3,224 | 30,376 |
-| DJB | Rust | 326.67 | 322.87 | 117.58 | 5,058,270 | 20,640 |
+| Port | Backend | Mode | Wall ms | User ms | Sys ms | Peak RSS MiB | Object/archive bytes | Linked bytes |
+|------|---------|------|---------|---------|--------|--------------|----------------------|--------------|
+| EBCDIC | C++ | clean | 410.57 (397.85-441.86) | 341.47 (320.50-361.09) | 74.44 (56.50-80.55) | 92.26 (92.25-92.39) | 4,192 | 17,960 |
+| EBCDIC | C++ | incremental | 399.36 (397.70-400.67) | 332.97 (306.85-338.01) | 67.44 (59.40-91.29) | 92.37 (92.35-92.48) | 4,192 | 17,960 |
+| EBCDIC | Rust | clean | 573.21 (566.84-589.84) | 426.80 (415.33-436.19) | 150.18 (140.01-151.77) | 109.56 (109.51-109.57) | 5,048,012 + 3,072 | 18,048 |
+| EBCDIC | Rust | incremental | 541.80 (535.82-549.44) | 415.27 (403.36-422.79) | 131.01 (118.82-134.28) | 109.56 (109.51-109.69) | 5,048,012 + 3,072 | 18,048 |
+| D | C++ | clean | 353.79 (352.62-359.53) | 305.46 (296.28-317.75) | 51.05 (41.32-56.19) | 67.82 (67.79-67.94) | 15,232 | 229,408 |
+| D | C++ | incremental | 353.09 (347.90-364.45) | 299.13 (287.91-309.81) | 54.45 (47.25-59.77) | 67.87 (67.68-67.96) | 15,232 | 229,408 |
+| D | Rust | clean | 495.25 (489.98-512.09) | 372.32 (360.24-388.38) | 125.88 (110.84-132.71) | 120.13 (120.12-120.18) | 5,065,492 + 1,568 | 27,120 |
+| D | Rust | incremental | 465.26 (459.77-489.82) | 360.85 (346.38-380.58) | 106.37 (99.28-116.51) | 120.14 (119.99-120.32) | 5,065,492 + 1,568 | 27,120 |
+| DJB | C++ | clean | 434.37 (427.57-447.02) | 354.05 (343.97-357.88) | 84.23 (74.41-90.17) | 100.32 (100.31-100.44) | 2,376 | 30,376 |
+| DJB | C++ | incremental | 431.49 (429.80-467.38) | 360.12 (348.36-393.30) | 73.91 (67.80-83.57) | 100.34 (100.32-100.44) | 2,376 | 30,376 |
+| DJB | Rust | clean | 738.71 (728.50-780.66) | 581.29 (566.08-592.49) | 163.55 (140.12-185.72) | 117.51 (117.27-117.59) | 5,058,270 + 1,720 | 20,640 |
+| DJB | Rust | incremental | 703.14 (696.26-739.07) | 572.07 (557.88-589.57) | 135.21 (111.88-159.60) | 117.63 (117.35-118.39) | 5,058,270 + 1,720 | 20,640 |
 
 The Rust archive is about 5 MiB because `staticlib` carries
 `compiler_builtins` bitcode; the linked D stable binary is nevertheless 8.4x
 smaller than the C++ one after linker GC. EBCDIC linked size is 0.5% larger.
-Compile wall time is 1.4x to 1.5x slower for the full Rust port, while runtime
-throughput is faster.
+Full Rust compile wall time is 1.3x to 1.7x slower than the C++ object, while
+runtime throughput is faster. The earlier DJB row compared a cargo-only build
+with a complete C++ object; adding DJB's wrapper makes the full Rust compile
+1.7x slower. Only the totals in this table are comparable.
 
 These rows do not clear the resource gate in `AGENTS.md`. The archive-size
-condition fails for every port. Peak RSS is also higher: EBCDIC +27%, D +88%,
-and DJB +17% against the 2% limit. Compile time fails for the full EBCDIC and D
-ports, while DJB compiles faster than its C++ object. The gate is not waived by
-a runtime win or by a smaller linked binary. VersionTuple is a separate runtime
-miss: its public-wrapper result is parity rather than a 1.05x win. None of
+condition fails for every port. Peak RSS is also higher: EBCDIC +19%, D +77%,
+and DJB +17% against the 2% limit. Compile time fails for all three full ports.
+The gate is not waived by a runtime win or by a smaller linked binary. None of
 these ports is claimed as a gate-clearing result; they stay behind their
 default-`OFF` options as opt-in experiments. Reducing the `compiler_builtins`
 payload and the crate build footprint is a prerequisite for changing that

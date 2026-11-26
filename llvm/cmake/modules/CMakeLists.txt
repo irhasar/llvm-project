@@ -6,24 +6,30 @@ include(FindPrefixFromConfig)
 # library's exported link interface. Record the enabled support archives so
 # LLVMConfig.cmake can recreate their imported targets in both the build and
 # install packages.
-function(llvm_record_rust_imported_library target library_dir)
+function(llvm_record_rust_imported_library target)
   get_property(libname GLOBAL PROPERTY LLVM_RUST_${target}_LIBRARY_NAME)
   if(NOT libname)
     set(libname
       "${CMAKE_STATIC_LIBRARY_PREFIX}${target}${CMAKE_STATIC_LIBRARY_SUFFIX}")
   endif()
-  set(locations "")
-  if(CMAKE_CONFIGURATION_TYPES)
-    foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES)
-      string(TOUPPER "${config}" config_upper)
-      set(location "${library_dir}/${libname}")
-      string(REPLACE "${CMAKE_CFG_INTDIR}" "${config}" location "${location}")
-      list(APPEND locations "${config_upper}=${location}")
-    endforeach()
-  endif()
-  string(REPLACE ";" "," locations "${locations}")
   set_property(GLOBAL APPEND PROPERTY LLVM_CONFIG_RUST_IMPORTED_TARGETS
-    "${target}|${libname}|${locations}")
+    "${target}|${libname}")
+endfunction()
+
+# The imported-target location is assembled from this directory and the
+# archive name in LLVMConfig.cmake. Keep paths out of the per-target metadata so
+# a comma (or another separator) in the prefix cannot truncate a location.
+function(llvm_record_rust_imported_directory library_dir)
+  if(CMAKE_CONFIGURATION_TYPES)
+    string(REPLACE "${CMAKE_CFG_INTDIR}" "__LLVM_RUST_CONFIG__"
+      library_dir "${library_dir}")
+    set(LLVM_CONFIG_RUST_CONFIGURATIONS "${CMAKE_CONFIGURATION_TYPES}")
+  else()
+    set(LLVM_CONFIG_RUST_CONFIGURATIONS "")
+  endif()
+  set(LLVM_CONFIG_RUST_LIBRARY_DIR "${library_dir}" PARENT_SCOPE)
+  set(LLVM_CONFIG_RUST_CONFIGURATIONS "${LLVM_CONFIG_RUST_CONFIGURATIONS}"
+    PARENT_SCOPE)
 endfunction()
 
 set(LLVM_CONFIG_RUST_SUPPORT_PORTS
@@ -96,11 +102,11 @@ set(LLVM_CONFIG_LIBRARY_DIRS
 list(REMOVE_DUPLICATES LLVM_CONFIG_LIBRARY_DIRS)
 
 set_property(GLOBAL PROPERTY LLVM_CONFIG_RUST_IMPORTED_TARGETS "")
+llvm_record_rust_imported_directory("${LLVM_LIBRARY_DIR}")
 foreach(rust_port IN LISTS LLVM_CONFIG_RUST_SUPPORT_PORTS)
   if(LLVM_ENABLE_RUST_${rust_port})
     string(TOLOWER "${rust_port}" rust_library)
-    llvm_record_rust_imported_library("llvm_${rust_library}"
-      "${LLVM_LIBRARY_DIR}")
+    llvm_record_rust_imported_library("llvm_${rust_library}")
   endif()
 endforeach()
 get_property(LLVM_CONFIG_RUST_IMPORTED_TARGETS GLOBAL
@@ -234,11 +240,12 @@ set(LLVM_CONFIG_LIBRARY_DIRS
 list(REMOVE_DUPLICATES LLVM_CONFIG_LIBRARY_DIRS)
 
 set_property(GLOBAL PROPERTY LLVM_CONFIG_RUST_IMPORTED_TARGETS "")
+set(LLVM_CONFIG_RUST_LIBRARY_DIR "${LLVM_CONFIG_LIBRARY_DIR}")
+set(LLVM_CONFIG_RUST_CONFIGURATIONS "")
 foreach(rust_port IN LISTS LLVM_CONFIG_RUST_SUPPORT_PORTS)
   if(LLVM_ENABLE_RUST_${rust_port})
     string(TOLOWER "${rust_port}" rust_library)
-    llvm_record_rust_imported_library("llvm_${rust_library}"
-      "${LLVM_CONFIG_LIBRARY_DIR}")
+    llvm_record_rust_imported_library("llvm_${rust_library}")
   endif()
 endforeach()
 get_property(LLVM_CONFIG_RUST_IMPORTED_TARGETS GLOBAL

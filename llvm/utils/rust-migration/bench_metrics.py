@@ -20,6 +20,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shlex
@@ -47,12 +48,13 @@ def wait_status_code(status: int) -> int:
     raise RuntimeError(f"unexpected wait status {status}")
 
 
-def build_launcher() -> Path | None:
-    """Build the tiny Linux launcher that isolates the benchmark from Python.
+def build_launcher(directory: Path) -> Path | None:
+    """Build and probe the Linux launcher that isolates the benchmark.
 
     A Popen child inherits Python's resident pages before exec, and wait4 folds
     that pre-exec peak into ru_maxrss. The launcher forks a distinct child, so
-    only the launcher's small footprint can inflate the reported peak.
+    only the launcher's small footprint can inflate the reported peak. A
+    ``noexec`` temporary mount lets the compile succeed but not the probe.
     """
     if sys.platform != "linux":
         return None
@@ -60,9 +62,8 @@ def build_launcher() -> Path | None:
     if not source.is_file():
         return None
     compiler = os.environ.get("CC", "cc")
+    launcher = directory / "measure_exec"
     try:
-        directory = Path(tempfile.mkdtemp(prefix="llvm-rust-bench-"))
-        launcher = directory / "measure_exec"
         subprocess.run(
             [compiler, "-O2", "-o", str(launcher), str(source)],
             check=True,
@@ -70,9 +71,16 @@ def build_launcher() -> Path | None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return launcher
+        probe = subprocess.run(
+            [str(launcher), "/bin/true"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     except (OSError, subprocess.CalledProcessError):
         return None
+    return launcher if probe.returncode == 0 else None
 
 
 def run_once_direct(command: list[str], cwd: str | None) -> dict[str, float | int]:
@@ -138,6 +146,108 @@ def median(values: list[float]) -> float:
     return statistics.median(values) if values else 0.0
 
 
+def run_benchmark(
+    args: argparse.Namespace,
+    command: list[str],
+    prepare: list[str] | None,
+    label: str,
+) -> dict[str, float | int]:
+    with contextlib.ExitStack() as stack:
+        launcher: Path | None = None
+        if args.rss_backend != "wait4":
+            if sys.platform != "linux":
+                if args.rss_backend == "launcher":
+                    raise RuntimeError("the launcher backend requires Linux")
+                print(
+                    "warning: launcher backend requires Linux; peak RSS uses "
+                    "wait4 and includes Python's pre-exec footprint",
+                    file=sys.stderr,
+                )
+            else:
+                try:
+                    temp_dir = stack.enter_context(
+                        tempfile.TemporaryDirectory(prefix="llvm-rust-bench-")
+                    )
+                except OSError as error:
+                    if args.rss_backend == "launcher":
+                        raise RuntimeError(
+                            f"cannot create launcher directory: {error}"
+                        ) from error
+                    print(
+                        "warning: cannot create launcher directory; peak RSS "
+                        "uses wait4 and includes Python's pre-exec footprint",
+                        file=sys.stderr,
+                    )
+                else:
+                    launcher = build_launcher(Path(temp_dir))
+                    if launcher is None:
+                        if args.rss_backend == "launcher":
+                            raise RuntimeError(
+                                "launcher could not be compiled or executed; "
+                                "install a C compiler, use an exec-capable "
+                                "temporary directory, or pass --rss-backend=wait4"
+                            )
+                        print(
+                            "warning: launcher could not be compiled or "
+                            "executed; peak RSS uses wait4 and includes Python's "
+                            "pre-exec footprint",
+                            file=sys.stderr,
+                        )
+
+        rss_backend = "launcher" if launcher is not None else "wait4"
+
+        def run(step: list[str]) -> dict[str, float | int]:
+            if launcher is not None:
+                return run_once_launcher(step, args.cwd, launcher)
+            return run_once_direct(step, args.cwd)
+
+        runs: list[dict[str, float | int]] = []
+        for _ in range(args.warmup):
+            if prepare:
+                run(prepare)
+            run(command)
+        for _ in range(args.repeat):
+            if prepare:
+                run(prepare)
+            runs.append(run(command))
+
+        walls = [float(run["wall_s"]) for run in runs]
+        users = [float(run["user_s"]) for run in runs]
+        systems = [float(run["sys_s"]) for run in runs]
+        rss = [float(run["maxrss_kib"]) for run in runs]
+        wall = median(walls)
+        user = median(users)
+        system = median(systems)
+        cpu = [
+            (u + s) / w * 100.0
+            for w, u, s in zip(walls, users, systems)
+            if w
+        ]
+        artifact_dir = Path(args.cwd) if args.cwd is not None else Path.cwd()
+        artifact_bytes = sum(
+            path_size(artifact_dir / path) for path in args.artifact
+        )
+        return {
+            "label": label,
+            "runs": len(runs),
+            "rss_backend": rss_backend,
+            "wall_ms_median": wall * 1000.0,
+            "wall_ms_min": min(walls) * 1000.0 if walls else 0.0,
+            "wall_ms_max": max(walls) * 1000.0 if walls else 0.0,
+            "user_ms_median": user * 1000.0,
+            "user_ms_min": min(users) * 1000.0 if users else 0.0,
+            "user_ms_max": max(users) * 1000.0 if users else 0.0,
+            "sys_ms_median": system * 1000.0,
+            "sys_ms_min": min(systems) * 1000.0 if systems else 0.0,
+            "sys_ms_max": max(systems) * 1000.0 if systems else 0.0,
+            "cpu_percent_median": median(cpu),
+            "maxrss_mib_median": median(rss) / 1024.0,
+            "maxrss_mib_min": min(rss) / 1024.0 if rss else 0.0,
+            "maxrss_mib_max": max(rss) / 1024.0 if rss else 0.0,
+            "artifact_bytes": artifact_bytes,
+        }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--label", default=None, help="row label")
@@ -178,71 +288,11 @@ def main() -> int:
     prepare = shlex.split(args.prepare) if args.prepare else None
     label = args.label or os.path.basename(command[0])
 
-    launcher: Path | None = None
-    if args.rss_backend != "wait4":
-        launcher = build_launcher()
-        if launcher is None and args.rss_backend == "launcher":
-            print("launcher unavailable; install a C compiler or use wait4",
-                  file=sys.stderr)
-            return 1
-        if launcher is None:
-            print(
-                "warning: peak RSS uses wait4 and includes Python's pre-exec "
-                "footprint",
-                file=sys.stderr,
-            )
-    rss_backend = "launcher" if launcher is not None else "wait4"
-
-    def run(command: list[str]) -> dict[str, float | int]:
-        if launcher is not None:
-            return run_once_launcher(command, args.cwd, launcher)
-        return run_once_direct(command, args.cwd)
-
-    runs: list[dict[str, float | int]] = []
     try:
-        for _ in range(args.warmup):
-            if prepare:
-                run(prepare)
-            run(command)
-        for _ in range(args.repeat):
-            if prepare:
-                run(prepare)
-            runs.append(run(command))
+        result = run_benchmark(args, command, prepare, label)
     except (OSError, RuntimeError) as error:
         print(f"{label}: {error}", file=sys.stderr)
         return 1
-
-    walls = [float(run["wall_s"]) for run in runs]
-    users = [float(run["user_s"]) for run in runs]
-    systems = [float(run["sys_s"]) for run in runs]
-    rss = [float(run["maxrss_kib"]) for run in runs]
-    wall = median(walls)
-    user = median(users)
-    system = median(systems)
-    cpu = [
-        (u + s) / w * 100.0
-        for w, u, s in zip(walls, users, systems)
-        if w
-    ]
-    artifact_dir = Path(args.cwd) if args.cwd is not None else Path.cwd()
-    artifact_bytes = sum(
-        path_size(artifact_dir / path) for path in args.artifact
-    )
-    result = {
-        "label": label,
-        "runs": len(runs),
-        "rss_backend": rss_backend,
-        "wall_ms_median": wall * 1000.0,
-        "user_ms_median": user * 1000.0,
-        "sys_ms_median": system * 1000.0,
-        "cpu_percent_median": median(cpu),
-        "maxrss_mib_median": median(rss) / 1024.0,
-        "maxrss_mib_min": min(rss) / 1024.0 if rss else 0.0,
-        "maxrss_mib_max": max(rss) / 1024.0 if rss else 0.0,
-        "artifact_bytes": artifact_bytes,
-        "wall_ms_min": min(walls) * 1000.0 if walls else 0.0,
-        "wall_ms_max": max(walls) * 1000.0 if walls else 0.0,
-    }
 
     if args.json:
         print(json.dumps(result, indent=2))
@@ -250,11 +300,14 @@ def main() -> int:
         print(
             f"| {label} | {result['runs']} | {result['wall_ms_median']:.2f} "
             f"({result['wall_ms_min']:.2f}-{result['wall_ms_max']:.2f}) | "
-            f"{result['user_ms_median']:.2f} | {result['sys_ms_median']:.2f} | "
+            f"{result['user_ms_median']:.2f} "
+            f"({result['user_ms_min']:.2f}-{result['user_ms_max']:.2f}) | "
+            f"{result['sys_ms_median']:.2f} "
+            f"({result['sys_ms_min']:.2f}-{result['sys_ms_max']:.2f}) | "
             f"{result['cpu_percent_median']:.1f}% | "
             f"{result['maxrss_mib_median']:.2f} "
             f"({result['maxrss_mib_min']:.2f}-{result['maxrss_mib_max']:.2f}) | "
-            f"{artifact_bytes} |"
+            f"{result['artifact_bytes']} |"
         )
     return 0
 

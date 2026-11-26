@@ -80,6 +80,11 @@ bool check(llvm::StringRef Input) {
   return true;
 }
 
+unsigned observeTuple(const VersionTuple &V) {
+  auto [Major, Minor, Subminor, Build, Subbuild] = V.asTuple();
+  return Major + Minor + Subminor + Build + Subbuild;
+}
+
 void benchmark() {
   std::vector<std::string> Inputs;
   for (unsigned I = 0; I < 1000; ++I)
@@ -91,13 +96,15 @@ void benchmark() {
   for (int Rep = 0; Rep < 200; ++Rep)
     for (const auto &S : Inputs) {
       VersionTuple V;
-      Sink += V.tryParse(S);
+      bool Parsed = V.tryParse(S);
+      Sink += Parsed ? 1 : observeTuple(V);
     }
   auto Start = std::chrono::steady_clock::now();
   for (int Rep = 0; Rep < 20000; ++Rep)
     for (const auto &S : Inputs) {
       VersionTuple V;
-      Sink += V.tryParse(S);
+      bool Parsed = V.tryParse(S);
+      Sink += Parsed ? 1 : observeTuple(V);
     }
   auto End = std::chrono::steady_clock::now();
   double CppNs =
@@ -107,19 +114,17 @@ void benchmark() {
   for (int Rep = 0; Rep < 200; ++Rep)
     for (const auto &S : Inputs) {
       RustFields F{};
-      Sink += llvm_versiontuple_try_parse(
+      bool Parsed = llvm_versiontuple_try_parse(
           reinterpret_cast<const uint8_t *>(S.data()), S.size(), &F);
-      VersionTuple V = fromRust(F);
-      Sink += V.getMajor();
+      Sink += Parsed ? 1 : observeTuple(fromRust(F));
     }
   Start = std::chrono::steady_clock::now();
   for (int Rep = 0; Rep < 20000; ++Rep)
     for (const auto &S : Inputs) {
       RustFields F{};
-      Sink += llvm_versiontuple_try_parse(
+      bool Parsed = llvm_versiontuple_try_parse(
           reinterpret_cast<const uint8_t *>(S.data()), S.size(), &F);
-      VersionTuple V = fromRust(F);
-      Sink += V.getMajor();
+      Sink += Parsed ? 1 : observeTuple(fromRust(F));
     }
   End = std::chrono::steady_clock::now();
   double RustNs =

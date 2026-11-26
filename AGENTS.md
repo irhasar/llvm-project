@@ -211,13 +211,16 @@ observed result is 300,086 inputs and 0 mismatches. `test/stable.cpp` checks
 component presence and that a failed parse leaves the destination unchanged.
 
 Measured here with `g++ -O3` and `-C opt-level=3` on five-component versions,
-including the C++ wrapper's tuple construction in the Rust row: C++ 13.58 ns,
-Rust public wrapper 14.04 ns. The raw C ABI parser is about 11.5 ns, but the
-public API must still build the `VersionTuple`; the median public result is
-around 0.97x across five runs. Treat this as parity, not a speedup: the port
-does not clear the runtime gate and stays opt-in. The parser uses wrapping
-`u32` arithmetic and masks minor/subminor to 31 bits so oversized components
-match the C++ bitfield truncation.
+including the C++ wrapper's tuple construction in the Rust row: C++ 15.57 ns
+(15.51-16.89), Rust public wrapper 14.67 ns (14.38-15.85). Both rows consume all
+five tuple fields, so the compiler cannot drop the Rust tuple's unused fields.
+The raw C ABI parser is about 11.5 ns, but the public API must still build the
+`VersionTuple`; the public speedup is 1.04x-1.08x with a 1.07x median across
+five runs. The median clears the runtime gate, but one run was just under it,
+so this is a narrow win. The port stays opt-in because the archive-size and
+compile-resource gates still fail. The parser uses wrapping `u32` arithmetic
+and masks minor/subminor to 31 bits so oversized components match the C++
+bitfield truncation.
 
 ## OptionStrCmp port
 
@@ -354,10 +357,13 @@ Every C++/Rust comparison must measure both sides, not only throughput:
   with `--no-checks --bench-backend=cpp|rust` before comparing resources.
 - `llvm/utils/rust-migration/bench_metrics.py` measures wall time, user/system
   CPU, peak RSS, and artifact bytes for either a compile command or a runtime
-  benchmark. On Linux it compiles `measure_exec.c` and forks a distinct child,
-  so `ru_maxrss` excludes Python's pre-exec pages; `--rss-backend=wait4` is the
-  fallback and reports the higher floor. Artifact paths resolve against
-  `--cwd`:
+  benchmark. On Linux it compiles and probes `measure_exec.c` in a temporary
+  directory, then forks a distinct child, so `ru_maxrss` excludes Python's
+  pre-exec pages. A `noexec` temp mount makes `auto` fall back to `wait4` with a
+  warning; `--rss-backend=launcher` fails with an actionable error. The
+  temporary directory is removed after every run. Artifact paths resolve
+  against `--cwd`, and output reports median plus min-max for wall, user, and
+  system time and peak RSS:
 
 ```sh
 python3 llvm/utils/rust-migration/bench_metrics.py \
