@@ -279,9 +279,30 @@ sum:
 
 `AddRustLibrary` strips debug sections from the staged copy with
 `strip --strip-debug`, reducing the 5,056,024-byte archive to 2,522,592 bytes.
-The linked stable test still grew from 1,564,480 to 1,576,248 bytes (+11,768
-bytes, +0.75%). That misses the final-linked-binary size gate; the port remains
-opt-in and is not claimed as a gate-clearing result.
+The linked stable test grew from 1,564,480 to 1,576,248 bytes (+11,768 bytes,
++0.75%). A representative consumer, `llvm-min-tblgen`, grew from 1,796,632 to
+1,805,496 bytes (+8,864 bytes, +0.49%) and does reference
+`llvm_nativeformatting_format_decimal` and `llvm_nativeformatting_format_hex`.
+The strict no-growth target still misses, so the port remains opt-in and is not
+claimed as a gate-clearing result; the delta is inside the 2% justification
+budget.
+
+Rejected size and profile variants, recorded so they are not retried blindly:
+
+* `-C opt-level=2`: stable test 1,573,024 bytes (+0.55%); 19.0 ns integer,
+  30.7 ns grouped, 11.2 ns hex. Still faster than C++ (27.8/62.5/12.9 ns) but
+  does not reach zero growth and gives up default throughput.
+* `-C opt-level=s`: same 1,573,024-byte result; grouped throughput falls to
+  about 32 ns, so `opt-level=2` is strictly better at that size.
+* `-C opt-level=1`: 1,594,504 bytes (+1.92%); integer is only at parity
+  (27.5 ns against 27.8 ns), so it misses the runtime gate.
+* `--gc-sections` on both test links: 67,848 against 63,432 bytes (+6.96%
+  relative). LLD ICF: 1,523,720 against 1,515,592 bytes (+0.54%). Neither
+  removes the delta.
+* Thin LTO: 1,599,488 bytes (+2.24%). No LTO: 2,442,744 bytes (+56%) and the
+  link additionally needs a `rust_eh_personality` shim.
+* A single-loop VersionTuple parser: 0.93x-0.97x against the C++ reference,
+  slower than the unrolled parser that ships.
 
 ## Measurement policy
 
