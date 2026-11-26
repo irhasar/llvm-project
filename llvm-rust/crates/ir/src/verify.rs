@@ -322,6 +322,13 @@ fn check_operand(
                 errors.push(Error::verify(format!(
                     "{what} type does not match the local value"
                 )));
+            } else {
+                let local = function.local(id);
+                if !local.is_param && local.def.is_none() {
+                    errors.push(Error::verify(format!(
+                        "{what} refers to a local value that is never defined"
+                    )));
+                }
             }
         }
         OperandKind::Const(id) => match module.constants.try_get(id) {

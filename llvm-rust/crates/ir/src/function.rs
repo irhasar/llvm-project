@@ -23,6 +23,7 @@ pub struct Local {
     pub name: Option<Symbol>,
     pub ty: TypeId,
     pub def: Option<InstId>,
+    pub is_param: bool,
 }
 
 /// A function parameter.
@@ -49,6 +50,7 @@ pub struct Function {
     pub visibility: Visibility,
     pub dso_local: bool,
     pub unnamed_addr: bool,
+    pub align: Option<u64>,
     pub is_declaration: bool,
     pub ret_attrs: Vec<Attribute>,
     pub attrs: Vec<Attribute>,
@@ -71,6 +73,7 @@ impl Function {
             visibility: Visibility::Default,
             dso_local: false,
             unnamed_addr: false,
+            align: None,
             is_declaration: true,
             ret_attrs: Vec::new(),
             attrs: Vec::new(),
@@ -96,6 +99,7 @@ impl Function {
             name,
             ty,
             def: None,
+            is_param: true,
         });
         self.params.push(Param { name, ty, attrs });
         id
@@ -108,8 +112,33 @@ impl Function {
             name,
             ty,
             def: Some(def),
+            is_param: false,
         });
         id
+    }
+
+    /// Reserves a local slot for a value that may be referenced before its
+    /// definition, as in a phi node.
+    pub fn forward_local(&mut self, name: Symbol, ty: TypeId) -> LocalId {
+        self.reserve_local(Some(name), ty)
+    }
+    /// Reserves a local slot without a name.
+    pub fn reserve_local(&mut self, name: Option<Symbol>, ty: TypeId) -> LocalId {
+        let id = u32::try_from(self.locals.len()).expect("too many locals");
+        self.locals.push(Local {
+            name,
+            ty,
+            def: None,
+            is_param: false,
+        });
+        id
+    }
+
+    /// Defines a previously reserved local slot.
+    pub fn define_local(&mut self, id: LocalId, ty: TypeId, def: InstId) {
+        let local = &mut self.locals[id as usize];
+        local.ty = ty;
+        local.def = Some(def);
     }
 
     /// Returns a local slot.

@@ -3,7 +3,8 @@
 //! The IR keeps attributes as their textual spelling.  This module translates
 //! the spellings we support to and from the PARAMATTR records used by LLVM.
 
-use llvm_rust_ir::{Attribute, Module};
+use llvm_rust_ir::names::{quote_bytes, unescape_bytes};
+use llvm_rust_ir::{Attribute, Module, TypeId, TypeTable};
 use llvm_rust_support::{Error, Result};
 
 use crate::bitstream::Record;
@@ -14,9 +15,20 @@ pub(crate) const PARAMATTR_GRP_CODE_ENTRY: u64 = 3;
 const FUNCTION_INDEX: u32 = u32::MAX;
 
 /// Expands `#N` references and returns the concrete attributes in `attrs`.
+///
+/// LLVM applies numbered groups after inline attributes, so a group wins over
+/// an earlier inline value for the same string key.
 pub(crate) fn expand_attributes(module: &Module, attrs: &[Attribute]) -> Result<Vec<Attribute>> {
     let mut expanded = Vec::new();
+    let mut groups = Vec::new();
     for attr in attrs {
+        if attr.0.trim_start().starts_with('#') {
+            groups.push(attr);
+        } else {
+            expanded.push(Attribute(attr.0.trim().to_string()));
+        }
+    }
+    for attr in groups {
         expand_attribute(module, attr, 0, &mut expanded)?;
     }
     Ok(expanded)
@@ -106,17 +118,26 @@ pub(crate) fn encode_attribute(attr: &Attribute) -> Result<Vec<u64>> {
     let text = attr.0.trim();
     if let Some((kind, value)) = parse_string_attribute(text)? {
         let mut operands = vec![if value.is_some() { 4 } else { 3 }];
-        operands.extend(kind.bytes().map(u64::from));
+        operands.extend(kind.into_iter().map(u64::from));
         operands.push(0);
         if let Some(value) = value {
-            operands.extend(value.bytes().map(u64::from));
+            operands.extend(value.into_iter().map(u64::from));
             operands.push(0);
         }
         return Ok(operands);
     }
 
-    if let Some(value) = text.strip_prefix("align ") {
-        return Ok(vec![1, 1, parse_u64(value, "align")?]);
+    if let Some(value) = text.strip_prefix("align ").or_else(|| {
+        text.strip_prefix("align(")
+            .and_then(|value| value.strip_suffix(')'))
+    }) {
+        return Ok(vec![1, 1, parse_u64(value.trim(), "align")?]);
+    }
+    if let Some(value) = text.strip_prefix("alignstack ").or_else(|| {
+        text.strip_prefix("alignstack(")
+            .and_then(|value| value.strip_suffix(')'))
+    }) {
+        return Ok(vec![1, 25, parse_u64(value.trim(), "alignstack")?]);
     }
     if let Some(value) = text
         .strip_prefix("dereferenceable(")
@@ -155,7 +176,7 @@ pub(crate) fn encode_attribute(attr: &Attribute) -> Result<Vec<u64>> {
     )))
 }
 
-fn parse_string_attribute(text: &str) -> Result<Option<(String, Option<String>)>> {
+fn parse_string_attribute(text: &str) -> Result<Option<(Vec<u8>, Option<Vec<u8>>)>> {
     if !text.starts_with('"') {
         return Ok(None);
     }
@@ -163,7 +184,8 @@ fn parse_string_attribute(text: &str) -> Result<Option<(String, Option<String>)>
         .find('"')
         .map(|offset| offset + 1)
         .ok_or_else(|| Error::bitcode("unterminated string attribute"))?;
-    let kind = text[1..end].to_string();
+    let kind = unescape_bytes(&text[1..end])
+        .ok_or_else(|| Error::bitcode("invalid string attribute key escape"))?;
     let rest = text[end + 1..].trim();
     if rest.is_empty() {
         return Ok(Some((kind, None)));
@@ -175,7 +197,9 @@ fn parse_string_attribute(text: &str) -> Result<Option<(String, Option<String>)>
     if !rest.starts_with('"') || !rest.ends_with('"') || rest.len() < 2 {
         return Err(Error::bitcode("malformed string attribute value"));
     }
-    Ok(Some((kind, Some(rest[1..rest.len() - 1].to_string()))))
+    let value = unescape_bytes(&rest[1..rest.len() - 1])
+        .ok_or_else(|| Error::bitcode("invalid string attribute value escape"))?;
+    Ok(Some((kind, Some(value))))
 }
 
 fn parse_u64(text: &str, name: &str) -> Result<u64> {
@@ -183,93 +207,109 @@ fn parse_u64(text: &str, name: &str) -> Result<u64> {
         .map_err(|_| Error::bitcode(format!("invalid `{name}` value `{text}`")))
 }
 
+const ENUM_ATTRIBUTES: &[(&str, u64)] = &[
+    ("alwaysinline", 2),
+    ("inlinehint", 4),
+    ("inreg", 5),
+    ("minsize", 6),
+    ("naked", 7),
+    ("nest", 8),
+    ("noalias", 9),
+    ("nobuiltin", 10),
+    ("nocapture", 11),
+    ("noduplicate", 12),
+    ("noimplicitfloat", 13),
+    ("noinline", 14),
+    ("nonlazybind", 15),
+    ("noredzone", 16),
+    ("noreturn", 17),
+    ("nounwind", 18),
+    ("optsize", 19),
+    ("readnone", 20),
+    ("readonly", 21),
+    ("returned", 22),
+    ("returns_twice", 23),
+    ("signext", 24),
+    ("ssp", 26),
+    ("sspreq", 27),
+    ("sspstrong", 28),
+    ("sanitize_address", 30),
+    ("sanitize_thread", 31),
+    ("sanitize_memory", 32),
+    ("uwtable", 33),
+    ("zeroext", 34),
+    ("builtin", 35),
+    ("cold", 36),
+    ("optnone", 37),
+    ("nonnull", 39),
+    ("jumptable", 40),
+    ("convergent", 43),
+    ("safestack", 44),
+    ("argmemonly", 45),
+    ("swiftself", 46),
+    ("swifterror", 47),
+    ("norecurse", 48),
+    ("inaccessiblememonly", 49),
+    ("inaccessiblemem_or_argmemonly", 50),
+    ("writeonly", 52),
+    ("speculatable", 53),
+    ("strictfp", 54),
+    ("sanitize_hwaddress", 55),
+    ("nocf_check", 56),
+    ("optforfuzzing", 57),
+    ("shadowcallstack", 58),
+    ("speculative_load_hardening", 59),
+    ("immarg", 60),
+    ("willreturn", 61),
+    ("nofree", 62),
+    ("nosync", 63),
+    ("sanitize_memtag", 64),
+    ("nomerge", 66),
+    ("null_pointer_is_valid", 67),
+    ("noundef", 68),
+    ("mustprogress", 70),
+    ("nocallback", 71),
+    ("hot", 72),
+    ("noprofile", 73),
+    ("swiftasync", 75),
+    ("nosanitize_coverage", 76),
+    ("disable_sanitizer_instrumentation", 78),
+    ("nosanitize_bounds", 79),
+    ("presplitcoroutine", 83),
+    ("fnretthunk_extern", 84),
+    ("skipprofile", 85),
+    ("optdebug", 88),
+    ("coro_only_destroy_when_complete", 90),
+    ("dead_on_unwind", 91),
+    ("sanitize_numerical_stability", 93),
+    ("hybrid_patchable", 95),
+    ("sanitize_realtime", 96),
+    ("sanitize_realtime_blocking", 97),
+    ("coro_elide_safe", 98),
+    ("no_ext", 99),
+    ("no_divergence_source", 100),
+    ("sanitize_type", 101),
+    ("dead_on_return", 103),
+    ("sanitize_alloc_token", 104),
+    ("no_create_undef_or_poison", 105),
+    ("denormal_fpenv", 106),
+    ("nooutline", 107),
+    ("flatten", 108),
+    ("noipa", 109),
+];
+
 fn enum_attribute_code(text: &str) -> Option<u64> {
-    Some(match text {
-        "alwaysinline" => 2,
-        "inreg" => 5,
-        "minsize" => 6,
-        "naked" => 7,
-        "nest" => 8,
-        "noalias" => 9,
-        "nobuiltin" => 10,
-        "nocapture" => 11,
-        "noduplicate" => 12,
-        "noinline" => 14,
-        "nonlazybind" => 15,
-        "noredzone" => 16,
-        "noreturn" => 17,
-        "nounwind" => 18,
-        "optsize" => 19,
-        "readnone" => 20,
-        "readonly" => 21,
-        "returned" => 22,
-        "returns_twice" => 23,
-        "signext" => 24,
-        "ssp" => 26,
-        "sspreq" => 27,
-        "sspstrong" => 28,
-        "sanitize_address" => 30,
-        "sanitize_thread" => 31,
-        "sanitize_memory" => 32,
-        "builtin" => 35,
-        "cold" => 36,
-        "optnone" => 37,
-        "nonnull" => 39,
-        "jumptable" => 40,
-        "convergent" => 43,
-        "safestack" => 44,
-        "swiftself" => 46,
-        "swifterror" => 47,
-        "norecurse" => 48,
-        "writeonly" => 52,
-        "speculatable" => 53,
-        "strictfp" => 54,
-        "sanitize_hwaddress" => 55,
-        "nocf_check" => 56,
-        "optforfuzzing" => 57,
-        "speculative_load_hardening" => 59,
-        "immarg" => 60,
-        "willreturn" => 61,
-        "nofree" => 62,
-        "nosync" => 63,
-        "sanitize_memtag" => 64,
-        "preallocated" => 65,
-        "nomerge" => 66,
-        "null_pointer_is_valid" => 67,
-        "noundef" => 68,
-        "mustprogress" => 70,
-        "nocallback" => 71,
-        "hot" => 72,
-        "noprofile" => 73,
-        "swiftasync" => 75,
-        "nosanitize_coverage" => 76,
-        "disable_sanitizer_instrumentation" => 78,
-        "nosanitize_bounds" => 79,
-        "presplitcoroutine" => 83,
-        "fnretthunk_extern" => 84,
-        "skipprofile" => 85,
-        "optimizefordebugging" => 88,
-        "dead_on_unwind" => 91,
-        "sanitize_numerical_stability" => 93,
-        "hybrid_patchable" => 95,
-        "sanitize_realtime" => 96,
-        "sanitize_realtime_blocking" => 97,
-        "coro_elide_safe" => 98,
-        "no_ext" => 99,
-        "no_divergence_source" => 100,
-        "sanitize_type" => 101,
-        "dead_on_return" => 103,
-        "sanitize_alloc_token" => 104,
-        "no_create_undef_or_poison" => 105,
-        "nooutline" => 107,
-        "flatten" => 108,
-        "noipa" => 109,
-        _ => return None,
-    })
+    ENUM_ATTRIBUTES
+        .iter()
+        .find_map(|(name, code)| (*name == text).then_some(*code))
 }
 
 /// Decodes one PARAMATTR group entry.
-pub(crate) fn decode_attribute_group(record: &Record) -> Result<(u64, u32, Vec<Attribute>)> {
+pub(crate) fn decode_attribute_group(
+    record: &Record,
+    types: &TypeTable,
+    type_ids: &[TypeId],
+) -> Result<(u64, u32, Vec<Attribute>)> {
     if record.operands.len() < 3 {
         return Err(Error::bitcode("invalid parameter attribute group"));
     }
@@ -309,15 +349,33 @@ pub(crate) fn decode_attribute_group(record: &Record) -> Result<(u64, u32, Vec<A
                 } else {
                     None
                 };
+                let kind = quote_bytes(&kind);
                 attrs.push(Attribute(match value {
-                    Some(value) => format!("\"{kind}\"=\"{value}\""),
-                    None => format!("\"{kind}\""),
+                    Some(value) => format!("{kind}={}", quote_bytes(&value)),
+                    None => kind,
                 }));
             }
             5 | 6 => {
-                return Err(Error::bitcode(
-                    "type attributes are not supported by the bitcode reader yet",
-                ));
+                let has_type = record.operands[cursor] == 6;
+                let code = *record
+                    .operands
+                    .get(cursor + 1)
+                    .ok_or_else(|| Error::bitcode("truncated type attribute"))?;
+                cursor += 2;
+                let name = type_attribute_name(code)?;
+                if has_type {
+                    let id = *record
+                        .operands
+                        .get(cursor)
+                        .ok_or_else(|| Error::bitcode("truncated type attribute"))?;
+                    cursor += 1;
+                    let ty = *type_ids.get(id as usize).ok_or_else(|| {
+                        Error::bitcode("type attribute references an unknown type")
+                    })?;
+                    attrs.push(Attribute(format!("{name}({})", types.display(ty))));
+                } else {
+                    attrs.push(Attribute(name.to_string()));
+                }
             }
             other => {
                 return Err(Error::bitcode(format!(
@@ -329,13 +387,12 @@ pub(crate) fn decode_attribute_group(record: &Record) -> Result<(u64, u32, Vec<A
     Ok((group_id, index, attrs))
 }
 
-fn read_c_string(operands: &[u64], cursor: &mut usize) -> Result<String> {
+fn read_c_string(operands: &[u64], cursor: &mut usize) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     while let Some(value) = operands.get(*cursor) {
         *cursor += 1;
         if *value == 0 {
-            return String::from_utf8(bytes)
-                .map_err(|_| Error::bitcode("attribute string is not UTF-8"));
+            return Ok(bytes);
         }
         bytes.push(*value as u8);
     }
@@ -343,97 +400,30 @@ fn read_c_string(operands: &[u64], cursor: &mut usize) -> Result<String> {
 }
 
 fn decode_enum_attribute(code: u64) -> Result<&'static str> {
-    Ok(match code {
-        2 => "alwaysinline",
-        5 => "inreg",
-        6 => "minsize",
-        7 => "naked",
-        8 => "nest",
-        9 => "noalias",
-        10 => "nobuiltin",
-        11 => "nocapture",
-        12 => "noduplicate",
-        14 => "noinline",
-        15 => "nonlazybind",
-        16 => "noredzone",
-        17 => "noreturn",
-        18 => "nounwind",
-        19 => "optsize",
-        20 => "readnone",
-        21 => "readonly",
-        22 => "returned",
-        23 => "returns_twice",
-        24 => "signext",
-        26 => "ssp",
-        27 => "sspreq",
-        28 => "sspstrong",
-        30 => "sanitize_address",
-        31 => "sanitize_thread",
-        32 => "sanitize_memory",
-        35 => "builtin",
-        36 => "cold",
-        37 => "optnone",
-        39 => "nonnull",
-        40 => "jumptable",
-        43 => "convergent",
-        44 => "safestack",
-        46 => "swiftself",
-        47 => "swifterror",
-        48 => "norecurse",
-        52 => "writeonly",
-        53 => "speculatable",
-        54 => "strictfp",
-        55 => "sanitize_hwaddress",
-        56 => "nocf_check",
-        57 => "optforfuzzing",
-        59 => "speculative_load_hardening",
-        60 => "immarg",
-        61 => "willreturn",
-        62 => "nofree",
-        63 => "nosync",
-        64 => "sanitize_memtag",
-        65 => "preallocated",
-        66 => "nomerge",
-        67 => "null_pointer_is_valid",
-        68 => "noundef",
-        70 => "mustprogress",
-        71 => "nocallback",
-        72 => "hot",
-        73 => "noprofile",
-        75 => "swiftasync",
-        76 => "nosanitize_coverage",
-        78 => "disable_sanitizer_instrumentation",
-        79 => "nosanitize_bounds",
-        83 => "presplitcoroutine",
-        84 => "fnretthunk_extern",
-        85 => "skipprofile",
-        88 => "optimizefordebugging",
-        91 => "dead_on_unwind",
-        93 => "sanitize_numerical_stability",
-        95 => "hybrid_patchable",
-        96 => "sanitize_realtime",
-        97 => "sanitize_realtime_blocking",
-        98 => "coro_elide_safe",
-        99 => "no_ext",
-        100 => "no_divergence_source",
-        101 => "sanitize_type",
-        103 => "dead_on_return",
-        104 => "sanitize_alloc_token",
-        105 => "no_create_undef_or_poison",
-        107 => "nooutline",
-        108 => "flatten",
-        109 => "noipa",
-        _ => {
-            return Err(Error::bitcode(format!(
-                "unsupported enum attribute code {code}"
-            )));
-        }
-    })
+    ENUM_ATTRIBUTES
+        .iter()
+        .find_map(|(name, value)| (*value == code).then_some(*name))
+        .ok_or_else(|| Error::bitcode(format!("unsupported enum attribute code {code}")))
+}
+
+fn type_attribute_name(code: u64) -> Result<&'static str> {
+    match code {
+        3 => Ok("byval"),
+        29 => Ok("sret"),
+        38 => Ok("inalloca"),
+        65 => Ok("preallocated"),
+        69 => Ok("byref"),
+        77 => Ok("elementtype"),
+        _ => Err(Error::bitcode(format!(
+            "unsupported type attribute code {code}"
+        ))),
+    }
 }
 
 fn decode_int_attribute(code: u64, value: u64) -> Result<Attribute> {
     Ok(Attribute(match code {
         1 => format!("align {value}"),
+        25 => format!("alignstack {value}"),
         41 => format!("dereferenceable({value})"),
         42 => format!("dereferenceable_or_null({value})"),
         86 => match value {

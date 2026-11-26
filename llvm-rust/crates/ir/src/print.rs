@@ -35,6 +35,10 @@ pub fn print_module(module: &Module) -> String {
             continue;
         }
         let name = module.types.name(id).unwrap_or("anonymous");
+        if module.types.is_opaque(id) {
+            let _ = writeln!(out, "%{} = type opaque", quote_name(name));
+            continue;
+        }
         let (fields, packed) = module.types.struct_body(id).unwrap_or((&[], false));
         let _ = writeln!(
             out,
@@ -102,8 +106,8 @@ fn print_global(module: &Module, global: &Global, out: &mut String) {
     if global.dso_local {
         out.push_str("dso_local ");
     }
-    if global.thread_local {
-        out.push_str("thread_local ");
+    if global.tls_model.is_thread_local() {
+        let _ = write!(out, "{} ", global.tls_model.as_str());
     }
     if global.unnamed_addr {
         out.push_str("unnamed_addr ");
@@ -179,6 +183,9 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
         out.push_str("...");
     }
     out.push(')');
+    if let Some(align) = function.align {
+        let _ = write!(out, " align {align}");
+    }
     for attr in &function.attrs {
         let _ = write!(out, " {attr}");
     }
@@ -322,11 +329,13 @@ fn write_instruction(
         InstKind::Call {
             tail,
             ret_ty,
+            fn_ty,
             callee,
             args,
+            arg_attrs,
             fastmath,
+            ret_attrs,
             attrs,
-            ..
         } => {
             out.push_str(tail.prefix());
             out.push_str("call");
@@ -344,14 +353,27 @@ fn write_instruction(
             for attr in calling_conv {
                 let _ = write!(out, "{attr} ");
             }
-            let _ = write!(out, "{} ", module.display_type(*ret_ty));
+            for attr in ret_attrs {
+                let _ = write!(out, "{attr} ");
+            }
+            let ty = match module.types.get(*fn_ty) {
+                Type::Function { varargs: true, .. } => *fn_ty,
+                _ => *ret_ty,
+            };
+            let _ = write!(out, "{} ", module.display_type(ty));
             write_callee(module, function, *callee, out);
             out.push('(');
             for (index, arg) in args.iter().enumerate() {
                 if index > 0 {
                     out.push_str(", ");
                 }
-                write_operand(module, function, *arg, out);
+                let _ = write!(out, "{} ", module.display_type(arg.ty));
+                if let Some(attrs) = arg_attrs.get(index) {
+                    for attr in attrs {
+                        let _ = write!(out, "{attr} ");
+                    }
+                }
+                write_value(module, function, *arg, out);
             }
             out.push(')');
             for attr in other {
@@ -565,6 +587,10 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
             out.push('c');
             out.push_str(&quote_bytes(bytes));
         }
+        ConstKind::MetadataString(text) => {
+            out.push('!');
+            out.push_str(&quote_bytes(text.as_bytes()));
+        }
         ConstKind::Global(id) => {
             let _ = write!(
                 out,
@@ -620,7 +646,8 @@ fn write_float(module: &Module, ty: TypeId, bits: u64, out: &mut String) {
             let _ = write!(out, "0xR{:04X}", bits & 0xffff);
         }
         FloatKind::Float => {
-            let _ = write!(out, "0x{:08X}", bits & 0xffff_ffff);
+            let value = f32::from_bits(bits as u32) as f64;
+            let _ = write!(out, "0x{:016X}", value.to_bits());
         }
         FloatKind::Double => {
             let _ = write!(out, "0x{:016X}", bits);

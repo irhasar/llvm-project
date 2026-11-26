@@ -21,11 +21,58 @@ pub struct Global {
     pub linkage: Linkage,
     pub visibility: Visibility,
     pub is_const: bool,
-    pub thread_local: bool,
+    pub tls_model: ThreadLocal,
     pub unnamed_addr: bool,
     pub dso_local: bool,
     pub align: Option<u64>,
     pub section: Option<String>,
+}
+
+/// Thread-local storage model for a global.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ThreadLocal {
+    #[default]
+    None,
+    GeneralDynamic,
+    LocalDynamic,
+    InitialExec,
+    LocalExec,
+}
+
+impl ThreadLocal {
+    pub const fn is_thread_local(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::GeneralDynamic => "thread_local",
+            Self::LocalDynamic => "thread_local(localdynamic)",
+            Self::InitialExec => "thread_local(initialexec)",
+            Self::LocalExec => "thread_local(localexec)",
+        }
+    }
+
+    pub const fn bitcode_code(self) -> u64 {
+        match self {
+            Self::None => 0,
+            Self::GeneralDynamic => 1,
+            Self::LocalDynamic => 2,
+            Self::InitialExec => 3,
+            Self::LocalExec => 4,
+        }
+    }
+
+    pub const fn from_bitcode(code: u64) -> Self {
+        match code {
+            0 => Self::None,
+            2 => Self::LocalDynamic,
+            3 => Self::InitialExec,
+            4 => Self::LocalExec,
+            _ => Self::GeneralDynamic,
+        }
+    }
 }
 
 /// One LLVM module.
@@ -86,7 +133,7 @@ impl Module {
             linkage: Linkage::External,
             visibility: Visibility::Default,
             is_const: false,
-            thread_local: false,
+            tls_model: ThreadLocal::None,
             unnamed_addr: false,
             dso_local: false,
             align: None,

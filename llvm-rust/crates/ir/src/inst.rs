@@ -443,7 +443,9 @@ pub enum InstKind {
         fn_ty: TypeId,
         callee: Operand,
         args: Vec<Operand>,
+        arg_attrs: Vec<Vec<Attribute>>,
         fastmath: FastMath,
+        ret_attrs: Vec<Attribute>,
         attrs: Vec<Attribute>,
     },
     Phi {

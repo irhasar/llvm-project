@@ -31,6 +31,7 @@ const IDENTIFICATION_EPOCH: u32 = 2;
 const MODULE_VERSION: u32 = 1;
 const MODULE_TRIPLE: u32 = 2;
 const MODULE_DATALAYOUT: u32 = 3;
+const MODULE_SECTIONNAME: u32 = 5;
 const MODULE_GLOBALVAR: u32 = 7;
 const MODULE_FUNCTION: u32 = 8;
 const MODULE_SOURCE_FILENAME: u32 = 16;
@@ -61,6 +62,7 @@ const CST_SETTYPE: u32 = 1;
 const CST_NULL: u32 = 2;
 const CST_UNDEF: u32 = 3;
 const CST_INTEGER: u32 = 4;
+const CST_WIDE_INTEGER: u32 = 5;
 const CST_FLOAT: u32 = 6;
 const CST_AGGREGATE: u32 = 7;
 const CST_STRING: u32 = 8;
@@ -127,6 +129,8 @@ struct Writer<'a> {
     strtab: Vec<u8>,
     str_offsets: HashMap<String, u32>,
     i32_one: Option<ConstId>,
+    sections: Vec<String>,
+    section_ids: HashMap<String, u32>,
     function_attr_lists: HashMap<FuncId, u32>,
     call_attr_lists: HashMap<(FuncId, InstId), u32>,
     paramattr_groups: Vec<(u32, Vec<Attribute>)>,
@@ -182,6 +186,8 @@ impl<'a> Writer<'a> {
             strtab: Vec::new(),
             str_offsets: HashMap::new(),
             i32_one,
+            sections: Vec::new(),
+            section_ids: HashMap::new(),
             function_attr_lists: HashMap::new(),
             call_attr_lists: HashMap::new(),
             paramattr_groups: Vec::new(),
@@ -193,7 +199,22 @@ impl<'a> Writer<'a> {
         for (_, function) in module.functions.iter() {
             writer.add_string(module.name(function.name));
         }
+        for (_, global) in module.globals.iter() {
+            if let Some(section) = &global.section {
+                writer.section_id(section);
+            }
+        }
         writer
+    }
+
+    fn section_id(&mut self, section: &str) -> u32 {
+        if let Some(id) = self.section_ids.get(section) {
+            return *id;
+        }
+        let id = self.sections.len() as u32 + 1;
+        self.sections.push(section.to_string());
+        self.section_ids.insert(section.to_string(), id);
+        id
     }
 
     fn add_string(&mut self, text: &str) -> u32 {
@@ -225,6 +246,7 @@ impl<'a> Writer<'a> {
             let operands: Vec<u64> = filename.bytes().map(|b| b as u64).collect();
             self.stream.emit_record(MODULE_SOURCE_FILENAME, &operands);
         }
+        self.write_sections();
         self.write_globals()?;
         self.write_functions()?;
         self.write_constants()?;
@@ -240,6 +262,13 @@ impl<'a> Writer<'a> {
         self.stream.emit_record(IDENTIFICATION_STRING, &producer);
         self.stream.emit_record(IDENTIFICATION_EPOCH, &[0]);
         self.stream.exit_block();
+    }
+
+    fn write_sections(&mut self) {
+        for section in &self.sections {
+            let operands: Vec<u64> = section.bytes().map(|b| b as u64).collect();
+            self.stream.emit_record(MODULE_SECTIONNAME, &operands);
+        }
     }
 
     fn write_types(&mut self) -> Result<()> {
@@ -265,7 +294,7 @@ impl<'a> Writer<'a> {
             Type::Label => self.stream.emit_record(TYPE_LABEL, &[]),
             Type::Token => self.stream.emit_record(TYPE_TOKEN, &[]),
             Type::Metadata => self.stream.emit_record(TYPE_METADATA, &[]),
-            Type::Opaque => self.stream.emit_record(TYPE_OPAQUE, &[]),
+            Type::Opaque => self.stream.emit_record(TYPE_OPAQUE, &[0]),
             Type::Int(bits) => self.stream.emit_record(TYPE_INTEGER, &[*bits as u64]),
             Type::Float(kind) => {
                 let code = match kind {
@@ -304,8 +333,10 @@ impl<'a> Writer<'a> {
                 name,
             } => {
                 if let Some(name) = name {
-                    if !self.module.types.is_defined(id) {
-                        self.stream.emit_record(TYPE_OPAQUE, &[]);
+                    if self.module.types.is_opaque(id) || !self.module.types.is_defined(id) {
+                        let name_operands: Vec<u64> = name.bytes().map(|b| b as u64).collect();
+                        self.stream.emit_record(TYPE_STRUCT_NAME, &name_operands);
+                        self.stream.emit_record(TYPE_OPAQUE, &[0]);
                         return Ok(());
                     }
                     let name_operands: Vec<u64> = name.bytes().map(|b| b as u64).collect();
@@ -367,15 +398,34 @@ impl<'a> Writer<'a> {
             }
 
             for (inst_id, inst) in function.insts.iter() {
-                let InstKind::Call { attrs, .. } = &inst.kind else {
+                let InstKind::Call {
+                    ret_attrs,
+                    attrs,
+                    arg_attrs,
+                    ..
+                } = &inst.kind
+                else {
                     continue;
                 };
-                let attrs = expand_attributes(self.module, attrs)?;
-                if attrs.is_empty() {
-                    continue;
+                let mut entries = Vec::new();
+                let ret_attrs = expand_attributes(self.module, ret_attrs)?;
+                if !ret_attrs.is_empty() {
+                    entries.push((0, ret_attrs));
                 }
-                let list = self.add_attr_list(vec![(function_attr_index(), attrs)]);
-                self.call_attr_lists.insert((*function_id, inst_id), list);
+                for (index, attrs) in arg_attrs.iter().enumerate() {
+                    let attrs = expand_attributes(self.module, attrs)?;
+                    if !attrs.is_empty() {
+                        entries.push((index as u32 + 1, attrs));
+                    }
+                }
+                let attrs = expand_attributes(self.module, attrs)?;
+                if !attrs.is_empty() {
+                    entries.push((function_attr_index(), attrs));
+                }
+                let list = self.add_attr_list(entries);
+                if list != 0 {
+                    self.call_attr_lists.insert((*function_id, inst_id), list);
+                }
             }
         }
 
@@ -387,7 +437,7 @@ impl<'a> Writer<'a> {
         for (index, (attr_index, attrs)) in self.paramattr_groups.iter().enumerate() {
             let mut operands = vec![(index + 1) as u64, *attr_index as u64];
             for attr in attrs {
-                operands.extend(encode_attribute(attr)?);
+                operands.extend(self.encode_attribute(attr)?);
             }
             self.stream
                 .emit_record(PARAMATTR_GRP_CODE_ENTRY as u32, &operands);
@@ -400,6 +450,37 @@ impl<'a> Writer<'a> {
         }
         self.stream.exit_block();
         Ok(())
+    }
+
+    fn encode_attribute(&self, attr: &Attribute) -> Result<Vec<u64>> {
+        if let Some((name, ty_text)) = parse_type_attribute(&attr.0) {
+            let code = type_attribute_code(name)?;
+            return match ty_text {
+                Some(text) => Ok(vec![6, code, self.resolve_type_text(text)? as u64]),
+                None => Ok(vec![5, code]),
+            };
+        }
+        encode_attribute(attr)
+    }
+
+    fn resolve_type_text(&self, text: &str) -> Result<u32> {
+        let needle: String = text.chars().filter(|ch| !ch.is_whitespace()).collect();
+        for (id, _) in self.module.types.iter() {
+            let candidate: String = self
+                .module
+                .types
+                .display(id)
+                .to_string()
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect();
+            if candidate == needle {
+                return self.type_index(id);
+            }
+        }
+        Err(Error::bitcode(format!(
+            "type attribute references unknown type `{text}`"
+        )))
     }
 
     fn add_attr_list(&mut self, entries: Vec<(u32, Vec<Attribute>)>) -> u32 {
@@ -442,9 +523,13 @@ impl<'a> Writer<'a> {
                 init,
                 linkage_code(global.linkage) as u64,
                 encode_align(global.align) as u64,
-                0,
+                global
+                    .section
+                    .as_deref()
+                    .map(|section| self.section_ids[section] as u64)
+                    .unwrap_or(0),
                 visibility_code(global.visibility) as u64,
-                global.thread_local as u64,
+                global.tls_model.bitcode_code(),
                 global.unnamed_addr as u64,
                 0,
                 0,
@@ -485,7 +570,7 @@ impl<'a> Writer<'a> {
                 function.is_declaration as u64,
                 linkage_code(function.linkage) as u64,
                 attr_list,
-                0,
+                encode_align(function.align) as u64,
                 0,
                 visibility_code(function.visibility) as u64,
                 0,
@@ -528,13 +613,33 @@ impl<'a> Writer<'a> {
                 ConstKind::Poison => self.stream.emit_record(CST_POISON, &[]),
                 ConstKind::Int(value) => {
                     let bits = self.module.types.get(constant.ty).int_bits().unwrap_or(64);
-                    let signed = sign_extend(value, bits);
-                    self.stream
-                        .emit_record(CST_INTEGER, &[encode_signed(signed)]);
+                    if bits > 128 {
+                        return Err(Error::bitcode(format!(
+                            "integer constants wider than 128 bits are not supported (i{bits})"
+                        )));
+                    }
+                    if bits > 64 {
+                        let low = value as u64;
+                        let high = (value >> 64) as u64;
+                        let mut operands = vec![encode_signed(low as i64)];
+                        if high != 0 {
+                            operands.push(encode_signed(high as i64));
+                        }
+                        self.stream.emit_record(CST_WIDE_INTEGER, &operands);
+                    } else {
+                        let signed = sign_extend(value, bits);
+                        self.stream
+                            .emit_record(CST_INTEGER, &[encode_signed(signed)]);
+                    }
                 }
                 ConstKind::Float(bits) => {
                     let words = self.float_words(constant.ty, bits)?;
                     self.stream.emit_record(CST_FLOAT, &words);
+                }
+                ConstKind::MetadataString(_) => {
+                    return Err(Error::bitcode(
+                        "metadata strings are not supported in bitcode yet",
+                    ));
                 }
                 ConstKind::String(bytes) => {
                     let operands: Vec<u64> = bytes.iter().map(|b| *b as u64).collect();
@@ -618,6 +723,9 @@ impl<'a> Writer<'a> {
         self.stream.enter_subblock(VALUE_SYMTAB_BLOCK, 4);
         for (local_id, local) in function.locals.iter().enumerate() {
             if let Some(name) = local.name {
+                if is_unnamed_slot(self.module.name(name)) {
+                    continue;
+                }
                 let mut operands = vec![(self.base_local + local_id as u32) as u64];
                 operands.extend(self.module.name(name).bytes().map(|b| b as u64));
                 self.stream.emit_record(VST_ENTRY, &operands);
@@ -625,6 +733,9 @@ impl<'a> Writer<'a> {
         }
         for (index, (_, block)) in function.blocks_in_order().enumerate() {
             if let Some(name) = block.name {
+                if is_unnamed_slot(self.module.name(name)) {
+                    continue;
+                }
                 let mut operands = vec![index as u64];
                 operands.extend(self.module.name(name).bytes().map(|b| b as u64));
                 self.stream.emit_record(VST_BBENTRY, &operands);
@@ -770,6 +881,7 @@ impl<'a> Writer<'a> {
                 fn_ty,
                 callee,
                 args,
+                arg_attrs: _,
                 fastmath,
                 ..
             } => {
@@ -967,6 +1079,44 @@ impl<'a> Writer<'a> {
     }
 }
 
+fn is_unnamed_slot(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn parse_type_attribute(text: &str) -> Option<(&str, Option<&str>)> {
+    let text = text.trim();
+    for name in [
+        "byval",
+        "sret",
+        "inalloca",
+        "preallocated",
+        "byref",
+        "elementtype",
+    ] {
+        if text == name {
+            return Some((name, None));
+        }
+        if let Some(rest) = text.strip_prefix(name) {
+            if let Some(inner) = rest.strip_prefix('(').and_then(|v| v.strip_suffix(')')) {
+                return Some((name, Some(inner)));
+            }
+        }
+    }
+    None
+}
+
+fn type_attribute_code(name: &str) -> Result<u64> {
+    Ok(match name {
+        "byval" => 3,
+        "sret" => 29,
+        "inalloca" => 38,
+        "preallocated" => 65,
+        "byref" => 69,
+        "elementtype" => 77,
+        _ => return Err(Error::bitcode(format!("unknown type attribute `{name}`"))),
+    })
+}
+
 fn result_type(function: &Function, inst: &llvm_rust_ir::Instruction) -> Result<TypeId> {
     inst.result
         .map(|local| function.local_type(local))
@@ -1107,8 +1257,11 @@ fn binary_flags(op: BinOp, flags: IntFlags, fastmath: FastMath) -> u64 {
         return fmf_bits(fastmath);
     }
     match op {
-        BinOp::UDiv | BinOp::SDiv | BinOp::URem | BinOp::SRem => flags.exact as u64,
-        _ => flags.nuw as u64 | ((flags.nsw as u64) << 1),
+        BinOp::UDiv | BinOp::SDiv | BinOp::LShr | BinOp::AShr => flags.exact as u64,
+        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Shl => {
+            flags.nuw as u64 | ((flags.nsw as u64) << 1)
+        }
+        _ => 0,
     }
 }
 

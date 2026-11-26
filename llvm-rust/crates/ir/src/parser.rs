@@ -16,7 +16,7 @@ use crate::inst::{
     IntFlags, TailKind,
 };
 use crate::linkage::{Linkage, Visibility};
-use crate::module::{Global, Module};
+use crate::module::{Global, Module, ThreadLocal};
 use crate::names::quote_bytes;
 use crate::ty::{FloatKind, INVALID_TYPE, Type, TypeId};
 use crate::value::{Operand, OperandKind};
@@ -321,27 +321,57 @@ fn parse_int_literal(text: &str) -> Option<u128> {
 
 fn parse_float_bits(text: &str, kind: FloatKind) -> Option<u64> {
     if let Some(rest) = text.strip_prefix("0x") {
-        let rest = rest
-            .strip_prefix('K')
-            .or_else(|| rest.strip_prefix('L'))
-            .or_else(|| rest.strip_prefix('M'))
-            .or_else(|| rest.strip_prefix('H'))
-            .or_else(|| rest.strip_prefix('R'))
-            .unwrap_or(rest);
-        let bits = u64::from_str_radix(rest, 16).ok()?;
-        return Some(match kind {
-            FloatKind::Half | FloatKind::BFloat => bits & 0xffff,
-            FloatKind::Float => bits & 0xffff_ffff,
-            _ => bits,
+        let (tag, digits) = match rest.as_bytes().first() {
+            Some(b'H') | Some(b'R') | Some(b'K') | Some(b'L') | Some(b'M') => {
+                (rest.as_bytes()[0] as char, &rest[1..])
+            }
+            _ => ('\0', rest),
+        };
+        let bits = u64::from_str_radix(digits, 16).ok()?;
+        return Some(match tag {
+            'H' => bits & 0xffff,
+            'R' => bits & 0xffff,
+            'K' => bits,
+            'L' => bits,
+            'M' => bits,
+            _ => float_bits_from_f64(f64::from_bits(bits), kind),
         });
     }
     let value = text.parse::<f64>().ok()?;
-    Some(match kind {
-        FloatKind::Half | FloatKind::BFloat => (f64_to_half(value) as u64) & 0xffff,
+    Some(float_bits_from_f64(value, kind))
+}
+
+fn float_bits_from_f64(value: f64, kind: FloatKind) -> u64 {
+    match kind {
+        FloatKind::Half => (f64_to_half(value) as u64) & 0xffff,
+        FloatKind::BFloat => (f64_to_bfloat(value) as u64) & 0xffff,
         FloatKind::Float => (value as f32).to_bits() as u64,
         FloatKind::Double => value.to_bits(),
         _ => value.to_bits(),
-    })
+    }
+}
+
+fn f64_to_bfloat(value: f64) -> u16 {
+    let bits = (value as f32).to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x7f_ffff;
+    if exp == 0xff {
+        return sign | 0x7f80 | if mantissa != 0 { 0x40 } else { 0 };
+    }
+    let unbiased = exp - 127 + 127;
+    if unbiased >= 0xff {
+        return sign | 0x7f80;
+    }
+    if unbiased <= 0 {
+        if unbiased < -7 {
+            return sign;
+        }
+        let mantissa = mantissa | 0x80_0000;
+        let shift = (7 - unbiased) as u32;
+        return sign | (mantissa >> shift) as u16;
+    }
+    sign | ((unbiased as u16) << 7) | (mantissa >> 16) as u16
 }
 
 fn f64_to_half(value: f64) -> u16 {
@@ -398,6 +428,7 @@ fn is_attr_keyword(text: &str) -> bool {
             | "inaccessiblemem_or_argmemonly"
             | "inlinehint"
             | "jumptable"
+            | "memory"
             | "minsize"
             | "mustprogress"
             | "naked"
@@ -464,7 +495,6 @@ fn is_attr_keyword(text: &str) -> bool {
             | "initializes"
             | "preallocated"
             | "inalloca"
-            | "memory"
             | "sanitize_address"
             | "sanitize_memory"
             | "sanitize_thread"
@@ -486,8 +516,7 @@ struct Parser<'a> {
     pos: usize,
     module: Module,
     local_names: HashMap<Symbol, LocalId>,
-    next_local: u32,
-    next_block: u32,
+    next_value: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -498,8 +527,7 @@ impl<'a> Parser<'a> {
             pos: 0,
             module: Module::new(),
             local_names: HashMap::new(),
-            next_local: 0,
-            next_block: 0,
+            next_value: 0,
         }
     }
 
@@ -575,6 +603,12 @@ impl<'a> Parser<'a> {
                     self.module.named_types.push(id);
                 }
             }
+            Type::Opaque => {
+                let id = self.module.types.define_named_opaque(&name);
+                if !self.module.named_types.contains(&id) {
+                    self.module.named_types.push(id);
+                }
+            }
             Type::Struct { name: Some(_), .. } => {
                 return Err(self.error("a named type cannot be defined as another named type"));
             }
@@ -617,10 +651,23 @@ impl<'a> Parser<'a> {
                     text.push('=');
                 }
                 other => {
-                    if !text.is_empty() && !text.ends_with('=') {
+                    let piece = token_text(&other);
+                    let no_space_before = matches!(
+                        other,
+                        TokenKind::Punct(')') | TokenKind::Punct(',') | TokenKind::Punct('=')
+                    );
+                    let no_space_after_previous = text
+                        .chars()
+                        .last()
+                        .is_some_and(|last| matches!(last, '(' | '=' | ','));
+                    if !text.is_empty()
+                        && !no_space_before
+                        && !no_space_after_previous
+                        && !matches!(other, TokenKind::Punct('('))
+                    {
                         text.push(' ');
                     }
-                    text.push_str(&token_text(&other));
+                    text.push_str(&piece);
                 }
             }
         }
@@ -635,7 +682,7 @@ impl<'a> Parser<'a> {
         let mut linkage = Linkage::External;
         let mut visibility = Visibility::Default;
         let mut dso_local = false;
-        let mut thread_local = false;
+        let mut tls_model = ThreadLocal::None;
         let mut unnamed_addr = false;
         let mut is_const = false;
         let mut saw_kind = false;
@@ -660,10 +707,20 @@ impl<'a> Parser<'a> {
                     self.advance();
                 }
                 "thread_local" => {
-                    thread_local = true;
                     self.advance();
+                    tls_model = ThreadLocal::GeneralDynamic;
                     if self.eat_punct('(') {
-                        self.skip_balanced(')')?;
+                        let model = self.expect_ident()?;
+                        tls_model = match model.as_str() {
+                            "generaldynamic" => ThreadLocal::GeneralDynamic,
+                            "localdynamic" => ThreadLocal::LocalDynamic,
+                            "initialexec" => ThreadLocal::InitialExec,
+                            "localexec" => ThreadLocal::LocalExec,
+                            other => {
+                                return Err(self.error(format!("unsupported TLS model `{other}`")));
+                            }
+                        };
+                        self.expect_punct(')')?;
                     }
                 }
                 "unnamed_addr" | "local_unnamed_addr" => {
@@ -735,7 +792,7 @@ impl<'a> Parser<'a> {
             linkage,
             visibility,
             is_const,
-            thread_local,
+            tls_model,
             unnamed_addr,
             dso_local,
             align,
@@ -749,8 +806,7 @@ impl<'a> Parser<'a> {
     fn parse_function(&mut self, is_declaration: bool) -> Result<()> {
         self.advance();
         self.local_names.clear();
-        self.next_local = 0;
-        self.next_block = 0;
+        self.next_value = 0;
         let mut linkage = Linkage::External;
         let mut visibility = Visibility::Default;
         let mut dso_local = false;
@@ -837,6 +893,14 @@ impl<'a> Parser<'a> {
         self.expect_punct(')')?;
         function.ty = self.module.types.function(ret_ty, param_types, varargs);
         self.parse_trailing_attrs(&mut function.attrs, !is_declaration)?;
+        if let Some(index) = function
+            .attrs
+            .iter()
+            .position(|attr| attr.0.starts_with("align "))
+        {
+            let attr = function.attrs.remove(index);
+            function.align = attr.0["align ".len()..].trim().parse().ok();
+        }
         if is_declaration {
             if self.at_eol() {
                 self.advance();
@@ -949,13 +1013,16 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Str(key) => {
                 self.advance();
-                self.expect_punct('=')?;
-                let value = self.expect_string()?;
-                Ok(Attribute(format!(
-                    "{}={}",
-                    quote_bytes(&key),
-                    quote_bytes(value.as_bytes())
-                )))
+                let key = quote_bytes(&key);
+                if self.eat_punct('=') {
+                    let value = self.expect_string()?;
+                    Ok(Attribute(format!(
+                        "{key}={}",
+                        quote_bytes(value.as_bytes())
+                    )))
+                } else {
+                    Ok(Attribute(key))
+                }
             }
             _ => Err(self.error("expected an attribute")),
         }
@@ -1014,13 +1081,13 @@ impl<'a> Parser<'a> {
         match name {
             Some(name) => {
                 if let Ok(value) = name.parse::<u32>() {
-                    self.next_local = self.next_local.max(value.saturating_add(1));
+                    self.next_value = self.next_value.max(value.saturating_add(1));
                 }
                 Ok(self.module.intern(&name))
             }
             None => {
-                let value = self.next_local;
-                self.next_local += 1;
+                let value = self.next_value;
+                self.next_value += 1;
                 Ok(self.module.intern(&value.to_string()))
             }
         }
@@ -1067,12 +1134,31 @@ impl<'a> Parser<'a> {
             };
             let (kind, result_ty) = self.parse_instruction(function)?;
             let inst_id = function.add_inst(block, Instruction { result: None, kind });
-            if let Some(name) = result_name {
-                let ty =
-                    result_ty.ok_or_else(|| self.error("instruction does not produce a value"))?;
-                let symbol = self.local_symbol(Some(name))?;
-                let local = function.add_local(Some(symbol), ty, inst_id);
-                self.local_names.insert(symbol, local);
+            if result_name.is_some() && result_ty.is_none() {
+                return Err(self.error("instruction does not produce a value"));
+            }
+            if let Some(ty) = result_ty {
+                let symbol = self.local_symbol(result_name)?;
+                let local = match self.local_names.get(&symbol).copied() {
+                    Some(existing)
+                        if !function.local(existing).is_param
+                            && function.local(existing).def.is_none() =>
+                    {
+                        function.define_local(existing, ty, inst_id);
+                        existing
+                    }
+                    Some(_) => {
+                        return Err(self.error(format!(
+                            "redefinition of local value %{}",
+                            self.module.name(symbol)
+                        )));
+                    }
+                    None => {
+                        let local = function.add_local(Some(symbol), ty, inst_id);
+                        self.local_names.insert(symbol, local);
+                        local
+                    }
+                };
                 function.insts[inst_id].result = Some(local);
             }
             if self.at_eol() {
@@ -1093,14 +1179,14 @@ impl<'a> Parser<'a> {
         self.advance();
         self.expect_punct(':')?;
         if let Ok(value) = name.parse::<u32>() {
-            self.next_block = self.next_block.max(value.saturating_add(1));
+            self.next_value = self.next_value.max(value.saturating_add(1));
         }
         Ok(self.module.intern(&name))
     }
 
     fn auto_block_name(&mut self) -> Symbol {
-        let value = self.next_block;
-        self.next_block += 1;
+        let value = self.next_value;
+        self.next_value += 1;
         self.module.intern(&value.to_string())
     }
 
@@ -1247,6 +1333,11 @@ impl<'a> Parser<'a> {
                     self.module.types.get(ty).int_bits().ok_or_else(|| {
                         self.error("integer constant used with a non-integer type")
                     })?;
+                if bits > 128 {
+                    return Err(self.error(format!(
+                        "integer constants wider than 128 bits are not supported (found i{bits})"
+                    )));
+                }
                 let value = mask_int(value, bits);
                 Ok(self.module.const_int(ty, value))
             }
@@ -1265,6 +1356,12 @@ impl<'a> Parser<'a> {
                 Ok(self
                     .module
                     .add_constant(Constant::new(ty, ConstKind::String(bytes))))
+            }
+            TokenKind::Meta(name) => {
+                self.advance();
+                Ok(self
+                    .module
+                    .add_constant(Constant::new(ty, ConstKind::MetadataString(name))))
             }
             TokenKind::Global(name) => {
                 self.advance();
@@ -1372,7 +1469,7 @@ impl<'a> Parser<'a> {
         Ok(self.module.const_aggregate(ty, elems))
     }
 
-    fn parse_value(&mut self, function: &Function, ty: TypeId) -> Result<Operand> {
+    fn parse_value(&mut self, function: &mut Function, ty: TypeId) -> Result<Operand> {
         match self.peek_kind().clone() {
             TokenKind::Local(name) => {
                 self.advance();
@@ -1400,6 +1497,25 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_phi_value(&mut self, function: &mut Function, ty: TypeId) -> Result<Operand> {
+        match self.peek_kind().clone() {
+            TokenKind::Local(name) => {
+                self.advance();
+                let symbol = self.module.intern(&name);
+                let local = match self.local_names.get(&symbol).copied() {
+                    Some(local) => local,
+                    None => {
+                        let local = function.forward_local(symbol, ty);
+                        self.local_names.insert(symbol, local);
+                        local
+                    }
+                };
+                Ok(Operand::local(function.local_type(local), local))
+            }
+            _ => self.parse_value(function, ty),
+        }
+    }
+
     fn parse_phi_block(&mut self, function: &mut Function) -> Result<BlockId> {
         let name = match self.peek_kind().clone() {
             TokenKind::Local(name) => name,
@@ -1423,7 +1539,7 @@ impl<'a> Parser<'a> {
         Ok(function.block_or_insert(symbol))
     }
 
-    fn parse_callee(&mut self, function: &Function) -> Result<Operand> {
+    fn parse_callee(&mut self, function: &mut Function) -> Result<Operand> {
         match self.peek_kind().clone() {
             TokenKind::Global(name) => {
                 self.advance();
@@ -1440,10 +1556,14 @@ impl<'a> Parser<'a> {
             TokenKind::Local(name) => {
                 self.advance();
                 let symbol = self.module.intern(&name);
-                let local = *self
-                    .local_names
-                    .get(&symbol)
-                    .ok_or_else(|| self.error(format!("use of undefined local value %{name}")))?;
+                let local = match self.local_names.get(&symbol).copied() {
+                    Some(local) => local,
+                    None => {
+                        let local = function.forward_local(symbol, INVALID_TYPE);
+                        self.local_names.insert(symbol, local);
+                        local
+                    }
+                };
                 Ok(Operand::local(function.local_type(local), local))
             }
             _ => {
@@ -1643,7 +1763,7 @@ impl<'a> Parser<'a> {
                 let mut incoming = Vec::new();
                 loop {
                     self.expect_punct('[')?;
-                    let value = self.parse_value(function, ty)?;
+                    let value = self.parse_phi_value(function, ty)?;
                     self.expect_punct(',')?;
                     let block = self.parse_phi_block(function)?;
                     self.expect_punct(']')?;
@@ -1715,13 +1835,16 @@ impl<'a> Parser<'a> {
                 let default = self.parse_block_ref(function)?;
                 self.expect_punct('[')?;
                 let mut cases = Vec::new();
+                self.skip_eol();
                 if !self.eat_punct(']') {
                     loop {
+                        self.skip_eol();
                         let case_ty = self.parse_type()?;
                         let case_value = self.parse_constant(case_ty)?;
                         self.expect_punct(',')?;
                         let block = self.parse_block_ref(function)?;
                         cases.push((case_value, block));
+                        self.skip_eol();
                         if self.at_punct(']') {
                             break;
                         }
@@ -1777,6 +1900,16 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
         }
+        let mut ret_attrs = Vec::new();
+        loop {
+            match self.peek_kind().clone() {
+                TokenKind::Ident(text) if is_attr_keyword(&text) => {
+                    ret_attrs.push(self.parse_attribute()?);
+                }
+                TokenKind::Str(_) => ret_attrs.push(self.parse_attribute_token()?),
+                _ => break,
+            }
+        }
         let ty = self.parse_type()?;
         let (ret_ty, _explicit_params) = match self.module.types.get(ty) {
             Type::Function { ret, params, .. } => (*ret, Some(params.clone())),
@@ -1785,9 +1918,11 @@ impl<'a> Parser<'a> {
         let callee = self.parse_callee(function)?;
         self.expect_punct('(')?;
         let mut args = Vec::new();
+        let mut arg_attrs = Vec::new();
         if !self.at_punct(')') {
             loop {
                 let arg_ty = self.parse_type()?;
+                arg_attrs.push(self.parse_param_attrs()?);
                 args.push(self.parse_value(function, arg_ty)?);
                 if !self.eat_punct(',') {
                     break;
@@ -1821,7 +1956,9 @@ impl<'a> Parser<'a> {
                 fn_ty,
                 callee,
                 args,
+                arg_attrs,
                 fastmath,
+                ret_attrs,
                 attrs,
             },
             result_ty,
@@ -2033,22 +2170,6 @@ impl<'a> Parser<'a> {
         while !self.at_eol() && !self.at_eof() {
             self.advance();
         }
-    }
-
-    fn skip_balanced(&mut self, close: char) -> Result<()> {
-        let mut depth = 1usize;
-        while depth > 0 {
-            if self.at_eof() {
-                return Err(self.error("unterminated parenthesized group"));
-            }
-            let token = self.take();
-            match token.kind {
-                TokenKind::Punct('(') => depth += 1,
-                TokenKind::Punct(found) if found == close => depth -= 1,
-                _ => {}
-            }
-        }
-        Ok(())
     }
 
     fn error(&self, message: impl Into<String>) -> Error {

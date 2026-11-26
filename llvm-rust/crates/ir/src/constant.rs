@@ -31,6 +31,8 @@ pub enum ConstKind {
     Aggregate(Vec<ConstId>),
     /// `c"..."` byte string.
     String(Vec<u8>),
+    /// Metadata string, spelled `!"..."`.
+    MetadataString(String),
     Global(GlobalId),
     Function(FuncId),
 }

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use llvm_rust_ir::{
     Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath, FcmpPred, FuncId,
     Function, Global, GlobalId, IcmpPred, InstKind, IntFlags, Linkage, Module, Operand,
-    OperandKind, TailKind, Type, TypeId, Visibility,
+    OperandKind, TailKind, ThreadLocal, Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, Result};
 
@@ -24,6 +24,7 @@ const STRTAB_BLOCK: u32 = 23;
 const MODULE_VERSION: u64 = 1;
 const MODULE_TRIPLE: u64 = 2;
 const MODULE_DATALAYOUT: u64 = 3;
+const MODULE_SECTIONNAME: u64 = 5;
 const MODULE_GLOBALVAR: u64 = 7;
 const MODULE_FUNCTION: u64 = 8;
 const MODULE_SOURCE_FILENAME: u64 = 16;
@@ -123,6 +124,7 @@ pub fn read_bitcode(bytes: &[u8]) -> Result<Module> {
     let mut reader = Reader {
         module: Module::new(),
         strtab,
+        sections: Vec::new(),
         types: Vec::new(),
         values: Vec::new(),
         pending_globals: Vec::new(),
@@ -139,6 +141,7 @@ pub fn read_bitcode(bytes: &[u8]) -> Result<Module> {
 struct Reader {
     module: Module,
     strtab: Vec<u8>,
+    sections: Vec<String>,
     types: Vec<TypeId>,
     values: Vec<ValueRef>,
     pending_globals: Vec<(GlobalId, u32)>,
@@ -162,6 +165,9 @@ impl Reader {
                     }
                     MODULE_SOURCE_FILENAME => {
                         self.module.source_filename = Some(bytes_to_string(&record.operands));
+                    }
+                    MODULE_SECTIONNAME => {
+                        self.sections.push(bytes_to_string(&record.operands));
                     }
                     MODULE_GLOBALVAR => self.read_global(record)?,
                     MODULE_FUNCTION => self.read_function(record)?,
@@ -187,7 +193,8 @@ impl Reader {
             if record.code != PARAMATTR_GRP_CODE_ENTRY {
                 continue;
             }
-            let (group, index, attrs) = decode_attribute_group(record)?;
+            let (group, index, attrs) =
+                decode_attribute_group(record, &self.module.types, &self.types)?;
             self.attr_groups.insert(group, (index, attrs));
         }
         Ok(())
@@ -229,6 +236,14 @@ impl Reader {
             match record.code {
                 1 => {}
                 TYPE_STRUCT_NAME => pending_name = Some(bytes_to_string(&record.operands)),
+                TYPE_OPAQUE if pending_name.is_some() => {
+                    let name = pending_name.take().expect("checked above");
+                    let id = self.module.types.define_named_opaque(&name);
+                    self.types.push(id);
+                    if !self.module.named_types.contains(&id) {
+                        self.module.named_types.push(id);
+                    }
+                }
                 TYPE_STRUCT_NAMED => {
                     let name = pending_name
                         .take()
@@ -338,10 +353,11 @@ impl Reader {
         let init = record.operands.get(4).copied().unwrap_or(0);
         let linkage = decode_linkage(record.operands.get(5).copied().unwrap_or(0));
         let align = decode_align(record.operands.get(6).copied().unwrap_or(0));
-        let visibility = decode_visibility(record.operands.get(9).copied().unwrap_or(0));
-        let thread_local = record.operands.get(10).copied().unwrap_or(0) != 0;
-        let unnamed_addr = record.operands.get(11).copied().unwrap_or(0) != 0;
-        let dso_local = record.operands.get(17).copied().unwrap_or(0) != 0;
+        let section = self.section_at(record.operands.get(7).copied().unwrap_or(0));
+        let visibility = decode_visibility(record.operands.get(8).copied().unwrap_or(0));
+        let tls_model = ThreadLocal::from_bitcode(record.operands.get(9).copied().unwrap_or(0));
+        let unnamed_addr = record.operands.get(10).copied().unwrap_or(0) != 0;
+        let dso_local = record.operands.get(15).copied().unwrap_or(0) != 0;
         let symbol = self.module.intern(&name);
         let id = self.module.global_or_insert(symbol);
         self.module.define_global(
@@ -353,11 +369,11 @@ impl Reader {
                 linkage,
                 visibility,
                 is_const,
-                thread_local,
+                tls_model,
                 unnamed_addr,
                 dso_local,
                 align,
-                section: None,
+                section,
             },
         );
         self.values.push(ValueRef::Global(id));
@@ -375,6 +391,7 @@ impl Reader {
         let ty = self.type_at(record.operands.get(2).copied().unwrap_or(0))?;
         let is_declaration = record.operands.get(4).copied().unwrap_or(0) != 0;
         let linkage = decode_linkage(record.operands.get(5).copied().unwrap_or(0));
+        let align = decode_align(record.operands.get(7).copied().unwrap_or(0));
         let visibility = decode_visibility(record.operands.get(9).copied().unwrap_or(0));
         let unnamed_addr = record.operands.get(11).copied().unwrap_or(0) != 0;
         let dso_local = record.operands.get(17).copied().unwrap_or(0) != 0;
@@ -382,6 +399,7 @@ impl Reader {
         let mut function = Function::new(symbol, ty);
         function.is_declaration = is_declaration;
         function.linkage = linkage;
+        function.align = align;
         function.visibility = visibility;
         function.unnamed_addr = unnamed_addr;
         function.dso_local = dso_local;
@@ -452,9 +470,25 @@ impl Reader {
                 ConstKind::Int(value as u128)
             }
             CST_WIDE_INTEGER => {
+                if record.operands.is_empty() {
+                    return Err(Error::bitcode("empty wide integer constant"));
+                }
                 let mut value = 0u128;
                 for (index, operand) in record.operands.iter().enumerate() {
-                    value |= ((*operand as u128) & 0xffff_ffff_ffff_ffff) << (index * 64);
+                    let word = decode_signed(*operand) as u64;
+                    if index >= 2 {
+                        if word != 0 {
+                            return Err(Error::bitcode(
+                                "integer constants wider than 128 bits are not supported",
+                            ));
+                        }
+                        continue;
+                    }
+                    value |= (word as u128) << (index * 64);
+                }
+                let bits = self.module.types.get(ty).int_bits().unwrap_or(128);
+                if bits < 128 {
+                    value &= (1u128 << bits) - 1;
                 }
                 ConstKind::Int(value)
             }
@@ -519,12 +553,24 @@ impl Reader {
     }
 
     fn name_from(&self, offset: u64, size: u64) -> Result<String> {
-        let start = offset as usize;
-        let end = start + size as usize;
+        let start =
+            usize::try_from(offset).map_err(|_| Error::bitcode("string table offset overflow"))?;
+        let size =
+            usize::try_from(size).map_err(|_| Error::bitcode("string table size overflow"))?;
+        let end = start
+            .checked_add(size)
+            .ok_or_else(|| Error::bitcode("string table range overflow"))?;
         if end > self.strtab.len() {
             return Ok(String::new());
         }
         Ok(String::from_utf8_lossy(&self.strtab[start..end]).into_owned())
+    }
+
+    fn section_at(&self, index: u64) -> Option<String> {
+        if index == 0 {
+            return None;
+        }
+        self.sections.get((index - 1) as usize).cloned()
     }
 
     fn read_body(&mut self, block: &Block) -> Result<()> {
@@ -542,11 +588,13 @@ impl Reader {
             blocks: Vec::new(),
             current_block: 0,
         };
-        let items = block.items.clone();
-        for item in items {
+        let mut items = block.items.clone();
+        let mut saw_declare_blocks = false;
+        for item in items.drain(..) {
             match item {
                 Item::Record(record) => {
                     if record.code == FUNC_DECLAREBLOCKS {
+                        saw_declare_blocks = true;
                         let count = record.operands.first().copied().unwrap_or(0) as usize;
                         let function = &mut self.module.functions[id];
                         function.is_declaration = false;
@@ -567,6 +615,57 @@ impl Reader {
                     VALUE_SYMTAB_BLOCK => self.read_vst(&child, &mut state)?,
                     _ => {}
                 },
+            }
+        }
+        if saw_declare_blocks {
+            self.assign_unnamed_slots(state.id)?;
+        }
+        Ok(())
+    }
+
+    fn assign_unnamed_slots(&mut self, id: FuncId) -> Result<()> {
+        let mut slot = 0u32;
+        let param_count = self.module.functions[id].params.len();
+        for index in 0..param_count {
+            if self.module.functions[id].params[index].name.is_none() {
+                let symbol = self.module.intern(&slot.to_string());
+                let function = &mut self.module.functions[id];
+                function.params[index].name = Some(symbol);
+                function.locals[index].name = Some(symbol);
+                slot = slot
+                    .checked_add(1)
+                    .ok_or_else(|| Error::bitcode("too many unnamed values"))?;
+            }
+        }
+        let mut order = Vec::new();
+        for (block_id, block) in self.module.functions[id].blocks_in_order() {
+            let mut insts = Vec::new();
+            for inst_id in &block.insts {
+                if let Some(local) = self.module.functions[id].insts.get(*inst_id).result {
+                    insts.push(local);
+                }
+            }
+            order.push((block_id, block.name, insts));
+        }
+        for (block_id, block_name, insts) in order {
+            if block_name.is_none() {
+                let symbol = self.module.intern(&slot.to_string());
+                self.module.functions[id].blocks[block_id].name = Some(symbol);
+                slot = slot
+                    .checked_add(1)
+                    .ok_or_else(|| Error::bitcode("too many unnamed values"))?;
+            }
+            for local in insts {
+                if self.module.functions[id].locals[local as usize]
+                    .name
+                    .is_none()
+                {
+                    let symbol = self.module.intern(&slot.to_string());
+                    self.module.functions[id].locals[local as usize].name = Some(symbol);
+                    slot = slot
+                        .checked_add(1)
+                        .ok_or_else(|| Error::bitcode("too many unnamed values"))?;
+                }
             }
         }
         Ok(())
@@ -674,6 +773,21 @@ impl Reader {
 
     fn read_instruction(&mut self, record: &Record, state: &mut FuncState) -> Result<()> {
         let inst_id = state.base + state.locals.len() as u32;
+        let pending = if record.code == FUNC_INST_PHI {
+            let ty = self.type_at(
+                record
+                    .operands
+                    .first()
+                    .copied()
+                    .ok_or_else(|| Error::bitcode("phi without a type"))?,
+            )?;
+            let function = &mut self.module.functions[state.id];
+            let local = function.reserve_local(None, ty);
+            state.locals.push(LocalRef::Local(local));
+            Some((local, ty))
+        } else {
+            None
+        };
         let (kind, result_ty) = self.decode_instruction(record, inst_id, state)?;
         let block = *state
             .blocks
@@ -687,7 +801,10 @@ impl Reader {
                 kind: kind.clone(),
             },
         );
-        if let Some(ty) = result_ty {
+        if let Some((local, ty)) = pending {
+            function.define_local(local, ty, inst);
+            function.insts[inst].result = Some(local);
+        } else if let Some(ty) = result_ty {
             let local = function.add_local(None, ty, inst);
             function.insts[inst].result = Some(local);
             state.locals.push(LocalRef::Local(local));
@@ -718,9 +835,9 @@ impl Reader {
                 let mut fastmath = FastMath::default();
                 if is_float {
                     fastmath = decode_fastmath(flags);
-                } else if matches!(op, BinOp::UDiv | BinOp::SDiv | BinOp::URem | BinOp::SRem) {
+                } else if matches!(op, BinOp::UDiv | BinOp::SDiv | BinOp::LShr | BinOp::AShr) {
                     int_flags.exact = flags & 1 != 0;
-                } else {
+                } else if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Shl) {
                     int_flags.nuw = flags & 1 != 0;
                     int_flags.nsw = flags & 2 != 0;
                 }
@@ -875,11 +992,18 @@ impl Reader {
                 ))
             }
             FUNC_INST_CALL => {
-                let call_attrs: Vec<Attribute> = self
-                    .attribute_list(record.operands.first().copied().unwrap_or(0))?
-                    .iter()
-                    .flat_map(|(_, attrs)| attrs.iter().cloned())
-                    .collect();
+                let mut ret_attrs = Vec::new();
+                let mut call_attrs = Vec::new();
+                let mut arg_attr_entries = Vec::new();
+                for (index, attrs) in
+                    self.attribute_list(record.operands.first().copied().unwrap_or(0))?
+                {
+                    match *index {
+                        0 => ret_attrs.extend(attrs.iter().cloned()),
+                        u32::MAX => call_attrs.extend(attrs.iter().cloned()),
+                        _ => arg_attr_entries.push((*index, attrs.clone())),
+                    }
+                }
                 let mut index = 1;
                 let flags = record.operands.get(index).copied().unwrap_or(0);
                 index += 1;
@@ -915,10 +1039,22 @@ impl Reader {
                         index = next;
                     }
                 }
-                let tail = if flags & 1 != 0 {
-                    TailKind::Tail
-                } else if flags & (1 << 14) != 0 {
+                let mut arg_attrs = vec![Vec::new(); args.len()];
+                for (index, attrs) in arg_attr_entries {
+                    let slot = index
+                        .checked_sub(1)
+                        .and_then(|value| arg_attrs.get_mut(value as usize))
+                        .ok_or_else(|| {
+                            Error::bitcode(format!(
+                                "call argument attribute index {index} is out of range"
+                            ))
+                        })?;
+                    *slot = attrs;
+                }
+                let tail = if flags & (1 << 14) != 0 {
                     TailKind::MustTail
+                } else if flags & 1 != 0 {
+                    TailKind::Tail
                 } else if flags & (1 << 16) != 0 {
                     TailKind::NoTail
                 } else {
@@ -936,7 +1072,9 @@ impl Reader {
                         fn_ty,
                         callee,
                         args,
+                        arg_attrs,
                         fastmath: fmf,
+                        ret_attrs,
                         attrs: call_attrs,
                     },
                     result,

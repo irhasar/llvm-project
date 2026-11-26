@@ -159,6 +159,7 @@ impl TypeKey {
 pub struct TypeTable {
     types: Vec<Type>,
     defined: Vec<bool>,
+    opaque: Vec<bool>,
     map: HashMap<TypeKey, TypeId>,
 }
 
@@ -181,6 +182,7 @@ impl TypeTable {
         let id = u32::try_from(self.types.len()).expect("too many types");
         self.types.push(ty);
         self.defined.push(defined);
+        self.opaque.push(false);
         self.map.insert(key, id);
         id
     }
@@ -199,7 +201,16 @@ impl TypeTable {
             name: Some(Rc::clone(&stored)),
         });
         self.defined.push(false);
+        self.opaque.push(false);
         self.map.insert(TypeKey::Named(stored), id);
+        id
+    }
+
+    /// Marks a named struct as an opaque definition.
+    pub fn define_named_opaque(&mut self, name: &str) -> TypeId {
+        let id = self.named(name);
+        self.defined[id as usize] = true;
+        self.opaque[id as usize] = true;
         id
     }
 
@@ -220,6 +231,7 @@ impl TypeTable {
             name: Some(Rc::from(name)),
         };
         self.defined[id as usize] = true;
+        self.opaque[id as usize] = false;
         Ok(id)
     }
 
@@ -236,6 +248,11 @@ impl TypeTable {
     /// Returns true when a named struct has a body.
     pub fn is_defined(&self, id: TypeId) -> bool {
         self.defined[id as usize]
+    }
+
+    /// Returns true when a named type was defined as opaque.
+    pub fn is_opaque(&self, id: TypeId) -> bool {
+        self.opaque[id as usize]
     }
 
     /// Returns true when the type is a named struct.

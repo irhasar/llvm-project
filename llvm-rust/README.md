@@ -37,31 +37,34 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
 
 - `support`: arena, error, diagnostics.
 - `ir`: textual parser, printer, verifier; module/globals/functions; integer,
-  floating-point, pointer, array, vector, struct, and function types;
-  binary/unary, `icmp`/`fcmp`, `alloca`, `load`, `store`, `getelementptr`,
-  `call`, `phi`, `select`, casts, `ret`, `br`, `condbr`, `switch`,
-  `unreachable`.
+  floating-point, pointer, array, vector, struct, function, and opaque types;
+  TLS models, sections, function alignment, wide integers, and per-kind
+  floating-point hex literals; binary/unary, `icmp`/`fcmp`, `alloca`, `load`,
+  `store`, `getelementptr`, `call`, `phi`, `select`, casts, `ret`, `br`,
+  `condbr`, `switch`, `unreachable`. Unnamed values and blocks share one
+  numbering sequence, and `phi` accepts forward and self references.
 - `bitcode`: LLVM bitstream writer and reader covering the module, type,
   constants, function, value-symbol-table, string-table, and
   `PARAMATTR`/`PARAMATTR_GROUP` blocks. The reader handles abbreviations and
   block-info abbreviations emitted by LLVM 19.
-- `bitcode` attributes: return, parameter, function, and call-site attributes;
-  `#N` group references; common enum attributes (`noundef`, `signext`,
-  `zeroext`, `nonnull`, `noalias`, `inreg`, `nounwind`, `noreturn`,
-  `willreturn`, `nofree`, `nosync`, `norecurse`, `cold`, `hot`, `optnone`,
-  `alwaysinline`, `noinline`, `inlinehint`, and the rest of the legacy enum
-  table); integer attributes (`align`, `dereferenceable`,
-  `dereferenceable_or_null`); string attributes such as
-  `"frame-pointer"="all"`; and the legacy memory attributes (`readnone`,
-  `readonly`, `writeonly`). LLVM 19 stores the memory attributes as
-  `ATTR_KIND_MEMORY`; the reader maps the three legacy values back to their
-  textual spellings.
+- `bitcode` attributes: return, parameter, function, call-site, and
+  argument-indexed call-site attributes; `#N` group references; common enum
+  attributes (`noundef`, `signext`, `zeroext`, `nonnull`, `noalias`, `inreg`,
+  `nounwind`, `noreturn`, `willreturn`, `nofree`, `nosync`, `norecurse`,
+  `cold`, `hot`, `optnone`, `alwaysinline`, `noinline`, `inlinehint`, and the
+  rest of the legacy enum table); integer attributes (`align`, `alignstack`,
+  `dereferenceable`, `dereferenceable_or_null`); type attributes (`byval`,
+  `byref`, `sret`, `inalloca`, `preallocated`, `elementtype`); string
+  attributes such as `"frame-pointer"="all"`; and the legacy memory
+  attributes (`readnone`, `readonly`, `writeonly`). LLVM 19 stores the memory
+  attributes as `ATTR_KIND_MEMORY`; the reader maps the three legacy values
+  back to their textual spellings.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
 
-This slice deliberately does not cover metadata, type attributes (`byval`,
-`sret`, `elementtype`, `byref`, `inalloca`), parameter-indexed call-site
-attributes, `allocsize`/`stackalign`/`vscale_range`-style integer attributes,
-comdats, debug info, constant expressions, atomics, `invoke`/`landingpad`,
+This slice deliberately does not cover the metadata block (metadata strings
+parse and print in text, but do not round-trip through bitcode),
+`allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
+debug info, constant expressions, atomics, `invoke`/`landingpad`,
 aggregate/vector instructions, or the exact `fp128`/`x86_fp80` payload. MC,
 object, X86, and codegen are still out of scope.
 
@@ -97,9 +100,12 @@ python3 tests/bench.py --runs 5
 
 ## First-slice results
 
-Differential harness: all seven modules in `tests/corpus/` match the C++ LLVM
+Differential harness: all eight modules in `tests/corpus/` match the C++ LLVM
 19.1.7 oracle in both directions after normalizing `source_filename` and
-`ModuleID`.
+`ModuleID`. The advanced module covers TLS models, sections, opaque types,
+`i128` constants, hexadecimal floats, function alignment, type attributes,
+argument-indexed call-site attributes, unnamed value/block numbering, and
+`phi` self references.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -110,13 +116,13 @@ Benchmark on a synthetic corpus of 1000 functions, 10 instructions each
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 32.2 ms | 32.1-33.2 ms | 55.4 MiB |
-| `llvm-as-rust` | 17.6 ms | 17.4-18.8 ms | 14.6 MiB |
-| `llvm-dis` (C++) on Rust bitcode | 28.9 ms | 28.5-29.6 ms | 54.7 MiB |
-| `llvm-dis-rust` on C++ bitcode | 16.9 ms | 16.8-17.6 ms | 14.6 MiB |
+| `llvm-as` (C++) | 35.8 ms | 35.1-43.7 ms | 55.7 MiB |
+| `llvm-as-rust` | 22.7 ms | 21.4-25.3 ms | 14.6 MiB |
+| `llvm-dis` (C++) on Rust bitcode | 30.3 ms | 29.9-31.3 ms | 54.7 MiB |
+| `llvm-dis-rust` on C++ bitcode | 19.2 ms | 18.9-19.6 ms | 14.6 MiB |
 
-The Rust tools are about 1.8x faster and use about 3.8x less peak memory on
-this corpus. The Rust binaries are 4.3 MiB (`llvm-as-rust`) and 3.6 MiB
+The Rust tools are about 1.6x faster and use about 3.8x less peak memory on
+this corpus. The Rust binaries are 4.5 MiB (`llvm-as-rust`) and 3.7 MiB
 (`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 These numbers are a slice result, not an LLVM parity claim. The upstream

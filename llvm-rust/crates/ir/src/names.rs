@@ -52,6 +52,11 @@ pub fn quote_name(name: &str) -> String {
 
 /// Decodes the contents of a quoted LLVM name (without the quotes).
 pub fn unescape_name(text: &str) -> Option<String> {
+    String::from_utf8(unescape_bytes(text)?).ok()
+}
+
+/// Decodes LLVM `\XX` escapes to their underlying bytes.
+pub fn unescape_bytes(text: &str) -> Option<Vec<u8>> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut idx = 0;
@@ -73,7 +78,7 @@ pub fn unescape_name(text: &str) -> Option<String> {
         out.push((high << 4) | low);
         idx += 3;
     }
-    String::from_utf8(out).ok()
+    Some(out)
 }
 
 fn hex_value(byte: u8) -> Option<u8> {
