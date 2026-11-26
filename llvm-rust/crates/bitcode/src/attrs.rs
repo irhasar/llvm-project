@@ -830,8 +830,10 @@ pub(crate) fn decode_attribute_group(
                     .get(cursor + 2)
                     .ok_or_else(|| Error::bitcode("truncated integer attribute"))?;
                 if code == 86 {
-                    let effects =
-                        MemoryEffects::from_int(value, is_aarch64 && emit_aarch64_target)?;
+                    // Target validation is independent of the output mode:
+                    // legacy AArch64 re-encoding reconstructs target access
+                    // from inaccessible memory.
+                    let effects = MemoryEffects::from_int(value, is_aarch64)?;
                     if index == FUNCTION_INDEX {
                         modern_memory = Some(effects);
                     } else {
@@ -1169,16 +1171,16 @@ mod tests {
     }
 
     #[test]
-    fn llvm19_decode_ignores_target_memory_validation() {
+    fn llvm19_decode_keeps_target_validation() {
         let record = |value: u64| Record {
             code: PARAMATTR_GRP_CODE_ENTRY,
             operands: vec![1, u64::from(u32::MAX), 1, 86, value],
             blob: None,
         };
-        // arg=read, inaccessible=write, other=read, target0/1=read. AArch64
-        // target-aware decoding rejects this; LLVM 19 mode has no target field.
+        // arg=read, inaccessible=write, other=read, target0/1=write. Legacy
+        // AArch64 encoding reconstructs the same target writes.
         let (_, _, attrs) = decode_attribute_group(
-            &record((2u64 << 56) | 0x549),
+            &record((2u64 << 56) | 0xA49),
             &TypeTable::new(),
             &[],
             Some("aarch64-unknown-linux-gnu"),
@@ -1190,6 +1192,17 @@ mod tests {
             vec![Attribute(
                 "memory(read, inaccessiblemem: write)".to_string()
             )]
+        );
+        // target0/1=read would reassemble as target writes, not reads.
+        assert!(
+            decode_attribute_group(
+                &record((2u64 << 56) | 0x549),
+                &TypeTable::new(),
+                &[],
+                Some("aarch64-unknown-linux-gnu"),
+                false,
+            )
+            .is_err()
         );
     }
 
