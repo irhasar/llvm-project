@@ -1433,16 +1433,21 @@ mod tests {
     fn roundtrips_duplicate_attribute_groups() {
         let mut module = llvm_rust_ir::parse_module(
             "declare void @dup(ptr align 8)\n\
+             declare void @dup2(ptr align 8)\n\
              declare void @decl() #0\n\
              attributes #0 = { nounwind }\n",
         )
         .expect("parse");
-        let dup_name = module.intern("dup");
-        let dup = module.function_named(dup_name).expect("dup");
-        module.functions[dup].params[0].attrs = Arc::new(vec![
+        let attrs = Arc::new(vec![
             Attribute("align 8".to_string()),
             Attribute("align 16".to_string()),
         ]);
+        let dup_name = module.intern("dup");
+        let dup = module.function_named(dup_name).expect("dup");
+        module.functions[dup].params[0].attrs = Arc::clone(&attrs);
+        let dup2_name = module.intern("dup2");
+        let dup2 = module.function_named(dup2_name).expect("dup2");
+        module.functions[dup2].params[0].attrs = attrs;
 
         let mut writer = Writer::new(&module);
         writer.split_attr_slots = true;
@@ -1458,6 +1463,15 @@ mod tests {
             read.functions[dup].params[0].attrs.as_ref(),
             &[Attribute("align 16".to_string())]
         );
+        let dup2 = read
+            .functions
+            .iter()
+            .find_map(|(id, function)| (read.name(function.name) == "dup2").then_some(id))
+            .expect("dup2 function");
+        assert!(Arc::ptr_eq(
+            &read.functions[dup].params[0].attrs,
+            &read.functions[dup2].params[0].attrs
+        ));
         let decl = read
             .functions
             .iter()
