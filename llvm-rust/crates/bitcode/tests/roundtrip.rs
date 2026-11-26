@@ -259,6 +259,12 @@ fn shared_attribute_lists_are_not_charged_per_declaration() {
     );
     let read = read_bitcode(&bytes).expect("read shared attribute corpus");
     assert_eq!(read.functions.len(), 100);
+    let first = read.functions.iter().next().expect("function").1.params[0]
+        .attrs
+        .clone();
+    for (_, function) in read.functions.iter() {
+        assert!(std::sync::Arc::ptr_eq(&first, &function.params[0].attrs));
+    }
 }
 
 #[test]

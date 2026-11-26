@@ -370,7 +370,7 @@ fn write_instruction(
             out.push(' ');
             let mut calling_conv = Vec::new();
             let mut other = Vec::new();
-            for attr in attrs {
+            for attr in attrs.iter() {
                 if is_calling_convention(attr) {
                     calling_conv.push(attr);
                 } else {
@@ -380,7 +380,7 @@ fn write_instruction(
             for attr in calling_conv {
                 let _ = write!(out, "{attr} ");
             }
-            for attr in ret_attrs {
+            for attr in ret_attrs.iter() {
                 let _ = write!(out, "{attr} ");
             }
             let ty = match module.types.get(*fn_ty) {
@@ -396,7 +396,7 @@ fn write_instruction(
                 }
                 let _ = write!(out, "{} ", module.display_type(arg.ty));
                 if let Some(attrs) = arg_attrs.get(index) {
-                    for attr in attrs {
+                    for attr in attrs.iter() {
                         let _ = write!(out, "{attr} ");
                     }
                 }

@@ -1,6 +1,7 @@
 //! Instructions and their operand shapes.
 
 use core::fmt;
+use std::sync::Arc;
 
 use crate::constant::ConstId;
 use crate::function::{BlockId, LocalId};
@@ -443,10 +444,10 @@ pub enum InstKind {
         fn_ty: TypeId,
         callee: Operand,
         args: Vec<Operand>,
-        arg_attrs: Vec<Vec<Attribute>>,
+        arg_attrs: Vec<Arc<Vec<Attribute>>>,
         fastmath: FastMath,
-        ret_attrs: Vec<Attribute>,
-        attrs: Vec<Attribute>,
+        ret_attrs: Arc<Vec<Attribute>>,
+        attrs: Arc<Vec<Attribute>>,
     },
     Phi {
         incoming: Vec<(Operand, BlockId)>,

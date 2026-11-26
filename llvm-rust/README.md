@@ -86,7 +86,9 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   winning and no `align` left in the function attribute list. Attribute
   groups and lists are shared through `Arc`, so declarations that reference
   the same list do not copy it; the memory budget is charged once for the
-  stored group, not once per referencing declaration.
+  stored group, not once per referencing declaration. Lists that repeat a
+  slot are merged once, and call-site attribute lists use the same shared
+  representation.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
 
 Half and bfloat conversion handles subnormals, infinities, quiet NaNs, and
@@ -137,7 +139,7 @@ python3 tests/bench.py --runs 5
 
 ## M1 results
 
-Differential harness: all 25 modules in `tests/corpus/` match the C++ LLVM
+Differential harness: all 26 modules in `tests/corpus/` match the C++ LLVM
 19.1.7 oracle in both directions after normalizing `source_filename` and
 `ModuleID`. The corpus covers TLS models, sections, opaque types, `i128`
 constants, hexadecimal floats and subnormal/signaling-NaN cases, float and
@@ -147,8 +149,9 @@ memory attributes, argument-indexed call-site attributes,
 `local_unnamed_addr`, forward references in constants and instructions,
 UTF-8 section names, unnamed globals/functions, explicit quoted numeric
 global/function names, unnamed/global slot ordering, unnamed/name collisions,
-direct calls without pointer type records, unnamed value/block numbering,
-exact shift/divide flags, and `phi` self references.
+forward numbered references that must not consume definition slots, direct
+calls without pointer type records, unnamed value/block numbering, exact
+shift/divide flags, and `phi` self references.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -159,24 +162,26 @@ Benchmark on a synthetic corpus of 1000 functions, 10 instructions each
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 34.0 ms | 33.5-34.2 ms | 55.7 MiB |
-| `llvm-as-rust` | 21.5 ms | 21.2-21.6 ms | 15.0 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 32.8 ms | 30.2-40.2 ms | 54.8 MiB |
-| `llvm-dis-rust` on C++ bitcode | 19.9 ms | 19.6-20.2 ms | 15.0 MiB |
+| `llvm-as` (C++) | 35.6 ms | 33.9-40.5 ms | 55.3 MiB |
+| `llvm-as-rust` | 20.9 ms | 20.8-21.1 ms | 14.8 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 30.1 ms | 29.8-30.5 ms | 54.5 MiB |
+| `llvm-dis-rust` on C++ bitcode | 18.9 ms | 18.8-19.2 ms | 14.8 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer-only
-corpus, Rust throughput was about 1.6x the C++ tools and peak RSS was about
-3.7x lower. These are throughput and memory measurements, not a generated-code
+corpus, Rust throughput was about 1.7x the C++ assembler and 1.6x the C++
+disassembler, and peak RSS was about 3.7x lower. These are throughput and memory measurements, not a generated-code
 performance claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.3 MiB
 (`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 A clean release build of the two Rust tools, using a separate target
-directory, took 7.3 s wall, 23.8 s user, and 1.6 s system time. The C++ LLVM
-build is not repeated here: the oracle is the installed LLVM 19.1.7, and
-building LLVM is deliberately avoided in this workspace. Generated-code
-quality is not measured because M1 has no codegen; the required generated-code
-comparison remains open for the M1 gate.
+directory, took 10.0 s wall, 32.0 s user, and 2.0 s system time. This is a
+Rust-only observation, not a cross-toolchain build-time result. A C++ compile
+baseline is not available in this workspace: only the installed LLVM 19.1.7
+tools and `libLLVM.so` are present, without LLVM development headers or a
+prebuilt C++ build tree, and building LLVM is deliberately avoided. The M1
+gate therefore remains open on compile-time comparison as well as on
+generated-code quality, which is not measured because M1 has no codegen.
 
 These numbers are a slice result, not an LLVM parity claim. The upstream
 `llvm/test` suite is still required before any parity gate, and the synthetic

@@ -228,13 +228,28 @@ impl Reader {
             if record.code != PARAMATTR_CODE_ENTRY {
                 continue;
             }
-            let mut list = Vec::new();
+            let mut list: Vec<(u32, Arc<Vec<Attribute>>)> = Vec::new();
+            let mut positions: HashMap<u32, usize> = HashMap::new();
             for group in &record.operands {
                 let (index, attrs) =
                     self.attr_groups.get(group).cloned().ok_or_else(|| {
                         Error::bitcode(format!("unknown attribute group {group}"))
                     })?;
-                list.push((index, attrs));
+                let Some(&position) = positions.get(&index) else {
+                    positions.insert(index, list.len());
+                    list.push((index, attrs));
+                    continue;
+                };
+                if attrs.is_empty() {
+                    continue;
+                }
+                let mut merged = Vec::with_capacity(list[position].1.len() + attrs.len());
+                merged.extend(list[position].1.iter().cloned());
+                merged.extend(attrs.iter().cloned());
+                self.attr_budget = self.attr_budget.checked_sub(attrs.len()).ok_or_else(|| {
+                    Error::bitcode("merged attribute lists exceed the input size budget")
+                })?;
+                list[position].1 = Arc::new(merged);
             }
             self.attr_lists.push(Arc::new(list));
         }
@@ -465,15 +480,15 @@ impl Reader {
         let attr_list = self.attribute_list(record.operands.get(6).copied().unwrap_or(0))?;
         for (index, attrs) in attr_list.iter() {
             match *index {
-                0 => merge_attrs(&mut function.ret_attrs, attrs),
-                u32::MAX => merge_attrs(&mut function.attrs, attrs),
+                0 => function.ret_attrs = attrs.clone(),
+                u32::MAX => function.attrs = attrs.clone(),
                 _ => {
                     let Some(param) = function.params.get_mut(*index as usize - 1) else {
                         return Err(Error::bitcode(format!(
                             "attribute index {index} is out of range"
                         )));
                     };
-                    merge_attrs(&mut param.attrs, attrs);
+                    param.attrs = attrs.clone();
                 }
             }
         }
@@ -1131,17 +1146,17 @@ impl Reader {
                 ))
             }
             FUNC_INST_CALL => {
-                let mut ret_attrs = Vec::new();
-                let mut call_attrs = Vec::new();
+                let mut ret_attrs = Arc::new(Vec::new());
+                let mut call_attrs = Arc::new(Vec::new());
                 let mut arg_attr_entries = Vec::new();
                 for (index, attrs) in self
                     .attribute_list(record.operands.first().copied().unwrap_or(0))?
                     .iter()
                 {
                     match *index {
-                        0 => ret_attrs.extend(attrs.iter().cloned()),
-                        u32::MAX => call_attrs.extend(attrs.iter().cloned()),
-                        _ => arg_attr_entries.push((*index, attrs.as_ref().clone())),
+                        0 => ret_attrs = attrs.clone(),
+                        u32::MAX => call_attrs = attrs.clone(),
+                        _ => arg_attr_entries.push((*index, attrs.clone())),
                     }
                 }
                 let mut index = 1;
@@ -1179,7 +1194,7 @@ impl Reader {
                         index = next;
                     }
                 }
-                let mut arg_attrs = vec![Vec::new(); args.len()];
+                let mut arg_attrs = vec![Arc::new(Vec::new()); args.len()];
                 for (index, attrs) in arg_attr_entries {
                     let slot = index
                         .checked_sub(1)
@@ -1357,17 +1372,6 @@ impl Reader {
 
     fn ptr_type(&mut self) -> Result<TypeId> {
         Ok(self.module.types.pointer())
-    }
-}
-
-fn merge_attrs(target: &mut Arc<Vec<Attribute>>, attrs: &Arc<Vec<Attribute>>) {
-    if attrs.is_empty() {
-        return;
-    }
-    if target.is_empty() {
-        *target = attrs.clone();
-    } else if !Arc::ptr_eq(target, attrs) {
-        Arc::make_mut(target).extend(attrs.iter().cloned());
     }
 }
 

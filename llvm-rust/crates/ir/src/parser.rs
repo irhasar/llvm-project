@@ -6,6 +6,7 @@
 //! info, and constant expressions are later milestones.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use llvm_rust_support::{Error, Result, Span, Symbol};
 
@@ -630,7 +631,7 @@ struct Parser<'a> {
     module: Module,
     local_names: HashMap<Symbol, LocalId>,
     next_value: u32,
-    next_unnamed: u32,
+    next_unnamed: u64,
     unnamed_symbols: HashMap<u32, Symbol>,
 }
 
@@ -767,8 +768,8 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_global(&mut self) -> Result<()> {
-        let (name, _, quoted) = self.expect_global()?;
-        let symbol = self.global_symbol(&name, quoted);
+        let (name, span, quoted) = self.expect_global()?;
+        let symbol = self.definition_symbol(&name, quoted, "global", span)?;
         let unnamed = is_unnamed_symbol(&name, quoted);
         self.expect_punct('=')?;
         let mut linkage = Linkage::External;
@@ -956,8 +957,8 @@ impl<'a> Parser<'a> {
             }
         }
         let ret_ty = self.parse_type()?;
-        let (name, _, quoted) = self.expect_global()?;
-        let symbol = self.global_symbol(&name, quoted);
+        let (name, span, quoted) = self.expect_global()?;
+        let symbol = self.definition_symbol(&name, quoted, "function", span)?;
         let unnamed = is_unnamed_symbol(&name, quoted);
         let mut function = Function::new(symbol, 0);
         function.linkage = linkage;
@@ -1527,9 +1528,10 @@ impl<'a> Parser<'a> {
                     .add_constant(Constant::new(ty, ConstKind::MetadataString(name))))
             }
             TokenKind::Global(name) => {
+                let span = self.peek().span;
                 let quoted = self.peek().quoted;
                 self.advance();
-                let symbol = self.global_symbol(&name, quoted);
+                let symbol = self.reference_symbol(&name, quoted, span)?;
                 let kind = if let Some(id) = self.module.function_named(symbol) {
                     ConstKind::Function(id)
                 } else if let Some(id) = self.module.global_named(symbol) {
@@ -1645,9 +1647,10 @@ impl<'a> Parser<'a> {
                 Ok(Operand::local(function.local_type(local), local))
             }
             TokenKind::Global(name) => {
+                let span = self.peek().span;
                 let quoted = self.peek().quoted;
                 self.advance();
-                let symbol = self.global_symbol(&name, quoted);
+                let symbol = self.reference_symbol(&name, quoted, span)?;
                 if let Some(id) = self.module.function_named(symbol) {
                     Ok(Operand::function(ty, id))
                 } else {
@@ -1707,9 +1710,10 @@ impl<'a> Parser<'a> {
     fn parse_callee(&mut self, function: &mut Function) -> Result<Operand> {
         match self.peek_kind().clone() {
             TokenKind::Global(name) => {
+                let span = self.peek().span;
                 let quoted = self.peek().quoted;
                 self.advance();
-                let symbol = self.global_symbol(&name, quoted);
+                let symbol = self.reference_symbol(&name, quoted, span)?;
                 if let Some(id) = self.module.function_named(symbol) {
                     Ok(Operand::function(self.module.functions[id].ty, id))
                 } else if let Some(id) = self.module.global_named(symbol) {
@@ -2122,10 +2126,10 @@ impl<'a> Parser<'a> {
                 fn_ty,
                 callee,
                 args,
-                arg_attrs,
+                arg_attrs: arg_attrs.into_iter().map(Arc::new).collect(),
                 fastmath,
-                ret_attrs,
-                attrs,
+                ret_attrs: ret_attrs.into(),
+                attrs: attrs.into(),
             },
             result_ty,
         ))
@@ -2283,21 +2287,55 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn global_symbol(&mut self, name: &str, quoted: bool) -> Symbol {
+    /// Resolves a definition's symbol and advances the shared global/function
+    /// numbered-definition sequence. References do not call this.
+    fn definition_symbol(
+        &mut self,
+        name: &str,
+        quoted: bool,
+        kind: &str,
+        span: Span,
+    ) -> Result<Symbol> {
         if !is_unnamed_symbol(name, quoted) {
-            return self.module.intern(name);
+            return Ok(self.module.intern(name));
         }
-        let mut slot = if name.is_empty() {
-            self.next_unnamed
-        } else {
-            name.parse().unwrap_or(self.next_unnamed)
-        };
         if name.is_empty() {
-            while self.unnamed_symbols.contains_key(&slot) {
-                slot = slot.saturating_add(1);
-            }
+            let slot = u32::try_from(self.next_unnamed)
+                .map_err(|_| Error::parse_at(format!("too many unnamed {kind}s"), span))?;
+            self.next_unnamed += 1;
+            return Ok(self.unnamed_slot_symbol(slot));
         }
-        self.next_unnamed = self.next_unnamed.max(slot.saturating_add(1));
+        let slot: u32 = name.parse().map_err(|_| {
+            Error::parse_at(format!("invalid unnamed {kind} number `{name}`"), span)
+        })?;
+        if u64::from(slot) < self.next_unnamed {
+            return Err(Error::parse_at(
+                format!(
+                    "{kind} expected to be numbered '@{}' or greater",
+                    self.next_unnamed
+                ),
+                span,
+            ));
+        }
+        self.next_unnamed = u64::from(slot) + 1;
+        Ok(self.unnamed_slot_symbol(slot))
+    }
+
+    /// Resolves a forward reference without consuming a definition slot.
+    fn reference_symbol(&mut self, name: &str, quoted: bool, span: Span) -> Result<Symbol> {
+        if !is_unnamed_symbol(name, quoted) {
+            return Ok(self.module.intern(name));
+        }
+        if name.is_empty() {
+            return Err(Error::parse_at("use of undefined value '@'", span));
+        }
+        let slot: u32 = name.parse().map_err(|_| {
+            Error::parse_at(format!("invalid unnamed symbol number `{name}`"), span)
+        })?;
+        Ok(self.unnamed_slot_symbol(slot))
+    }
+
+    fn unnamed_slot_symbol(&mut self, slot: u32) -> Symbol {
         if let Some(symbol) = self.unnamed_symbols.get(&slot) {
             return *symbol;
         }
@@ -2396,6 +2434,58 @@ mod tests {
         assert!(parse_module("@g = addrspace(1) global i32 0\n").is_err());
         let source = "define ptr @f(ptr addrspace(1) %p) {\nentry:\n  ret ptr %p\n}\n";
         assert!(parse_module(source).is_err());
+    }
+
+    #[test]
+    fn forward_references_do_not_consume_definition_slots() {
+        let source = r#"
+@x = global ptr @1
+@"" = global i32 11
+@1 = global i32 22
+@"" = global i32 33
+@q = global ptr @2
+"#;
+        let module = parse_module(source).expect("parse");
+        let q = module
+            .globals
+            .iter()
+            .find_map(|(_, global)| (module.name(global.name) == "q").then_some(global))
+            .expect("q global");
+        let ConstKind::Global(target) = module.constant(q.init.expect("q initializer")).kind else {
+            panic!("q should reference a global");
+        };
+        let target = &module.globals[target];
+        let value = module.constant(target.init.expect("target initializer"));
+        assert_eq!(value.kind, ConstKind::Int(33));
+        assert!(print_module(&module).contains("@q = global ptr @2"));
+    }
+
+    #[test]
+    fn rejects_reused_and_exhausted_numbered_slots() {
+        let reused = parse_module("@0 = global i32 1\n@0 = global i32 2\n")
+            .expect_err("reused slot must fail");
+        assert!(
+            reused
+                .to_string()
+                .contains("expected to be numbered '@1' or greater"),
+            "{reused}"
+        );
+
+        let exhausted = parse_module(
+            "@4294967294 = global i32 0\n@\"\" = global i32 1\n@\"\" = global i32 2\n",
+        )
+        .expect_err("exhausted slot space must fail");
+        assert!(
+            exhausted.to_string().contains("too many unnamed globals"),
+            "{exhausted}"
+        );
+
+        let empty_reference =
+            parse_module("@x = global ptr @\"\"\n").expect_err("empty reference must fail");
+        assert!(
+            empty_reference.to_string().contains("undefined value '@'"),
+            "{empty_reference}"
+        );
     }
 
     #[test]

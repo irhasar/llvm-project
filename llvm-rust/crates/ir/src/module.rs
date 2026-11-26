@@ -281,11 +281,13 @@ impl Module {
     /// Marks a global that used an LLVM unnamed slot instead of a quoted name.
     pub fn mark_unnamed_global(&mut self, id: GlobalId) {
         self.unnamed_globals.insert(id);
+        self.invalidate_unnamed_slots();
     }
 
     /// Marks a function that used an LLVM unnamed slot instead of a quoted name.
     pub fn mark_unnamed_function(&mut self, id: FuncId) {
         self.unnamed_functions.insert(id);
+        self.invalidate_unnamed_slots();
     }
 
     /// Returns true when the global was written as an unnamed slot.
@@ -342,6 +344,11 @@ impl Module {
         None
     }
 
+    fn invalidate_unnamed_slots(&mut self) {
+        self.unnamed_global_slots.clear();
+        self.unnamed_function_slots.clear();
+    }
+
     /// Assigns unnamed slots in the order the printer and bitcode writer emit
     /// definitions: all globals first, then all functions.
     pub fn assign_unnamed_slots(&mut self) {
@@ -363,6 +370,7 @@ impl Module {
     }
 
     fn record_global_order(&mut self, id: GlobalId) {
+        self.invalidate_unnamed_slots();
         if !self.global_order.contains_key(&id) {
             self.global_order.insert(id, self.next_order);
             self.next_order += 1;
@@ -370,6 +378,7 @@ impl Module {
     }
 
     fn record_function_order(&mut self, id: FuncId) {
+        self.invalidate_unnamed_slots();
         if !self.function_order.contains_key(&id) {
             self.function_order.insert(id, self.next_order);
             self.next_order += 1;
@@ -530,6 +539,40 @@ mod tests {
         let id = module.add_function(function);
         assert_eq!(module.function_named(name), Some(id));
         assert_eq!(module.name(name), "main");
+    }
+
+    #[test]
+    fn refreshes_unnamed_slots_after_module_edits() {
+        let mut module = Module::new();
+        let i32_ty = module.types.int(32);
+        let fnty = module.types.function(i32_ty, vec![], false);
+        let function_name = module.intern("\0unnamed0");
+        let function = Function::new(function_name, fnty);
+        let function_id = module.add_function(function);
+        module.mark_unnamed_function(function_id);
+        module.assign_unnamed_slots();
+        assert_eq!(module.unnamed_function_slot(function_id), Some(0));
+
+        let global_name = module.intern("\0unnamed1");
+        let global = Global {
+            name: global_name,
+            ty: i32_ty,
+            init: None,
+            linkage: Linkage::External,
+            visibility: Visibility::Default,
+            is_const: false,
+            tls_model: ThreadLocal::None,
+            unnamed_addr: false,
+            local_unnamed_addr: false,
+            dso_local: false,
+            align: None,
+            section: None,
+        };
+        let global_id = module.add_global(global);
+        module.mark_unnamed_global(global_id);
+
+        assert_eq!(module.unnamed_global_slot(global_id), Some(0));
+        assert_eq!(module.unnamed_function_slot(function_id), Some(1));
     }
 
     #[test]
