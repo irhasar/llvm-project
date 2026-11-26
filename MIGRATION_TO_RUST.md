@@ -331,7 +331,7 @@ generic x86-64 target unless noted:
 | ConvertEBCDIC   | 1.04-1.10x UTF-8 output, 1.28-1.30x EBCDIC output, 1.40-1.43x on GOFF 129-256 B names |
 | xxHash 64-bit   | 0.99x at 12 B, 1.1x at 48 B, 2.5x at 768 B, 3.5x at 1 MiB |
 | xxHash 128-bit  | 1.04x at 12 B, 1.2x at 48 B, 2.3x at 768 B, 3.5x at 1 MiB |
-| NativeFormatting| 1.52x decimal, 2.51x grouped, 1.17x hex (public path) |
+| NativeFormatting| 1.58x decimal, 2.48x grouped, 1.17x hex (public path) |
 
 MD5 initially lost to GCC at the generic target (0.83x). LLVM's reassociation
 moved the round constant to the end of `a + f + x + t`, leaving three register
