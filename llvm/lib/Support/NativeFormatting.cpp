@@ -21,6 +21,15 @@
 
 using namespace llvm;
 
+#if defined(LLVM_RUST_NATIVEFORMATTING)
+extern "C" size_t llvm_nativeformatting_format_decimal(uint64_t Value,
+                                                       bool Grouping,
+                                                       uint8_t *Out,
+                                                       size_t Cap);
+extern "C" size_t llvm_nativeformatting_format_hex(uint64_t Value, bool Upper,
+                                                   bool Prefix, size_t Width,
+                                                   uint8_t *Out, size_t Cap);
+#else
 template<typename T, std::size_t N>
 static int format_to_buffer(T Value, char (&Buffer)[N]) {
   char *EndPtr = std::end(Buffer);
@@ -50,6 +59,7 @@ static void writeWithCommas(raw_ostream &S, ArrayRef<char> Buffer) {
     Buffer = Buffer.drop_front(3);
   }
 }
+#endif
 
 template <typename T>
 static void write_unsigned_impl(raw_ostream &S, T N, size_t MinDigits,
@@ -58,7 +68,13 @@ static void write_unsigned_impl(raw_ostream &S, T N, size_t MinDigits,
   static_assert(std::is_unsigned_v<T>, "Value is not unsigned!");
 
   char NumberBuffer[128];
+#if defined(LLVM_RUST_NATIVEFORMATTING)
+  size_t Len = llvm_nativeformatting_format_decimal(
+      static_cast<uint64_t>(N), Style == IntegerStyle::Number,
+      reinterpret_cast<uint8_t *>(NumberBuffer), sizeof(NumberBuffer));
+#else
   size_t Len = format_to_buffer(N, NumberBuffer);
+#endif
 
   if (IsNegative)
     S << '-';
@@ -70,11 +86,15 @@ static void write_unsigned_impl(raw_ostream &S, T N, size_t MinDigits,
       S << '0';
   }
 
+#if defined(LLVM_RUST_NATIVEFORMATTING)
+  S.write(NumberBuffer, Len);
+#else
   if (Style == IntegerStyle::Number) {
     writeWithCommas(S, ArrayRef<char>(std::end(NumberBuffer) - Len, Len));
   } else {
     S.write(std::end(NumberBuffer) - Len, Len);
   }
+#endif
 }
 
 template <typename T>
@@ -141,17 +161,22 @@ void llvm::write_hex(raw_ostream &S, uint64_t N, HexPrintStyle Style,
   const size_t kMaxWidth = 128u;
 
   size_t W = std::min(kMaxWidth, Width.value_or(0u));
-
-  unsigned Nibbles = (llvm::bit_width(N) + 3) / 4;
   bool Prefix = (Style == HexPrintStyle::PrefixLower ||
                  Style == HexPrintStyle::PrefixUpper);
   bool Upper =
       (Style == HexPrintStyle::Upper || Style == HexPrintStyle::PrefixUpper);
+
+  char NumberBuffer[kMaxWidth];
+#if defined(LLVM_RUST_NATIVEFORMATTING)
+  size_t NumChars = llvm_nativeformatting_format_hex(
+      N, Upper, Prefix, W, reinterpret_cast<uint8_t *>(NumberBuffer),
+      sizeof(NumberBuffer));
+#else
+  unsigned Nibbles = (llvm::bit_width(N) + 3) / 4;
   unsigned PrefixChars = Prefix ? 2 : 0;
   unsigned NumChars =
       std::max(static_cast<unsigned>(W), std::max(1u, Nibbles) + PrefixChars);
 
-  char NumberBuffer[kMaxWidth];
   ::memset(NumberBuffer, '0', std::size(NumberBuffer));
   if (Prefix)
     NumberBuffer[1] = 'x';
@@ -162,6 +187,7 @@ void llvm::write_hex(raw_ostream &S, uint64_t N, HexPrintStyle Style,
     *--CurPtr = hexdigit(x, !Upper);
     N /= 16;
   }
+#endif
 
   S.write(NumberBuffer, NumChars);
 }

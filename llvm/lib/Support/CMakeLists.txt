@@ -639,6 +639,32 @@ add_executable(llvm-optionstrcmp-stable EXCLUDE_FROM_ALL
   rust/optionstrcmp/test/stable.cpp)
 target_link_libraries(llvm-optionstrcmp-stable PRIVATE LLVMSupport)
 
+if(LLVM_ENABLE_RUST_NATIVEFORMATTING)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_nativeformatting
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/nativeformatting/Cargo.toml")
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_NATIVEFORMATTING)
+  target_link_libraries(LLVMSupport PRIVATE llvm_nativeformatting)
+
+  add_executable(llvm-rust-nativeformatting-differential EXCLUDE_FROM_ALL
+    rust/nativeformatting/test/differential.cpp)
+  target_include_directories(llvm-rust-nativeformatting-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-nativeformatting-differential PRIVATE
+    llvm_nativeformatting)
+  add_custom_target(check-llvm-rust-nativeformatting
+    COMMAND llvm-rust-nativeformatting-differential
+    COMMAND llvm-nativeformatting-stable
+    DEPENDS llvm-rust-nativeformatting-differential
+            llvm-nativeformatting-stable
+    USES_TERMINAL)
+endif()
+
+add_executable(llvm-nativeformatting-stable EXCLUDE_FROM_ALL
+  rust/nativeformatting/test/stable.cpp)
+target_link_libraries(llvm-nativeformatting-stable PRIVATE LLVMSupport)
+
 # Link ICU library if it is an external library.
 if(ICU_FOUND AND NOT HAVE_WINDOWS_ICU)
   target_link_libraries(LLVMSupport

@@ -175,8 +175,9 @@ Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
 (`LLVM_ENABLE_RUST_CONVERTUTF`), `ConvertEBCDIC.cpp`
 (`LLVM_ENABLE_RUST_CONVERTEBCDIC`), `xxhash.cpp`
 (`LLVM_ENABLE_RUST_XXHASH`), `DJB.cpp` (`LLVM_ENABLE_RUST_DJB`),
-`VersionTuple.cpp` (`LLVM_ENABLE_RUST_VERSIONTUPLE`), and
-`OptionStrCmp.cpp` (`LLVM_ENABLE_RUST_OPTIONSTRCMP`).
+`VersionTuple.cpp` (`LLVM_ENABLE_RUST_VERSIONTUPLE`),
+`OptionStrCmp.cpp` (`LLVM_ENABLE_RUST_OPTIONSTRCMP`), and the integer/hex core
+of `NativeFormatting.cpp` (`LLVM_ENABLE_RUST_NATIVEFORMATTING`).
 Selection criteria: small, deterministic,
 byte-buffer in / byte-buffer out, no LLVM types in the interface, existing unit
 tests.
@@ -205,6 +206,45 @@ so its correctness sweep covers the public wrapper. The throughput table times
 the public path, which is 3.0x to 4.0x faster across the same range.
 `llvm/lib/Support/rust/base64/test/differential.cpp` carries the reference
 implementations and both the single-pass and public-path throughput rows.
+
+The NativeFormatting port replaces only the decimal/hex digit conversion in
+`llvm/lib/Support/NativeFormatting.cpp`; the C++ wrapper keeps the
+`raw_ostream` writes, sign handling, minimum-width padding, and the unchanged
+`write_double` path. The crate exports two buffer-oriented C ABI functions:
+`llvm_nativeformatting_format_decimal(value, grouping, out, cap)` and
+`llvm_nativeformatting_format_hex(value, upper, prefix, width, out, cap)`.
+Decimal conversion uses a two-digit lookup table, and hex conversion consumes
+eight nibbles per iteration with a 256-entry byte-to-two-hex-digits table. The
+C++ wrapper still allocates only a 128-byte stack buffer, so the option does not
+change allocation behavior.
+
+Correctness coverage:
+
+* Five crate tests cover zero, 32/64-bit edges, grouping, prefix/width, and the
+  short-buffer contract.
+* `llvm-rust-nativeformatting-differential` checks the edge corpus and 200,000
+  random values against an independent C++ reference: 0 mismatches.
+* `llvm-nativeformatting-stable` checks the public C++ API with the option on
+  and off, including `write_double`.
+
+Measured on this Zen 4 host with `g++ -O3` against `-C opt-level=3`, generic
+x86-64 on both sides, nine interleaved pinned runs (`taskset -c 0`), median
+ns/op:
+
+| Operation | C++ | Rust | Rust speedup |
+|-----------|-----|------|--------------|
+| Decimal integer | 27.47 | 17.08 | 1.61x |
+| Grouped integer | 63.68 | 24.61 | 2.59x |
+| Hex, width 16 | 12.96 | 11.07 | 1.17x |
+
+The process-level benchmark (four million calls per operation) took 415.96 ms
+wall / 413.82 ms CPU for C++ and 213.51 ms / 211.32 ms for Rust, with 3.88 MiB
+peak RSS for both. A clean C++ compile of `NativeFormatting.cpp` took 677.72 ms
+wall / 582.22 ms CPU / 127.60 MiB RSS and produced a 13,208-byte object; the
+clean Rust crate build took 195.41 ms / 123.14 ms / 114.00 MiB and produced a
+5,055,064-byte archive. The linked stable test grew from 1,564,480 to 1,577,120
+bytes (+0.81%); the large Rust archive is mostly `compiler_builtins` bitcode and
+linker GC removes it from the consumer.
 
 ## Measurement policy
 
@@ -262,6 +302,7 @@ generic x86-64 target unless noted:
 | ConvertEBCDIC   | 1.04-1.10x UTF-8 output, 1.28-1.30x EBCDIC output, 1.40-1.43x on GOFF 129-256 B names |
 | xxHash 64-bit   | 0.99x at 12 B, 1.1x at 48 B, 2.5x at 768 B, 3.5x at 1 MiB |
 | xxHash 128-bit  | 1.04x at 12 B, 1.2x at 48 B, 2.3x at 768 B, 3.5x at 1 MiB |
+| NativeFormatting| 1.61x decimal, 2.59x grouped, 1.17x hex (public path) |
 
 MD5 initially lost to GCC at the generic target (0.83x). LLVM's reassociation
 moved the round constant to the end of `a + f + x + t`, leaving three register
