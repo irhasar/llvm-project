@@ -91,8 +91,20 @@ const STRTAB_BLOB: u32 = 1;
 
 /// Serializes a module to LLVM bitcode.
 pub fn write_bitcode(module: &mut Module) -> Result<Vec<u8>> {
+    write_bitcode_with_options(module, WriteOptions::default())
+}
+
+/// Options controlling textual memory-effect compatibility while writing.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WriteOptions {
+    /// Accept LLVM 19-compatible memory text without target-memory effects.
+    pub llvm19_compat: bool,
+}
+
+/// Writes a module with explicit options.
+pub fn write_bitcode_with_options(module: &mut Module, options: WriteOptions) -> Result<Vec<u8>> {
     ensure_implicit_alloca(module);
-    let mut writer = Writer::new(module);
+    let mut writer = Writer::new(module, options.llvm19_compat);
     writer.write()?;
     Ok(writer.finish())
 }
@@ -139,12 +151,13 @@ struct Writer<'a> {
     paramattr_lists: Vec<Vec<u64>>,
     paramattr_list_ids: HashMap<Vec<u64>, u32>,
     local_values: HashMap<LocalId, u32>,
+    llvm19_compat: bool,
     #[cfg(test)]
     split_attr_slots: bool,
 }
 
 impl<'a> Writer<'a> {
-    fn new(module: &'a Module) -> Self {
+    fn new(module: &'a Module, llvm19_compat: bool) -> Self {
         let mut type_ids = HashMap::new();
         for (index, (id, _)) in module.types.iter().enumerate() {
             type_ids.insert(id, index as u32);
@@ -204,6 +217,7 @@ impl<'a> Writer<'a> {
             paramattr_lists: Vec::new(),
             paramattr_list_ids: HashMap::new(),
             local_values: HashMap::new(),
+            llvm19_compat,
             #[cfg(test)]
             split_attr_slots: false,
         };
@@ -412,7 +426,8 @@ impl<'a> Writer<'a> {
                     entries.push((index as u32 + 1, attrs));
                 }
             }
-            let mut function_attrs = expand_function_attributes(self.module, &function.attrs)?;
+            let mut function_attrs =
+                expand_function_attributes(self.module, &function.attrs, !self.llvm19_compat)?;
             let mut function_align = None;
             function_attrs.retain(|attr| {
                 if let Some(value) = parse_align_attribute(&attr.0) {
@@ -454,7 +469,7 @@ impl<'a> Writer<'a> {
                         entries.push((index as u32 + 1, attrs));
                     }
                 }
-                let attrs = expand_function_attributes(self.module, attrs)?;
+                let attrs = expand_function_attributes(self.module, attrs, !self.llvm19_compat)?;
                 if !attrs.is_empty() {
                     entries.push((function_attr_index(), attrs));
                 }
@@ -1449,7 +1464,7 @@ mod tests {
         let dup2 = module.function_named(dup2_name).expect("dup2");
         module.functions[dup2].params[0].attrs = attrs;
 
-        let mut writer = Writer::new(&module);
+        let mut writer = Writer::new(&module, false);
         writer.split_attr_slots = true;
         writer.write().expect("write");
         let bytes = writer.finish();

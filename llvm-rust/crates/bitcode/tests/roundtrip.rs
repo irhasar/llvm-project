@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-use llvm_rust_bitcode::{read_bitcode, write_bitcode};
+use llvm_rust_bitcode::{
+    ReadOptions, WriteOptions, read_bitcode, read_bitcode_with_options, write_bitcode,
+    write_bitcode_with_options,
+};
 use llvm_rust_ir::{parse_module, print_module};
 
 fn corpus() -> Vec<PathBuf> {
@@ -192,12 +195,11 @@ fn rust_bitcode_round_trip_matches_text() {
     let files = corpus();
     assert!(!files.is_empty(), "corpus is empty");
     for path in files {
-        // Repeated function memory effects are intentionally canonicalized by
-        // bitcode decoding; the differential harness checks that against LLVM.
-        if path
-            .file_name()
-            .is_some_and(|name| name == "memory_effects.ll" || name == "memory_groups.ll")
-        {
+        // Repeated memory effects are canonicalized, and the AArch64 fixture
+        // uses LLVM 19 semantics covered by the mode-specific test below.
+        if path.file_name().is_some_and(|name| {
+            name == "memory_effects.ll" || name == "memory_groups.ll" || name == "aarch64_memory.ll"
+        }) {
             continue;
         }
         let source = fs::read_to_string(&path).expect("read corpus file");
@@ -281,6 +283,60 @@ entry:
     let second = write_bitcode(&mut reparsed).expect("rewrite AArch64 memory");
     let second_read = read_bitcode(&second).expect("reread AArch64 memory");
     assert_eq!(text, print_module(&second_read));
+}
+
+#[test]
+fn llvm19_mode_omits_aarch64_target_clauses() {
+    let source = r#"target triple = "aarch64-unknown-linux-gnu"
+declare void @callee()
+declare void @read_default_write_inaccessible() memory(read, inaccessiblemem: write)
+
+define void @caller() {
+entry:
+  call void @callee() memory(read, inaccessiblemem: write)
+  ret void
+}
+"#;
+    let mut module = parse_module(source).expect("parse LLVM 19 AArch64 memory");
+    let bytes = write_bitcode_with_options(
+        &mut module,
+        WriteOptions {
+            llvm19_compat: true,
+        },
+    )
+    .expect("write LLVM 19 AArch64 memory");
+    let llvm19 = print_module(
+        &read_bitcode_with_options(
+            &bytes,
+            ReadOptions {
+                llvm19_compat: true,
+            },
+        )
+        .expect("read LLVM 19 AArch64 memory"),
+    );
+    assert!(!llvm19.contains("target_mem"), "{llvm19}");
+    assert!(
+        llvm19.contains(
+            "declare void @read_default_write_inaccessible() memory(read, inaccessiblemem: write)"
+        ),
+        "{llvm19}"
+    );
+    assert!(
+        llvm19.contains("call void @callee() memory(read, inaccessiblemem: write)"),
+        "{llvm19}"
+    );
+
+    let target_aware = print_module(&read_bitcode(&bytes).expect("read target-aware"));
+    assert!(target_aware.contains("target_mem: write"), "{target_aware}");
+
+    let mut reparsed = parse_module(&llvm19).expect("reparse LLVM 19 disassembly");
+    write_bitcode_with_options(
+        &mut reparsed,
+        WriteOptions {
+            llvm19_compat: true,
+        },
+    )
+    .expect("reassemble LLVM 19 disassembly");
 }
 
 #[test]

@@ -112,8 +112,20 @@ struct FuncState {
     deferred_phis: Vec<(InstId, Record, u32, TypeId)>,
 }
 
+/// Options controlling textual memory-effect compatibility while reading.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReadOptions {
+    /// Emit LLVM 19-compatible memory text, which has no target-memory clause.
+    pub llvm19_compat: bool,
+}
+
 /// Reads a bitcode file into a module.
 pub fn read_bitcode(bytes: &[u8]) -> Result<Module> {
+    read_bitcode_with_options(bytes, ReadOptions::default())
+}
+
+/// Reads a bitcode file with explicit options.
+pub fn read_bitcode_with_options(bytes: &[u8], options: ReadOptions) -> Result<Module> {
     let stream = Bitstream::parse(bytes)?;
     let strtab = stream
         .blocks
@@ -140,6 +152,7 @@ pub fn read_bitcode(bytes: &[u8]) -> Result<Module> {
         attr_lists: Vec::new(),
         attr_budget: bytes.len().saturating_mul(8).saturating_add(4096),
         next_unnamed: 0,
+        llvm19_compat: options.llvm19_compat,
     };
     reader.read_module(module_block)?;
     reader.resolve_globals()?;
@@ -160,6 +173,7 @@ struct Reader {
     attr_lists: Vec<Arc<Vec<(u32, Arc<Vec<Attribute>>)>>>,
     attr_budget: usize,
     next_unnamed: u32,
+    llvm19_compat: bool,
 }
 
 impl Reader {
@@ -235,6 +249,7 @@ impl Reader {
                 &self.module.types,
                 &self.types,
                 self.module.target_triple.as_deref(),
+                !self.llvm19_compat,
             )?;
             deduplicate_attributes(&mut attrs);
             self.attr_budget = self
@@ -1575,6 +1590,7 @@ mod tests {
             attr_lists: Vec::new(),
             attr_budget: 4096,
             next_unnamed: 0,
+            llvm19_compat: false,
         }
     }
 

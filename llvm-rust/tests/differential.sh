@@ -4,14 +4,18 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 LLVM_BIN=${LLVM_BIN:-/usr/lib/llvm-19/bin}
+v2_complete() {
+    [ -n "$1" ] && [ -x "$1/llvm-as" ] && [ -x "$1/llvm-dis" ] && [ -x "$1/llvm-bcanalyzer" ]
+}
+
 V2_BIN=${LLVM_V2_BIN:-}
 V2_REQUIRED=0
 if [ -n "$V2_BIN" ]; then
     V2_REQUIRED=1
 fi
 if [ -z "$V2_BIN" ]; then
-    for candidate in /usr/lib/llvm-24/bin /usr/lib/llvm-23/bin; do
-        if [ -x "$candidate/llvm-as" ]; then
+    for candidate in /usr/lib/llvm-25/bin /usr/lib/llvm-24/bin /usr/lib/llvm-23/bin; do
+        if v2_complete "$candidate"; then
             V2_BIN=$candidate
             break
         fi
@@ -42,7 +46,7 @@ for input in tests/corpus/*.ll tests/corpus/*.bc; do
 
     if [[ "$input" == *.bc ]]; then
         "$LLVM_BIN/llvm-dis" "$input" -o "$cpp_ll"
-        ./target/debug/llvm-dis-rust "$input" -o "$rust_ll"
+        ./target/debug/llvm-dis-rust --llvm19 "$input" -o "$rust_ll"
         if ! "$LLVM_BIN/llvm-bcanalyzer" "$input" >/dev/null 2>&1; then
             echo "FAIL bcanalyzer fixture: $name"
             status=1
@@ -54,7 +58,7 @@ for input in tests/corpus/*.ll tests/corpus/*.bc; do
             cat "$TMP/$name-reader-canon.diff"
             status=1
         fi
-        ./target/debug/llvm-as-rust "$rust_ll" -o "$rust_bc"
+        ./target/debug/llvm-as-rust --llvm19 "$rust_ll" -o "$rust_bc"
         if ! "$LLVM_BIN/llvm-bcanalyzer" "$rust_bc" >/dev/null 2>&1; then
             echo "FAIL bcanalyzer fixture round trip: $name"
             status=1
@@ -72,7 +76,7 @@ for input in tests/corpus/*.ll tests/corpus/*.bc; do
     fi
 
     "$LLVM_BIN/llvm-as" "$input" -o "$cpp_bc"
-    ./target/debug/llvm-as-rust "$input" -o "$rust_bc"
+    ./target/debug/llvm-as-rust --llvm19 "$input" -o "$rust_bc"
     "$LLVM_BIN/llvm-dis" "$cpp_bc" -o "$cpp_ll"
     "$LLVM_BIN/llvm-dis" "$rust_bc" -o "$rust_ll"
 
@@ -87,7 +91,7 @@ for input in tests/corpus/*.ll tests/corpus/*.bc; do
         status=1
     fi
 
-    ./target/debug/llvm-dis-rust "$cpp_bc" -o "$read_ll"
+    ./target/debug/llvm-dis-rust --llvm19 "$cpp_bc" -o "$read_ll"
     "$LLVM_BIN/llvm-as" "$read_ll" -o "$read_bc"
     "$LLVM_BIN/llvm-dis" "$read_bc" -o "$read_canon"
     if ! "$LLVM_BIN/llvm-bcanalyzer" "$read_bc" >/dev/null 2>&1; then
@@ -106,13 +110,8 @@ for input in tests/corpus/*.ll tests/corpus/*.bc; do
 done
 
 v2_ready=0
-if [ -n "$V2_BIN" ]; then
+if v2_complete "$V2_BIN"; then
     v2_ready=1
-    for tool in llvm-as llvm-dis llvm-bcanalyzer; do
-        if [ ! -x "$V2_BIN/$tool" ]; then
-            v2_ready=0
-        fi
-    done
 fi
 if [ "$V2_REQUIRED" -eq 1 ] && [ "$v2_ready" -ne 1 ]; then
     echo "FAIL v2 oracle: LLVM_V2_BIN must contain llvm-as, llvm-dis, and llvm-bcanalyzer: $V2_BIN"

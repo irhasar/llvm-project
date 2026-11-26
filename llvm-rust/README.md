@@ -152,7 +152,13 @@ LLVM_V2_BIN=/usr/lib/llvm-23/bin ./tests/differential.sh
 
 When `LLVM_V2_BIN` is set explicitly, the directory must contain `llvm-as`,
 `llvm-dis`, and `llvm-bcanalyzer`; an incomplete oracle fails the harness
-instead of being skipped.
+instead of being skipped. Auto-discovery only accepts a complete oracle, so
+an incomplete LLVM 24 install does not mask a usable LLVM 23.
+
+The base LLVM 19 differential runs the Rust tools with `--llvm19`, which
+omits `target_mem` clauses and accepts LLVM 19's three-location AArch64
+memory text. Target-aware output remains the default for Rust and newer
+LLVM consumers.
 
 Reproducible benchmark (5 runs, `taskset -c 0`, median and min/max):
 
@@ -164,15 +170,18 @@ python3 tests/bench.py --runs 5
 
 ## M1 results
 
-Differential harness: all 30 modules in `tests/corpus/` match the C++ LLVM
+Differential harness: all 31 modules in `tests/corpus/` match the C++ LLVM
 19.1.7 oracle in both directions after normalizing `source_filename` and
-`ModuleID`. A separate `tests/corpus/v2/aarch64_memory.ll` fixture is checked
-against an LLVM 23+ oracle when `LLVM_V2_BIN` is set, covering version-2
-target memory and the AArch64 downgrade path. The corpus covers TLS models,
+`ModuleID`. This includes an AArch64 fixture whose default and inaccessible
+access differ, checked through the `--llvm19` text mode. A separate
+`tests/corpus/v2/aarch64_memory.ll` fixture is checked against an LLVM 23+
+oracle when `LLVM_V2_BIN` is set, covering version-2 target memory and the
+AArch64 downgrade path. The corpus covers TLS models,
 sections, opaque types, `i128` constants, hexadecimal floats and
 subnormal/signaling-NaN cases, float and double `CST_DATA` arrays, function
 and multiple-group alignment, type attributes with quoted names, raw
-non-UTF-8 attribute strings, parameter memory attributes, argument-indexed call-site attributes,
+non-UTF-8 attribute strings, parameter memory attributes, argument-indexed
+call-site attributes,
 `local_unnamed_addr`, forward references in constants and instructions,
 UTF-8 section names, unnamed globals/functions, explicit quoted numeric
 global/function names, unnamed/global slot ordering, unnamed/name collisions,
@@ -201,21 +210,21 @@ five runs:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 36.4 ms | 35.9-37.3 ms | 55.8 MiB |
-| `llvm-as-rust` | 23.8 ms | 23.2-24.7 ms | 14.3 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 30.1 ms | 29.8-30.4 ms | 54.7 MiB |
-| `llvm-dis-rust` on C++ bitcode | 19.0 ms | 18.7-19.2 ms | 14.3 MiB |
+| `llvm-as` (C++) | 35.5 ms | 35.3-36.4 ms | 55.7 MiB |
+| `llvm-as-rust` | 23.8 ms | 23.2-24.1 ms | 14.9 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 30.3 ms | 30.1-30.7 ms | 54.6 MiB |
+| `llvm-dis-rust` on C++ bitcode | 19.0 ms | 18.7-19.3 ms | 14.9 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer-only
 corpus, Rust throughput was about 1.5x the C++ assembler and 1.6x the C++
-disassembler, and peak RSS was about 3.8x lower. Each tool gets one discarded
+disassembler, and peak RSS was about 3.7x lower. Each tool gets one discarded
 warmup run before the five measured runs. These are throughput and memory
 measurements, not a generated-code performance claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.3 MiB
 (`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 A clean release build of the two Rust tools, using a separate target
-directory, took 9.7 s wall, 31.6 s user, and 1.9 s system time. This is a
+directory, took 9.6 s wall, 31.4 s user, and 2.0 s system time. This is a
 Rust-only observation, not a cross-toolchain build-time result. A C++ compile
 baseline is not available in this workspace: only the installed LLVM 19.1.7
 tools and `libLLVM.so` are present, without LLVM development headers or a

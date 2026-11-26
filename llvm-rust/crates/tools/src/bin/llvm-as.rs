@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::process::exit;
 
-use llvm_rust_bitcode::write_bitcode;
+use llvm_rust_bitcode::{WriteOptions, write_bitcode_with_options};
 use llvm_rust_ir::{parse_module, verify_module};
 use llvm_rust_support::{Error, Result};
 
@@ -17,6 +17,7 @@ fn main() {
 fn run() -> Result<()> {
     let mut input = None;
     let mut output = None;
+    let mut llvm19 = false;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -26,8 +27,9 @@ fn run() -> Result<()> {
                         .ok_or_else(|| Error::io("missing argument to -o"))?,
                 );
             }
+            "--llvm19" => llvm19 = true,
             "-h" | "--help" => {
-                println!("usage: llvm-as-rust [input.ll] [-o output.bc]");
+                println!("usage: llvm-as-rust [--llvm19] [input.ll] [-o output.bc]");
                 return Ok(());
             }
             other if other.starts_with('-') => {
@@ -54,7 +56,12 @@ fn run() -> Result<()> {
         }
         return Err(Error::verify("module failed verification"));
     }
-    let bytes = write_bitcode(&mut module)?;
+    let bytes = write_bitcode_with_options(
+        &mut module,
+        WriteOptions {
+            llvm19_compat: llvm19,
+        },
+    )?;
 
     match output.as_deref() {
         Some("-") | None => io::stdout().write_all(&bytes)?,

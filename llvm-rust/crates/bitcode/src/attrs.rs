@@ -684,6 +684,7 @@ fn is_aarch64_triple(triple: Option<&str>) -> bool {
 fn resolve_function_attributes(
     attrs: Vec<Attribute>,
     target_triple: Option<&str>,
+    target_memory: bool,
 ) -> Result<Vec<Attribute>> {
     let mut resolved = Vec::new();
     let mut legacy_memory = MemoryEffects::unknown();
@@ -703,7 +704,13 @@ fn resolve_function_attributes(
                 }
             }
             let inaccessible = parsed.effects.get(MEM_INACCESSIBLE);
-            if parsed.target_explicit {
+            if !target_memory {
+                if parsed.target_explicit {
+                    return Err(Error::bitcode(format!(
+                        "target memory effects in `{text}` are not supported in LLVM 19 mode"
+                    )));
+                }
+            } else if parsed.target_explicit {
                 if !is_aarch64 {
                     return Err(Error::bitcode(format!(
                         "target memory effects in `{text}` require an AArch64 target"
@@ -746,6 +753,7 @@ fn resolve_function_attributes(
 pub(crate) fn expand_function_attributes(
     module: &Module,
     attrs: &[Attribute],
+    target_memory: bool,
 ) -> Result<Vec<Attribute>> {
     let mut expanded = Vec::new();
     let inline: Vec<Attribute> = attrs
@@ -754,7 +762,8 @@ pub(crate) fn expand_function_attributes(
         .map(|attr| Attribute(attr.0.trim().to_string()))
         .collect();
     if !inline.is_empty() {
-        let resolved = resolve_function_attributes(inline, module.target_triple.as_deref())?;
+        let resolved =
+            resolve_function_attributes(inline, module.target_triple.as_deref(), target_memory)?;
         merge_attributes(&mut expanded, &resolved);
     }
     for attr in attrs {
@@ -763,7 +772,11 @@ pub(crate) fn expand_function_attributes(
         }
         let mut group_attrs = Vec::new();
         expand_attribute(module, attr, 0, &mut group_attrs)?;
-        let resolved = resolve_function_attributes(group_attrs, module.target_triple.as_deref())?;
+        let resolved = resolve_function_attributes(
+            group_attrs,
+            module.target_triple.as_deref(),
+            target_memory,
+        )?;
         merge_attributes(&mut expanded, &resolved);
     }
     Ok(expanded)
@@ -775,6 +788,7 @@ pub(crate) fn decode_attribute_group(
     types: &TypeTable,
     type_ids: &[TypeId],
     target_triple: Option<&str>,
+    emit_aarch64_target: bool,
 ) -> Result<(u64, u32, Vec<Attribute>)> {
     if record.operands.len() < 3 {
         return Err(Error::bitcode("invalid parameter attribute group"));
@@ -816,7 +830,8 @@ pub(crate) fn decode_attribute_group(
                     .get(cursor + 2)
                     .ok_or_else(|| Error::bitcode("truncated integer attribute"))?;
                 if code == 86 {
-                    let effects = MemoryEffects::from_int(value, is_aarch64)?;
+                    let effects =
+                        MemoryEffects::from_int(value, is_aarch64 && emit_aarch64_target)?;
                     if index == FUNCTION_INDEX {
                         modern_memory = Some(effects);
                     } else {
@@ -876,7 +891,7 @@ pub(crate) fn decode_attribute_group(
         modern_memory = Some(legacy_memory);
     }
     if let Some(effects) = modern_memory {
-        let text = if is_aarch64 && index == FUNCTION_INDEX {
+        let text = if is_aarch64 && emit_aarch64_target && index == FUNCTION_INDEX {
             effects.text_for_aarch64()
         } else {
             effects.text()
@@ -1042,7 +1057,7 @@ mod tests {
             blob: None,
         };
         let (_, index, attrs) =
-            decode_attribute_group(&record, &TypeTable::new(), &[], None).expect("decode");
+            decode_attribute_group(&record, &TypeTable::new(), &[], None, true).expect("decode");
         assert_eq!(index, u32::MAX);
         assert_eq!(attrs, vec![Attribute("memory(none)".to_string())]);
     }
@@ -1102,16 +1117,22 @@ mod tests {
             operands: vec![1, u64::from(u32::MAX), 1, 86, value],
             blob: None,
         };
-        let (_, _, attrs) =
-            decode_attribute_group(&record((2u64 << 56) | 0x555), &TypeTable::new(), &[], None)
-                .expect("version 2 read");
+        let (_, _, attrs) = decode_attribute_group(
+            &record((2u64 << 56) | 0x555),
+            &TypeTable::new(),
+            &[],
+            None,
+            true,
+        )
+        .expect("version 2 read");
         assert_eq!(attrs, vec![Attribute("memory(read)".to_string())]);
         assert!(
             decode_attribute_group(
                 &record((2u64 << 56) | (1 << 9)),
                 &TypeTable::new(),
                 &[],
-                None
+                None,
+                true,
             )
             .is_err()
         );
@@ -1120,10 +1141,12 @@ mod tests {
     #[test]
     fn aarch64_rejects_memory_effects_that_lose_target_access() {
         let aarch64 = Some("aarch64-unknown-linux-gnu");
-        let resolve =
-            |text: &str| resolve_function_attributes(vec![Attribute(text.to_string())], aarch64);
+        let resolve = |text: &str| {
+            resolve_function_attributes(vec![Attribute(text.to_string())], aarch64, true)
+        };
         assert!(resolve("memory(write, inaccessiblemem: none, errnomem: write)").is_err());
         assert!(resolve("memory(write, inaccessiblemem: none)").is_err());
+        assert!(resolve("memory(read, inaccessiblemem: write)").is_err());
         assert_eq!(
             resolve("memory(write, inaccessiblemem: write, errnomem: write)").unwrap(),
             vec![Attribute("memory(write)".to_string())]
@@ -1138,10 +1161,51 @@ mod tests {
                     "memory(inaccessiblemem: read, target_mem0: read, target_mem1: read)"
                         .to_string()
                 )],
-                Some("x86_64-unknown-linux-gnu")
+                Some("x86_64-unknown-linux-gnu"),
+                true,
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn llvm19_decode_ignores_target_memory_validation() {
+        let record = |value: u64| Record {
+            code: PARAMATTR_GRP_CODE_ENTRY,
+            operands: vec![1, u64::from(u32::MAX), 1, 86, value],
+            blob: None,
+        };
+        // arg=read, inaccessible=write, other=read, target0/1=read. AArch64
+        // target-aware decoding rejects this; LLVM 19 mode has no target field.
+        let (_, _, attrs) = decode_attribute_group(
+            &record((2u64 << 56) | 0x549),
+            &TypeTable::new(),
+            &[],
+            Some("aarch64-unknown-linux-gnu"),
+            false,
+        )
+        .expect("LLVM 19 decode");
+        assert_eq!(
+            attrs,
+            vec![Attribute(
+                "memory(read, inaccessiblemem: write)".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn llvm19_mode_accepts_legacy_aarch64_memory() {
+        let aarch64 = Some("aarch64-unknown-linux-gnu");
+        let resolve = |text: &str| {
+            resolve_function_attributes(vec![Attribute(text.to_string())], aarch64, false)
+        };
+        assert_eq!(
+            resolve("memory(read, inaccessiblemem: write)").unwrap(),
+            vec![Attribute(
+                "memory(read, inaccessiblemem: write)".to_string()
+            )]
+        );
+        assert!(resolve("memory(read, inaccessiblemem: write, target_mem: write)").is_err());
     }
 
     #[test]
@@ -1162,6 +1226,7 @@ mod tests {
             &TypeTable::new(),
             &[],
             Some("aarch64-unknown-linux-gnu"),
+            true,
         )
         .expect("aarch64 target memory");
         assert_eq!(
