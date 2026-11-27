@@ -224,28 +224,29 @@ four aggregate/vector element operations, and one attributed call each
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 47.1 ms | 46.7-49.2 ms | 58.5 MiB |
-| `llvm-as-rust` | 23.5 ms | 23.0-26.5 ms | 19.1 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 39.7 ms | 39.3-42.8 ms | 56.4 MiB |
-| `llvm-dis-rust` on C++ bitcode | 19.5 ms | 19.2-19.8 ms | 15.2 MiB |
+| `llvm-as` (C++) | 47.9 ms | 46.7-57.3 ms | 58.4 MiB |
+| `llvm-as-rust` | 23.2 ms | 22.9-27.2 ms | 19.1 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 40.8 ms | 40.5-42.0 ms | 56.2 MiB |
+| `llvm-dis-rust` on C++ bitcode | 18.7 ms | 18.5-19.7 ms | 15.2 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer/bitcode
-corpus, Rust throughput was about 2.0x the C++ assembler and 2.0x the C++
+corpus, Rust throughput was about 2.1x the C++ assembler and 2.2x the C++
 disassembler, and peak RSS was about 3.1x and 3.7x lower respectively. These
 are throughput and memory measurements, not a generated-code performance
-claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.6 MiB
+claim. The Rust binaries are 5.3 MiB (`llvm-as-rust`) and 4.5 MiB
 (`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 In-process component timings on the same corpus (50 iterations, no process
-startup or file I/O) are 8.48 ms parse, 2.35 ms print, 2.68 ms bitcode write,
-6.66 ms bitcode read, 11.41 ms assemble (parse plus write), and 8.98 ms
+startup or file I/O) are 7.53 ms parse, 2.23 ms print, 2.68 ms bitcode write,
+6.39 ms bitcode read, 11.23 ms assemble (parse plus write), and 8.62 ms
 disassemble (read plus print). The performance pass keeps token text borrowed
-from the source, uses FNV maps and vector-backed ID tables for IR and bitcode
+from the source, caches primitive and named types, consumes tokens instead of
+cloning them, uses FNV maps and vector-backed ID tables for IR and bitcode
 lookups, keeps small bitcode records and instruction operands inline, shares
-abbreviation tables across blocks, and avoids cloning function bodies while
-decoding. The CLI tools also exit without walking their arenas at process
-teardown.
+abbreviation tables across blocks, moves decoded instruction kinds instead of
+cloning them, and streams printer names and escaped bytes directly. The CLI
+tools also exit without walking their arenas at process teardown.
 
 A clean release build of the two Rust tools, using a separate target
 directory, took 9.6 s wall, 31.4 s user, and 2.0 s system time. This is a

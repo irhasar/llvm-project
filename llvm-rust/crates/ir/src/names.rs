@@ -113,6 +113,11 @@ mod tests {
     }
 
     #[test]
+    fn quotes_bytes_with_hex_escapes() {
+        assert_eq!(quote_bytes(b"a\"b\\\x00\x1f"), "\"a\\22b\\5C\\00\\1F\"");
+    }
+
+    #[test]
     fn unescapes_quoted_names() {
         assert_eq!(unescape_name("a\\20b").as_deref(), Some("a b"));
         assert_eq!(unescape_name("a\\22b").as_deref(), Some("a\"b"));
@@ -121,18 +126,28 @@ mod tests {
     }
 }
 
-/// Formats a byte string as an LLVM string literal, including quotes.
-pub fn quote_bytes(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() + 2);
+/// Writes a byte string as an LLVM string literal, including quotes.
+pub fn write_quoted_bytes(out: &mut String, bytes: &[u8]) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
     out.push('"');
     for &byte in bytes {
         match byte {
             b'"' => out.push_str("\\22"),
             b'\\' => out.push_str("\\5C"),
             0x20..=0x7e => out.push(byte as char),
-            _ => out.push_str(&format!("\\{byte:02X}")),
+            _ => {
+                out.push('\\');
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
         }
     }
     out.push('"');
+}
+
+/// Formats a byte string as an LLVM string literal, including quotes.
+pub fn quote_bytes(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() + 2);
+    write_quoted_bytes(&mut out, bytes);
     out
 }

@@ -124,6 +124,22 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   copy-on-write. Do not clone an abbreviation vector for every block.
 - Decode function bodies by iterating records by reference. Do not clone an
   entire body just to satisfy borrow checking.
+- Move decoded instruction kinds into the instruction and compute any derived
+  flags first. Borrow function parameter lists and local constant records
+  instead of cloning them. Skip unnamed-slot assignment when every parameter,
+  local, and block already has a name.
+- Cache interned primitive types and named-type lookups in `TypeTable`; do not
+  build an `Rc<str>` just to look up an existing named type. Keep the caches
+  lazy and covered by the interning tests.
+- Consume parser tokens with `take` when the current token is always advanced.
+  Do not clone `TokenKind` in type or constant parsing; `CStr` payloads are
+  heap vectors and cloning them is avoidable.
+- In the printer, write names and quoted byte strings directly into the output
+  buffer. Do not allocate a temporary `String` per global/function reference,
+  a `Vec` per call attribute partition, or a `format!` per escaped byte.
+  Format decimal constants with a small integer formatter.
+- Ordered ID lists have unique keys: preallocate the result and use
+  `sort_unstable_by_key` instead of a stable sort.
 - Short-lived CLI tools may skip arena teardown with `process::exit(0)` after
   flushing output. Never do this in library code or tests.
 - Do not keep unhelpful preallocation or cache tweaks. Measure both throughput
@@ -142,15 +158,18 @@ after 3 warmups.
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 47.1 ms | 46.7-49.2 ms | 58.5 MiB |
-| `llvm-as-rust` | 23.5 ms | 23.0-26.5 ms | 19.1 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 39.7 ms | 39.3-42.8 ms | 56.4 MiB |
-| `llvm-dis-rust` on C++ bitcode | 19.5 ms | 19.2-19.8 ms | 15.2 MiB |
+| `llvm-as` (C++) | 47.9 ms | 46.7-57.3 ms | 58.4 MiB |
+| `llvm-as-rust` | 23.2 ms | 22.9-27.2 ms | 19.1 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 40.8 ms | 40.5-42.0 ms | 56.2 MiB |
+| `llvm-dis-rust` on C++ bitcode | 18.7 ms | 18.5-19.7 ms | 15.2 MiB |
 
-In-process component medians: parse 8.48 ms, print 2.35 ms, bitcode write
-2.68 ms, bitcode read 6.66 ms, assemble 11.41 ms, disassemble 8.98 ms.
-Regression target: do not regress these medians beyond noise; investigate any
-consistent slowdown before adding features.
+In-process component medians: parse 7.53 ms, print 2.23 ms, bitcode write
+2.68 ms, bitcode read 6.39 ms, assemble 11.23 ms, disassemble 8.62 ms, verify
+7.85 ms. The optimization audit reduced parse from 8.48 ms, read from 6.66 ms,
+print from 2.35 ms, and disassemble from 8.98 ms; bitcode write stayed flat and
+the remaining deltas are within measurement noise. Regression target: do not
+regress these medians beyond noise; investigate any consistent slowdown before
+adding features.
 
 Before merging a performance change: capture the component baseline, make the
 change, run `cargo test --workspace` and `tests/differential.sh`, rerun the

@@ -522,8 +522,8 @@ impl Reader {
         function.unnamed_addr = unnamed_addr;
         function.local_unnamed_addr = local_unnamed_addr;
         function.dso_local = dso_local;
-        if let Type::Function { params, .. } = self.module.types.get(ty).clone() {
-            for param in params {
+        if let Type::Function { params, .. } = self.module.types.get(ty) {
+            for &param in params {
                 function.add_param(None, param, Vec::new());
             }
         }
@@ -587,7 +587,7 @@ impl Reader {
                 continue;
             }
             let ty = current_ty.ok_or_else(|| Error::bitcode("constant without a type"))?;
-            records.push((record.code, ty, record.clone()));
+            records.push((record.code, ty, record));
         }
         let ids: Vec<ConstId> = records
             .iter()
@@ -849,6 +849,15 @@ impl Reader {
     }
 
     fn assign_unnamed_slots(&mut self, id: FuncId) -> Result<()> {
+        let function = &self.module.functions[id];
+        if function.params.iter().all(|param| param.name.is_some())
+            && function.locals.iter().all(|local| local.name.is_some())
+            && function
+                .blocks_in_order()
+                .all(|(_, block)| block.name.is_some())
+        {
+            return Ok(());
+        }
         let mut slot = 0u32;
         let param_count = self.module.functions[id].params.len();
         for index in 0..param_count {
@@ -1082,14 +1091,9 @@ impl Reader {
             return Ok(());
         }
         let (kind, result_ty) = self.decode_instruction(record, inst_id, state)?;
+        let is_terminator = kind.is_terminator();
         let function = &mut self.module.functions[state.id];
-        let inst = function.add_inst(
-            block,
-            llvm_rust_ir::Instruction {
-                result: None,
-                kind: kind.clone(),
-            },
-        );
+        let inst = function.add_inst(block, llvm_rust_ir::Instruction { result: None, kind });
         if let Some(ty) = result_ty {
             let index = (inst_id - state.base) as usize;
             let local = match state.locals.get(index).copied() {
@@ -1111,7 +1115,7 @@ impl Reader {
                 .checked_add(1)
                 .ok_or_else(|| Error::bitcode("too many function values"))?;
         }
-        if kind.is_terminator() {
+        if is_terminator {
             state.current_block += 1;
         }
         Ok(())

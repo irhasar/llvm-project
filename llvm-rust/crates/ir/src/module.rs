@@ -397,25 +397,27 @@ impl Module {
 
     /// Globals in definition order, skipping unresolved placeholders.
     pub fn ordered_globals(&self) -> Vec<GlobalId> {
-        let mut ids: Vec<GlobalId> = self
-            .globals
-            .iter()
-            .filter(|(_, global)| self.types.is_valid(global.ty))
-            .map(|(id, _)| id)
-            .collect();
-        ids.sort_by_key(|id| self.global_order.get(id).copied().unwrap_or(u32::MAX));
+        let mut ids = Vec::with_capacity(self.globals.len());
+        ids.extend(
+            self.globals
+                .iter()
+                .filter(|(_, global)| self.types.is_valid(global.ty))
+                .map(|(id, _)| id),
+        );
+        ids.sort_unstable_by_key(|id| self.global_order.get(id).copied().unwrap_or(u32::MAX));
         ids
     }
 
     /// Functions in definition order, skipping unresolved placeholders.
     pub fn ordered_functions(&self) -> Vec<FuncId> {
-        let mut ids: Vec<FuncId> = self
-            .functions
-            .iter()
-            .filter(|(_, function)| self.types.is_valid(function.ty))
-            .map(|(id, _)| id)
-            .collect();
-        ids.sort_by_key(|id| self.function_order.get(id).copied().unwrap_or(u32::MAX));
+        let mut ids = Vec::with_capacity(self.functions.len());
+        ids.extend(
+            self.functions
+                .iter()
+                .filter(|(_, function)| self.types.is_valid(function.ty))
+                .map(|(id, _)| id),
+        );
+        ids.sort_unstable_by_key(|id| self.function_order.get(id).copied().unwrap_or(u32::MAX));
         ids
     }
 

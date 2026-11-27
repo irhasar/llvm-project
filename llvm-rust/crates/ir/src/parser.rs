@@ -1367,54 +1367,49 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_type(&mut self) -> Result<TypeId> {
-        let base = match self.peek_kind().clone() {
-            TokenKind::Ident(text) => {
-                self.advance();
-                match &*text {
-                    "void" => self.module.types.void(),
-                    "label" => self.module.types.intern(Type::Label),
-                    "token" => self.module.types.intern(Type::Token),
-                    "metadata" => self.module.types.intern(Type::Metadata),
-                    "opaque" => self.module.types.intern(Type::Opaque),
-                    "ptr" => {
-                        if self.eat_ident("addrspace") {
-                            self.expect_punct('(')?;
-                            let address_space = self.expect_int()?;
-                            self.expect_punct(')')?;
-                            if address_space != 0 {
-                                return Err(
-                                    self.error("nonzero pointer address spaces are not supported")
-                                );
-                            }
+        let token = self.take();
+        let span = token.span;
+        let base = match token.kind {
+            TokenKind::Ident(text) => match &*text {
+                "void" => self.module.types.void(),
+                "label" => self.module.types.intern(Type::Label),
+                "token" => self.module.types.intern(Type::Token),
+                "metadata" => self.module.types.intern(Type::Metadata),
+                "opaque" => self.module.types.intern(Type::Opaque),
+                "ptr" => {
+                    if self.eat_ident("addrspace") {
+                        self.expect_punct('(')?;
+                        let address_space = self.expect_int()?;
+                        self.expect_punct(')')?;
+                        if address_space != 0 {
+                            return Err(
+                                self.error("nonzero pointer address spaces are not supported")
+                            );
                         }
-                        self.module.types.pointer()
                     }
-                    "half" => self.module.types.intern(Type::Float(FloatKind::Half)),
-                    "bfloat" => self.module.types.intern(Type::Float(FloatKind::BFloat)),
-                    "float" => self.module.types.intern(Type::Float(FloatKind::Float)),
-                    "double" => self.module.types.intern(Type::Float(FloatKind::Double)),
-                    "fp128" => self.module.types.intern(Type::Float(FloatKind::Fp128)),
-                    "x86_fp80" => self.module.types.intern(Type::Float(FloatKind::X86Fp80)),
-                    "ppc_fp128" => self.module.types.intern(Type::Float(FloatKind::PpcFp128)),
-                    other => {
-                        if let Some(bits) = other.strip_prefix('i') {
-                            if let Ok(bits) = bits.parse::<u32>() {
-                                self.module.types.int(bits)
-                            } else {
-                                return Err(self.error(format!("invalid integer type `{other}`")));
-                            }
+                    self.module.types.pointer()
+                }
+                "half" => self.module.types.float(FloatKind::Half),
+                "bfloat" => self.module.types.float(FloatKind::BFloat),
+                "float" => self.module.types.float(FloatKind::Float),
+                "double" => self.module.types.float(FloatKind::Double),
+                "fp128" => self.module.types.float(FloatKind::Fp128),
+                "x86_fp80" => self.module.types.float(FloatKind::X86Fp80),
+                "ppc_fp128" => self.module.types.float(FloatKind::PpcFp128),
+                other => {
+                    if let Some(bits) = other.strip_prefix('i') {
+                        if let Ok(bits) = bits.parse::<u32>() {
+                            self.module.types.int(bits)
                         } else {
-                            return Err(self.error(format!("expected a type, found `{other}`")));
+                            return Err(self.error(format!("invalid integer type `{other}`")));
                         }
+                    } else {
+                        return Err(self.error(format!("expected a type, found `{other}`")));
                     }
                 }
-            }
-            TokenKind::Local(name) => {
-                self.advance();
-                self.module.types.named(&name)
-            }
+            },
+            TokenKind::Local(name) => self.module.types.named(&name),
             TokenKind::Punct('[') => {
-                self.advance();
                 let len = self.expect_int()? as u64;
                 self.expect_ident_is("x")?;
                 let elem = self.parse_type()?;
@@ -1422,7 +1417,6 @@ impl<'a> Parser<'a> {
                 self.module.types.array(elem, len)
             }
             TokenKind::Punct('<') => {
-                self.advance();
                 if self.eat_punct('{') {
                     let fields = self.parse_struct_fields('}')?;
                     self.expect_punct('>')?;
@@ -1448,7 +1442,6 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Punct('{') => {
-                self.advance();
                 let fields = self.parse_struct_fields('}')?;
                 self.module.types.intern(Type::Struct {
                     fields,
@@ -1457,7 +1450,10 @@ impl<'a> Parser<'a> {
                 })
             }
             other => {
-                return Err(self.error(format!("expected a type, found {other:?}")));
+                return Err(Error::parse_at(
+                    format!("expected a type, found {other:?}"),
+                    span,
+                ));
             }
         };
         if self.at_punct('(') {
@@ -1498,9 +1494,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_constant(&mut self, ty: TypeId) -> Result<ConstId> {
-        match self.peek_kind().clone() {
+        let token = self.take();
+        let span = token.span;
+        let quoted = token.quoted;
+        match token.kind {
             TokenKind::Int(value) => {
-                self.advance();
                 let bits =
                     self.module.types.get(ty).int_bits().ok_or_else(|| {
                         self.error("integer constant used with a non-integer type")
@@ -1514,7 +1512,6 @@ impl<'a> Parser<'a> {
                 Ok(self.module.const_int(ty, value))
             }
             TokenKind::Float(text) => {
-                self.advance();
                 let kind = match self.module.types.get(ty) {
                     Type::Float(kind) => *kind,
                     _ => return Err(self.error("floating constant used with a non-float type")),
@@ -1523,23 +1520,14 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| self.error(format!("invalid floating literal `{text}`")))?;
                 Ok(self.module.const_float_bits(ty, bits))
             }
-            TokenKind::CStr(bytes) => {
-                self.advance();
-                Ok(self
-                    .module
-                    .add_constant(Constant::new(ty, ConstKind::String(bytes))))
-            }
-            TokenKind::Meta(name) => {
-                self.advance();
-                Ok(self.module.add_constant(Constant::new(
-                    ty,
-                    ConstKind::MetadataString(name.into_owned()),
-                )))
-            }
+            TokenKind::CStr(bytes) => Ok(self
+                .module
+                .add_constant(Constant::new(ty, ConstKind::String(bytes)))),
+            TokenKind::Meta(name) => Ok(self.module.add_constant(Constant::new(
+                ty,
+                ConstKind::MetadataString(name.into_owned()),
+            ))),
             TokenKind::Global(name) => {
-                let span = self.peek().span;
-                let quoted = self.peek().quoted;
-                self.advance();
                 let symbol = self.reference_symbol(&name, quoted, span)?;
                 let kind = if let Some(id) = self.module.function_named(symbol) {
                     ConstKind::Function(id)
@@ -1551,7 +1539,6 @@ impl<'a> Parser<'a> {
                 Ok(self.module.add_constant(Constant::new(ty, kind)))
             }
             TokenKind::Ident(text) => {
-                self.advance();
                 let kind = match &*text {
                     "true" => ConstKind::Int(1),
                     "false" => ConstKind::Int(0),
@@ -1566,7 +1553,6 @@ impl<'a> Parser<'a> {
                 Ok(self.module.add_constant(Constant::new(ty, kind)))
             }
             TokenKind::Punct('[') => {
-                self.advance();
                 let elem_ty = match self.module.types.get(ty) {
                     Type::Array { elem, .. } | Type::Vector { elem, .. } => *elem,
                     _ => return Err(self.error("array constant used with a non-array type")),
@@ -1585,7 +1571,6 @@ impl<'a> Parser<'a> {
                 Ok(self.module.const_aggregate(ty, elems))
             }
             TokenKind::Punct('<') => {
-                self.advance();
                 if self.eat_punct('{') {
                     let id = self.parse_struct_constant(ty)?;
                     self.expect_punct('>')?;
@@ -1609,30 +1594,33 @@ impl<'a> Parser<'a> {
                     Ok(self.module.const_aggregate(ty, elems))
                 }
             }
-            TokenKind::Punct('{') => {
-                self.advance();
-                self.parse_struct_constant(ty)
-            }
-            TokenKind::Local(name) => {
-                Err(self.error(format!("local value %{name} is not a constant")))
-            }
-            other => Err(self.error(format!("expected a constant, found {other:?}"))),
+            TokenKind::Punct('{') => self.parse_struct_constant(ty),
+            TokenKind::Local(name) => Err(Error::parse_at(
+                format!("local value %{name} is not a constant"),
+                span,
+            )),
+            other => Err(Error::parse_at(
+                format!("expected a constant, found {other:?}"),
+                span,
+            )),
         }
     }
 
     fn parse_struct_constant(&mut self, ty: TypeId) -> Result<ConstId> {
-        let (fields, _) = self
-            .module
-            .types
-            .struct_body(ty)
-            .ok_or_else(|| self.error("struct constant used with a non-struct type"))?;
-        let fields = fields.to_vec();
+        if self.module.types.struct_body(ty).is_none() {
+            return Err(self.error("struct constant used with a non-struct type"));
+        }
         let mut elems = Vec::new();
         if !self.eat_punct('}') {
             let mut index = 0;
             loop {
                 let _ = self.parse_type()?;
-                let field_ty = fields.get(index).copied().unwrap_or(ty);
+                let field_ty = self
+                    .module
+                    .types
+                    .struct_body(ty)
+                    .and_then(|(fields, _)| fields.get(index).copied())
+                    .unwrap_or(ty);
                 elems.push(self.parse_constant(field_ty)?);
                 index += 1;
                 if !self.eat_punct(',') {
@@ -2438,12 +2426,14 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_ident_is(&mut self, expected: &str) -> Result<()> {
-        let text = self.expect_ident()?;
-        if text == expected {
-            Ok(())
-        } else {
-            Err(self.error(format!("expected `{expected}`, found `{text}`")))
+        if self.at_ident(expected) {
+            self.advance();
+            return Ok(());
         }
+        Err(self.error(format!(
+            "expected `{expected}`, found {:?}",
+            self.peek_kind()
+        )))
     }
 
     fn expect_local(&mut self) -> Result<(Cow<'a, str>, Span)> {
@@ -2526,12 +2516,13 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_int(&mut self) -> Result<u128> {
-        match self.peek_kind().clone() {
-            TokenKind::Int(value) => {
-                self.advance();
-                Ok(value)
-            }
-            other => Err(self.error(format!("expected an integer, found {other:?}"))),
+        let token = self.take();
+        match token.kind {
+            TokenKind::Int(value) => Ok(value),
+            other => Err(Error::parse_at(
+                format!("expected an integer, found {other:?}"),
+                token.span,
+            )),
         }
     }
 
