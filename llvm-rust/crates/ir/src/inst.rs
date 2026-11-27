@@ -497,6 +497,11 @@ pub enum InstKind {
         value: Operand,
         index: Operand,
     },
+    ShuffleVector {
+        first: Operand,
+        second: Operand,
+        mask: Operand,
+    },
     Unreachable,
 }
 

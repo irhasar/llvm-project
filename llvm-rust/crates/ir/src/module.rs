@@ -695,6 +695,15 @@ fn for_each_operand_mut(kind: &mut InstKind, mut visit: impl FnMut(&mut Operand)
             visit(value);
             visit(index);
         }
+        InstKind::ShuffleVector {
+            first,
+            second,
+            mask,
+        } => {
+            visit(first);
+            visit(second);
+            visit(mask);
+        }
         InstKind::Br { .. } | InstKind::Unreachable => {}
     }
 }

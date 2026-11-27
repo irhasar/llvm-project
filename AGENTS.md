@@ -131,6 +131,10 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
 - Cache interned primitive types and named-type lookups in `TypeTable`; do not
   build an `Rc<str>` just to look up an existing named type. Keep the caches
   lazy and covered by the interning tests.
+- Vector-aware type checks must inspect the element type, not just the top
+  level: floating-point vector binops decode as FP ops, vector comparisons
+  return a vector of `i1`, and vector `select` conditions are vector `i1`.
+  Keep textual, verifier, reader, and writer paths in agreement.
 - Consume parser tokens with `take` when the current token is always advanced.
   Do not clone `TokenKind` in type or constant parsing; `CStr` payloads are
   heap vectors and cloning them is avoidable.
@@ -158,14 +162,14 @@ after 3 warmups.
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 47.9 ms | 46.7-57.3 ms | 58.4 MiB |
-| `llvm-as-rust` | 23.2 ms | 22.9-27.2 ms | 19.1 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 40.8 ms | 40.5-42.0 ms | 56.2 MiB |
-| `llvm-dis-rust` on C++ bitcode | 18.7 ms | 18.5-19.7 ms | 15.2 MiB |
+| `llvm-as` (C++) | 47.4 ms | 46.5-49.3 ms | 58.4 MiB |
+| `llvm-as-rust` | 23.0 ms | 22.7-24.1 ms | 19.1 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 39.8 ms | 38.9-40.6 ms | 56.4 MiB |
+| `llvm-dis-rust` on C++ bitcode | 18.6 ms | 18.3-18.7 ms | 15.2 MiB |
 
-In-process component medians: parse 7.53 ms, print 2.23 ms, bitcode write
-2.68 ms, bitcode read 6.39 ms, assemble 11.23 ms, disassemble 8.62 ms, verify
-7.85 ms. The optimization audit reduced parse from 8.48 ms, read from 6.66 ms,
+In-process component medians: parse 7.56 ms, print 2.15 ms, bitcode write
+2.70 ms, bitcode read 6.12 ms, assemble 10.85 ms, disassemble 8.27 ms, verify
+8.10 ms. The optimization audit reduced parse from 8.48 ms, read from 6.66 ms,
 print from 2.35 ms, and disassemble from 8.98 ms; bitcode write stayed flat and
 the remaining deltas are within measurement noise. Regression target: do not
 regress these medians beyond noise; investigate any consistent slowdown before

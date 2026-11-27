@@ -587,6 +587,18 @@ fn write_instruction(
             out.push_str(", ");
             write_operand(module, function, *index, out);
         }
+        InstKind::ShuffleVector {
+            first,
+            second,
+            mask,
+        } => {
+            out.push_str("shufflevector ");
+            write_operand(module, function, *first, out);
+            out.push_str(", ");
+            write_operand(module, function, *second, out);
+            out.push_str(", ");
+            write_operand(module, function, *mask, out);
+        }
         InstKind::Unreachable => out.push_str("unreachable"),
     }
 }
@@ -684,15 +696,15 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
             write_function_name(out, module, *id);
         }
         ConstKind::Aggregate(elems) => {
-            let (open, close) = match module.types.get(constant.ty) {
-                Type::Array { .. } => ("[", "]"),
-                Type::Vector { .. } => ("<", ">"),
-                Type::Struct { packed: true, .. } => ("<{", "}>"),
-                Type::Struct { .. } => ("{", "}"),
-                _ => ("[", "]"),
+            let (open, close, padded) = match module.types.get(constant.ty) {
+                Type::Array { .. } => ("[", "]", false),
+                Type::Vector { .. } => ("<", ">", false),
+                Type::Struct { packed: true, .. } => ("<{", "}>", true),
+                Type::Struct { .. } => ("{", "}", true),
+                _ => ("[", "]", false),
             };
             out.push_str(open);
-            if !elems.is_empty() {
+            if padded && !elems.is_empty() {
                 out.push(' ');
             }
             for (index, elem) in elems.iter().enumerate() {
@@ -703,7 +715,7 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
                 let _ = write!(out, "{} ", module.display_type(elem_constant.ty));
                 write_constant(module, *elem, out);
             }
-            if !elems.is_empty() {
+            if padded && !elems.is_empty() {
                 out.push(' ');
             }
             out.push_str(close);

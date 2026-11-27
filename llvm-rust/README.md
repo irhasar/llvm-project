@@ -44,8 +44,9 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
 - `ir`: textual parser, printer, verifier; module/globals/functions; integer,
   floating-point, pointer, array, vector, struct, function, and opaque types;
   TLS models, sections, function alignment, wide integers, and per-kind
-  floating-point hex literals; binary/unary, `icmp`/`fcmp`, `alloca`, `load`,
-  `store`, `getelementptr`, `call`, `phi`, `select`, casts, `ret`, `br`,
+  floating-point hex literals; binary/unary, vector arithmetic and vector
+  comparisons, `icmp`/`fcmp`, `alloca`, `load`, `store`, `getelementptr`,
+  `call`, `phi`, vector `select`, `shufflevector`, casts, `ret`, `br`,
   `condbr`, `switch`, `unreachable`. Unnamed values and blocks share one
   numbering sequence, and `phi` accepts forward and self references.
   `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
@@ -120,8 +121,8 @@ rejected otherwise instead of being lossily rewritten.
 This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
-debug info, constant expressions, atomics, `invoke`/`landingpad`, vector
-shuffles/arithmetic, or `fp128`/`x86_fp80`/`ppc_fp128` constants (wide float
+debug info, constant expressions, atomics, `invoke`/`landingpad`, scalable
+vector shuffles, or `fp128`/`x86_fp80`/`ppc_fp128` constants (wide float
 records are rejected). MC, object, X86, and codegen are still out of scope.
 
 ## Commands
@@ -179,7 +180,7 @@ python3 tests/bench.py --runs 11 --warmup 3
 
 ## M1 results
 
-Differential harness: all 31 generic modules in `tests/corpus/` match the
+Differential harness: all 32 generic modules in `tests/corpus/` match the
 selected C++ oracle in both directions after normalizing `source_filename`,
 `ModuleID`, and target-memory spelling. The
 `tests/corpus/aarch64_memory.ll` fixture is checked separately against
@@ -206,7 +207,9 @@ default and target access, duplicate attribute groups in a checked-in bitcode
 fixture that is read and reassembled with both Rust tools, unnamed
 value/block numbering, exact shift/divide flags, `phi` self references, and
 aggregate/vector element extraction and insertion (`extractvalue`,
-`insertvalue`, `extractelement`, and `insertelement`), including
+`insertvalue`, `extractelement`, and `insertelement`), vector integer and
+floating-point arithmetic, vector comparisons and `select`, `shufflevector`
+including shrinking masks and `undef` masks canonicalized to `poison`, and
 function-local aggregate constants and forward local element operands.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
@@ -224,22 +227,22 @@ four aggregate/vector element operations, and one attributed call each
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 47.9 ms | 46.7-57.3 ms | 58.4 MiB |
-| `llvm-as-rust` | 23.2 ms | 22.9-27.2 ms | 19.1 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 40.8 ms | 40.5-42.0 ms | 56.2 MiB |
-| `llvm-dis-rust` on C++ bitcode | 18.7 ms | 18.5-19.7 ms | 15.2 MiB |
+| `llvm-as` (C++) | 47.4 ms | 46.5-49.3 ms | 58.4 MiB |
+| `llvm-as-rust` | 23.0 ms | 22.7-24.1 ms | 19.1 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 39.8 ms | 38.9-40.6 ms | 56.4 MiB |
+| `llvm-dis-rust` on C++ bitcode | 18.6 ms | 18.3-18.7 ms | 15.2 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer/bitcode
-corpus, Rust throughput was about 2.1x the C++ assembler and 2.2x the C++
+corpus, Rust throughput was about 2.1x the C++ assembler and 2.1x the C++
 disassembler, and peak RSS was about 3.1x and 3.7x lower respectively. These
 are throughput and memory measurements, not a generated-code performance
 claim. The Rust binaries are 5.3 MiB (`llvm-as-rust`) and 4.5 MiB
 (`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 In-process component timings on the same corpus (50 iterations, no process
-startup or file I/O) are 7.53 ms parse, 2.23 ms print, 2.68 ms bitcode write,
-6.39 ms bitcode read, 11.23 ms assemble (parse plus write), and 8.62 ms
+startup or file I/O) are 7.56 ms parse, 2.15 ms print, 2.70 ms bitcode write,
+6.12 ms bitcode read, 10.85 ms assemble (parse plus write), and 8.27 ms
 disassemble (read plus print). The performance pass keeps token text borrowed
 from the source, caches primitive and named types, consumes tokens instead of
 cloning them, uses FNV maps and vector-backed ID tables for IR and bitcode

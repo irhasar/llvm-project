@@ -1820,8 +1820,8 @@ impl<'a> Parser<'a> {
                 let lhs = self.parse_value(function, ty)?;
                 self.expect_punct(',')?;
                 let rhs = self.parse_value(function, ty)?;
-                let i1 = self.module.types.int(1);
-                Ok((InstKind::ICmp { pred, lhs, rhs }, Some(i1)))
+                let result_ty = self.comparison_result_type(ty);
+                Ok((InstKind::ICmp { pred, lhs, rhs }, Some(result_ty)))
             }
             "fcmp" => {
                 self.advance();
@@ -1833,7 +1833,7 @@ impl<'a> Parser<'a> {
                 let lhs = self.parse_value(function, ty)?;
                 self.expect_punct(',')?;
                 let rhs = self.parse_value(function, ty)?;
-                let i1 = self.module.types.int(1);
+                let result_ty = self.comparison_result_type(ty);
                 Ok((
                     InstKind::FCmp {
                         pred,
@@ -1841,7 +1841,7 @@ impl<'a> Parser<'a> {
                         lhs,
                         rhs,
                     },
-                    Some(i1),
+                    Some(result_ty),
                 ))
             }
             "alloca" => {
@@ -2140,6 +2140,57 @@ impl<'a> Parser<'a> {
                     Some(vector_ty),
                 ))
             }
+            "shufflevector" => {
+                self.advance();
+                let first_ty = self.parse_type()?;
+                let first = self.parse_value_forward(function, first_ty)?;
+                let first_ty =
+                    self.require_operand_type(first, first_ty, "shufflevector first vector")?;
+                self.expect_punct(',')?;
+                let second_ty = self.parse_type()?;
+                let second = self.parse_value_forward(function, second_ty)?;
+                let second_ty =
+                    self.require_operand_type(second, second_ty, "shufflevector second vector")?;
+                self.expect_punct(',')?;
+                let mask_ty = self.parse_type()?;
+                let mask = self.parse_value(function, mask_ty)?;
+                let mask_ty = self.require_operand_type(mask, mask_ty, "shufflevector mask")?;
+                if !matches!(mask.kind, OperandKind::Const(_)) {
+                    return Err(self.error("shufflevector mask must be a constant"));
+                }
+                let mask = self.canonicalize_shuffle_mask(mask);
+                let (first_elem, _, first_scalable) = self
+                    .module
+                    .types
+                    .vector_info(first_ty)
+                    .ok_or_else(|| self.error("shufflevector first operand is not a vector"))?;
+                if first_scalable {
+                    return Err(self.error("scalable shufflevector is not supported"));
+                }
+                if second_ty != first_ty {
+                    return Err(self.error("shufflevector operands must have the same type"));
+                }
+                let (mask_elem, mask_len, mask_scalable) =
+                    self.module
+                        .types
+                        .vector_info(mask_ty)
+                        .ok_or_else(|| self.error("shufflevector mask is not a vector"))?;
+                if mask_scalable {
+                    return Err(self.error("scalable shufflevector masks are not supported"));
+                }
+                if !matches!(self.module.types.get(mask_elem), Type::Int(32)) {
+                    return Err(self.error("shufflevector mask element type must be i32"));
+                }
+                let result_ty = self.module.types.vector(first_elem, mask_len, false);
+                Ok((
+                    InstKind::ShuffleVector {
+                        first,
+                        second,
+                        mask,
+                    },
+                    Some(result_ty),
+                ))
+            }
             "unreachable" => {
                 self.advance();
                 Ok((InstKind::Unreachable, None))
@@ -2156,6 +2207,48 @@ impl<'a> Parser<'a> {
                     Err(self.error(format!("unsupported instruction `{other}`")))
                 }
             }
+        }
+    }
+
+    fn canonicalize_shuffle_mask(&mut self, mask: Operand) -> Operand {
+        let OperandKind::Const(id) = mask.kind else {
+            return mask;
+        };
+        let ty = mask.ty;
+        let kind = self.module.constant(id).kind.clone();
+        match kind {
+            ConstKind::Undef => Operand::constant(ty, self.module.const_poison(ty)),
+            ConstKind::Aggregate(elems) => {
+                let mut changed = false;
+                let mut canonical = Vec::with_capacity(elems.len());
+                for elem in elems {
+                    let elem_ty = self.module.constant(elem).ty;
+                    if matches!(self.module.constant(elem).kind, ConstKind::Undef) {
+                        canonical.push(self.module.const_poison(elem_ty));
+                        changed = true;
+                    } else {
+                        canonical.push(elem);
+                    }
+                }
+                if changed {
+                    Operand::constant(ty, self.module.const_aggregate(ty, canonical))
+                } else {
+                    mask
+                }
+            }
+            _ => mask,
+        }
+    }
+
+    fn comparison_result_type(&mut self, ty: TypeId) -> TypeId {
+        let vector = match self.module.types.get(ty) {
+            Type::Vector { len, scalable, .. } => Some((*len, *scalable)),
+            _ => None,
+        };
+        let i1 = self.module.types.int(1);
+        match vector {
+            Some((len, scalable)) => self.module.types.vector(i1, len, scalable),
+            None => i1,
         }
     }
 

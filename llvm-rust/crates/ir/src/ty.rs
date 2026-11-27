@@ -357,12 +357,21 @@ impl TypeTable {
         Some(ty)
     }
 
-    /// Returns the element type of a vector.
-    pub fn vector_element(&self, ty: TypeId) -> Option<TypeId> {
+    /// Returns the element type, length, and scalability of a vector.
+    pub fn vector_info(&self, ty: TypeId) -> Option<(TypeId, u32, bool)> {
         match self.get(ty) {
-            Type::Vector { elem, .. } => Some(*elem),
+            Type::Vector {
+                elem,
+                len,
+                scalable,
+            } => Some((*elem, *len, *scalable)),
             _ => None,
         }
+    }
+
+    /// Returns the element type of a vector.
+    pub fn vector_element(&self, ty: TypeId) -> Option<TypeId> {
+        self.vector_info(ty).map(|(elem, _, _)| elem)
     }
 
     /// Returns the number of interned types.
@@ -423,6 +432,15 @@ impl TypeTable {
     /// Returns an array type.
     pub fn array(&mut self, elem: TypeId, len: u64) -> TypeId {
         self.intern(Type::Array { elem, len })
+    }
+
+    /// Returns a vector type.
+    pub fn vector(&mut self, elem: TypeId, len: u32, scalable: bool) -> TypeId {
+        self.intern(Type::Vector {
+            elem,
+            len,
+            scalable,
+        })
     }
 
     /// Returns a function type.

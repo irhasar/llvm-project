@@ -84,6 +84,7 @@ const FUNC_INST_STORE: u32 = 44;
 const FUNC_INST_UNOP: u32 = 56;
 const FUNC_INST_EXTRACTELT: u32 = 6;
 const FUNC_INST_INSERTELT: u32 = 7;
+const FUNC_INST_SHUFFLEVEC: u32 = 8;
 const FUNC_INST_EXTRACTVAL: u32 = 26;
 const FUNC_INST_INSERTVAL: u32 = 27;
 
@@ -1207,6 +1208,17 @@ impl<'a> Writer<'a> {
                 self.push_value(&mut operands, value, inst_id)?;
                 self.push_value_and_type(&mut operands, index, inst_id)?;
                 self.stream.emit_record(FUNC_INST_INSERTELT, &operands);
+            }
+            InstKind::ShuffleVector {
+                first,
+                second,
+                mask,
+            } => {
+                let mut operands = Operands::new();
+                self.push_value_and_type(&mut operands, first, inst_id)?;
+                self.push_value(&mut operands, second, inst_id)?;
+                self.push_value(&mut operands, mask, inst_id)?;
+                self.stream.emit_record(FUNC_INST_SHUFFLEVEC, &operands);
             }
             InstKind::Unreachable => self.stream.emit_record(FUNC_INST_UNREACHABLE, &[]),
         }

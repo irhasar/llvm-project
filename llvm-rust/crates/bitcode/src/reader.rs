@@ -87,6 +87,7 @@ const FUNC_INST_STORE: u64 = 44;
 const FUNC_INST_UNOP: u64 = 56;
 const FUNC_INST_EXTRACTELT: u64 = 6;
 const FUNC_INST_INSERTELT: u64 = 7;
+const FUNC_INST_SHUFFLEVEC: u64 = 8;
 const FUNC_INST_EXTRACTVAL: u64 = 26;
 const FUNC_INST_INSERTVAL: u64 = 27;
 
@@ -1135,7 +1136,7 @@ impl Reader {
                 let opcode = record.operands[index] as u32;
                 index += 1;
                 let flags = record.operands.get(index).copied().unwrap_or(0);
-                let is_float = matches!(self.module.types.get(lhs.ty), Type::Float(_));
+                let is_float = self.is_float_type(lhs.ty);
                 let op = binop_from_code(opcode, is_float)?;
                 let mut int_flags = IntFlags::default();
                 let mut fastmath = FastMath::default();
@@ -1181,8 +1182,8 @@ impl Reader {
                 let predicate = record.operands[index] as u32;
                 index += 1;
                 let flags = record.operands.get(index).copied().unwrap_or(0);
-                let i1 = self.i1_type()?;
-                let kind = if matches!(self.module.types.get(lhs.ty), Type::Float(_)) {
+                let result_ty = self.comparison_result_type(lhs.ty)?;
+                let kind = if self.is_float_type(lhs.ty) {
                     InstKind::FCmp {
                         pred: fcmp_from_code(predicate)?,
                         flags: decode_fastmath(flags),
@@ -1196,7 +1197,7 @@ impl Reader {
                         rhs,
                     }
                 };
-                Ok((kind, Some(i1)))
+                Ok((kind, Some(result_ty)))
             }
             FUNC_INST_ALLOCA => {
                 let elem_ty = self.type_at(record.operands[0])?;
@@ -1551,6 +1552,52 @@ impl Reader {
                     Some(vector.ty),
                 ))
             }
+            FUNC_INST_SHUFFLEVEC => {
+                let (first, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (second, next) =
+                    self.decode_value_as(record, index, inst_id, state, first.ty)?;
+                index = next;
+                let (mask, _) = self.decode_typed_value(record, index, inst_id, state)?;
+                if !matches!(mask.kind, OperandKind::Const(_)) {
+                    return Err(Error::bitcode("shufflevector mask is not a constant"));
+                }
+                let (elem, _, scalable) =
+                    self.module.types.vector_info(first.ty).ok_or_else(|| {
+                        Error::bitcode("shufflevector first operand is not a vector")
+                    })?;
+                if scalable {
+                    return Err(Error::bitcode("scalable shufflevector is not supported"));
+                }
+                if second.ty != first.ty {
+                    return Err(Error::bitcode(
+                        "shufflevector operands must have the same type",
+                    ));
+                }
+                let (mask_elem, mask_len, mask_scalable) =
+                    self.module
+                        .types
+                        .vector_info(mask.ty)
+                        .ok_or_else(|| Error::bitcode("shufflevector mask is not a vector"))?;
+                if mask_scalable {
+                    return Err(Error::bitcode(
+                        "scalable shufflevector masks are not supported",
+                    ));
+                }
+                if !matches!(self.module.types.get(mask_elem), Type::Int(32)) {
+                    return Err(Error::bitcode(
+                        "shufflevector mask element type must be i32",
+                    ));
+                }
+                let result = self.module.types.vector(elem, mask_len, false);
+                Ok((
+                    InstKind::ShuffleVector {
+                        first,
+                        second,
+                        mask,
+                    },
+                    Some(result),
+                ))
+            }
             FUNC_INST_UNREACHABLE => Ok((InstKind::Unreachable, None)),
             other => Err(Error::bitcode(format!(
                 "unsupported instruction code {other}"
@@ -1592,6 +1639,26 @@ impl Reader {
             .get(index)
             .copied()
             .ok_or_else(|| Error::bitcode(format!("unknown basic block {index}")))
+    }
+
+    fn is_float_type(&self, ty: TypeId) -> bool {
+        match self.module.types.get(ty) {
+            Type::Float(_) => true,
+            Type::Vector { elem, .. } => matches!(self.module.types.get(*elem), Type::Float(_)),
+            _ => false,
+        }
+    }
+
+    fn comparison_result_type(&mut self, operand_ty: TypeId) -> Result<TypeId> {
+        let vector = match self.module.types.get(operand_ty) {
+            Type::Vector { len, scalable, .. } => Some((*len, *scalable)),
+            _ => None,
+        };
+        let i1 = self.i1_type()?;
+        Ok(match vector {
+            Some((len, scalable)) => self.module.types.vector(i1, len, scalable),
+            None => i1,
+        })
     }
 
     fn i1_type(&self) -> Result<TypeId> {
@@ -1880,6 +1947,7 @@ mod tests {
             FUNC_INST_INSERTVAL,
             FUNC_INST_EXTRACTELT,
             FUNC_INST_INSERTELT,
+            FUNC_INST_SHUFFLEVEC,
         ] {
             let record = Record {
                 code,

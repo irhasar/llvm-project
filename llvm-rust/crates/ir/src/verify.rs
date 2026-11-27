@@ -171,13 +171,31 @@ fn verify_instruction(
 ) {
     let result_ty = inst.result.map(|local| function.local_type(local));
     match &inst.kind {
-        InstKind::Binary { lhs, rhs, .. } | InstKind::ICmp { lhs, rhs, .. } => {
+        InstKind::Binary { lhs, rhs, .. } => {
             check_operand(module, function, *lhs, errors, "operand");
             check_operand(module, function, *rhs, errors, "operand");
+        }
+        InstKind::ICmp { lhs, rhs, .. } => {
+            check_operand(module, function, *lhs, errors, "operand");
+            check_operand(module, function, *rhs, errors, "operand");
+            if let Some(result_ty) = result_ty
+                && !comparison_result_ok(module, lhs.ty, result_ty)
+            {
+                errors.push(Error::verify(
+                    "icmp result type does not match the operand vector",
+                ));
+            }
         }
         InstKind::FCmp { lhs, rhs, .. } => {
             check_operand(module, function, *lhs, errors, "operand");
             check_operand(module, function, *rhs, errors, "operand");
+            if let Some(result_ty) = result_ty
+                && !comparison_result_ok(module, lhs.ty, result_ty)
+            {
+                errors.push(Error::verify(
+                    "fcmp result type does not match the operand vector",
+                ));
+            }
         }
         InstKind::FNeg { value, .. } => {
             check_operand(module, function, *value, errors, "operand");
@@ -254,6 +272,11 @@ fn verify_instruction(
             check_operand(module, function, *cond, errors, "select condition");
             check_operand(module, function, *on_true, errors, "select value");
             check_operand(module, function, *on_false, errors, "select value");
+            if !is_i1_or_vector_i1(module, cond.ty) {
+                errors.push(Error::verify(
+                    "select condition is not i1 or a vector of i1",
+                ));
+            }
         }
         InstKind::Cast { value, to, .. } => {
             check_operand(module, function, *value, errors, "cast value");
@@ -394,7 +417,92 @@ fn verify_instruction(
                 ));
             }
         }
+        InstKind::ShuffleVector {
+            first,
+            second,
+            mask,
+        } => {
+            check_operand(
+                module,
+                function,
+                *first,
+                errors,
+                "shufflevector first vector",
+            );
+            check_operand(
+                module,
+                function,
+                *second,
+                errors,
+                "shufflevector second vector",
+            );
+            check_operand(module, function, *mask, errors, "shufflevector mask");
+            if !matches!(mask.kind, OperandKind::Const(_)) {
+                errors.push(Error::verify("shufflevector mask is not a constant"));
+            }
+            match module.types.vector_info(first.ty) {
+                Some((elem, _, scalable)) => {
+                    if scalable {
+                        errors.push(Error::verify("scalable shufflevector is not supported"));
+                    }
+                    if second.ty != first.ty {
+                        errors.push(Error::verify(
+                            "shufflevector operands must have the same type",
+                        ));
+                    }
+                    match module.types.vector_info(mask.ty) {
+                        Some((mask_elem, mask_len, mask_scalable)) => {
+                            if mask_scalable {
+                                errors.push(Error::verify(
+                                    "scalable shufflevector masks are not supported",
+                                ));
+                            }
+                            if !matches!(module.types.get(mask_elem), Type::Int(32)) {
+                                errors.push(Error::verify(
+                                    "shufflevector mask element type must be i32",
+                                ));
+                            }
+                            if result_ty.and_then(|id| module.types.vector_info(id))
+                                != Some((elem, mask_len, false))
+                            {
+                                errors.push(Error::verify(
+                                    "shufflevector result type does not match the mask",
+                                ));
+                            }
+                        }
+                        None => errors.push(Error::verify("shufflevector mask is not a vector")),
+                    }
+                }
+                None => errors.push(Error::verify("shufflevector first operand is not a vector")),
+            }
+        }
         InstKind::Unreachable => {}
+    }
+}
+
+fn comparison_result_ok(
+    module: &Module,
+    operand_ty: crate::ty::TypeId,
+    result_ty: crate::ty::TypeId,
+) -> bool {
+    match module.types.vector_info(operand_ty) {
+        Some((_, len, scalable)) => match module.types.vector_info(result_ty) {
+            Some((elem, result_len, result_scalable)) => {
+                result_len == len
+                    && result_scalable == scalable
+                    && matches!(module.types.get(elem), Type::Int(1))
+            }
+            None => false,
+        },
+        None => matches!(module.types.get(result_ty), Type::Int(1)),
+    }
+}
+
+fn is_i1_or_vector_i1(module: &Module, ty: crate::ty::TypeId) -> bool {
+    match module.types.get(ty) {
+        Type::Int(1) => true,
+        Type::Vector { elem, .. } => matches!(module.types.get(*elem), Type::Int(1)),
+        _ => false,
     }
 }
 

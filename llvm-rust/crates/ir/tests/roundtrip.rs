@@ -218,6 +218,48 @@ entry:
 }
 
 #[test]
+fn vector_arithmetic_and_shufflevector() {
+    let source = r#"
+define <4 x i32> @vector_int(<4 x i32> %a, <4 x i32> %b) {
+entry:
+  %sum = add <4 x i32> %a, %b
+  %cmp = icmp slt <4 x i32> %sum, %a
+  %sel = select <4 x i1> %cmp, <4 x i32> %sum, <4 x i32> %a
+  ret <4 x i32> %sel
+}
+
+define <2 x double> @vector_float(<2 x double> %a, <2 x double> %b) {
+entry:
+  %sum = fadd <2 x double> %a, %b
+  %cmp = fcmp olt <2 x double> %sum, %a
+  %sel = select <2 x i1> %cmp, <2 x double> %sum, <2 x double> %a
+  ret <2 x double> %sel
+}
+
+define <4 x i32> @vector_shuffle(<4 x i32> %a, <4 x i32> %b) {
+entry:
+  %r = shufflevector <4 x i32> %a, <4 x i32> %b, <4 x i32> <i32 0, i32 5, i32 2, i32 7>
+  ret <4 x i32> %r
+}
+
+define <2 x i32> @vector_undef_mask(<4 x i32> %a, <4 x i32> %b) {
+entry:
+  %r = shufflevector <4 x i32> %a, <4 x i32> %b, <2 x i32> undef
+  ret <2 x i32> %r
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%cmp = icmp slt <4 x i32> %sum, %a"));
+    assert!(printed.contains("%sel = select <4 x i1> %cmp, <4 x i32> %sum, <4 x i32> %a"));
+    assert!(printed.contains("%sum = fadd <2 x double> %a, %b"));
+    assert!(printed.contains("%cmp = fcmp olt <2 x double> %sum, %a"));
+    assert!(printed.contains(
+        "%r = shufflevector <4 x i32> %a, <4 x i32> %b, <4 x i32> <i32 0, i32 5, i32 2, i32 7>"
+    ));
+    assert!(printed.contains("%r = shufflevector <4 x i32> %a, <4 x i32> %b, <2 x i32> poison"));
+}
+
+#[test]
 fn varargs_and_attribute_groups() {
     let source = r#"
 declare i32 @printf(ptr, ...)
