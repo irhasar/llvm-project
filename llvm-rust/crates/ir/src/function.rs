@@ -7,6 +7,7 @@ use llvm_rust_support::{Arena, FastHashMap, Idx, Symbol};
 use crate::inst::{Attribute, InstId, Instruction};
 use crate::linkage::{Linkage, Visibility};
 use crate::ty::TypeId;
+use crate::value::Operand;
 
 /// Handle to a function in the module arena.
 pub type FuncId = Idx<Function>;
@@ -55,6 +56,7 @@ pub struct Function {
     pub is_declaration: bool,
     pub ret_attrs: Arc<Vec<Attribute>>,
     pub attrs: Arc<Vec<Attribute>>,
+    pub personality: Option<Operand>,
     pub params: Vec<Param>,
     pub locals: Vec<Local>,
     pub blocks: Arena<Block>,
@@ -79,6 +81,7 @@ impl Function {
             is_declaration: true,
             ret_attrs: Arc::new(Vec::new()),
             attrs: Arc::new(Vec::new()),
+            personality: None,
             params: Vec::new(),
             locals: Vec::new(),
             blocks: Arena::new(),

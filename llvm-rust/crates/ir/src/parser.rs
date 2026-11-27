@@ -15,7 +15,7 @@ use crate::constant::{ConstExpr, ConstId, ConstKind, Constant};
 use crate::function::{BlockId, Function, LocalId};
 use crate::inst::{
     AtomicOrdering, AtomicRmwOp, Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred,
-    InstKind, Instruction, IntFlags, SyncScope, TailKind,
+    InstKind, Instruction, IntFlags, LandingPadClause, SyncScope, TailKind,
 };
 use crate::linkage::{Linkage, Visibility};
 use crate::module::{Global, Module, ThreadLocal};
@@ -1051,7 +1051,7 @@ impl<'a> Parser<'a> {
         self.expect_punct(')')?;
         function.ty = self.module.types.function(ret_ty, param_types, varargs);
         let mut function_attrs = Vec::new();
-        self.parse_trailing_attrs(&mut function_attrs, !is_declaration)?;
+        self.parse_trailing_attrs(&mut function, &mut function_attrs, !is_declaration)?;
         if let Some(index) = function_attrs
             .iter()
             .position(|attr| attr.0 == "local_unnamed_addr")
@@ -1120,6 +1120,7 @@ impl<'a> Parser<'a> {
 
     fn parse_trailing_attrs(
         &mut self,
+        function: &mut Function,
         attrs: &mut Vec<Attribute>,
         stop_at_brace: bool,
     ) -> Result<()> {
@@ -1148,7 +1149,12 @@ impl<'a> Parser<'a> {
                         attrs.push(self.parse_attribute()?);
                     } else {
                         match &*text {
-                            "section" | "gc" | "prefix" | "prologue" | "personality" => {
+                            "personality" => {
+                                self.advance();
+                                let ty = self.parse_type()?;
+                                function.personality = Some(self.parse_value(function, ty)?);
+                            }
+                            "section" | "gc" | "prefix" | "prologue" => {
                                 let value = self.expect_string()?;
                                 attrs.push(Attribute(format!(
                                     "{text} {}",
@@ -2245,6 +2251,14 @@ impl<'a> Parser<'a> {
             }
             "call" => self.parse_call(function, TailKind::None),
             "callbr" => self.parse_callbr(function),
+            "invoke" => self.parse_invoke(function),
+            "landingpad" => self.parse_landingpad(function),
+            "resume" => {
+                self.advance();
+                let ty = self.parse_type()?;
+                let value = self.parse_value(function, ty)?;
+                Ok((InstKind::Resume { value }, None))
+            }
             "tail" | "musttail" | "notail" => {
                 let tail = match &*mnemonic {
                     "tail" => TailKind::Tail,
@@ -2712,6 +2726,7 @@ impl<'a> Parser<'a> {
 
     fn parse_callbr(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
         let call = self.parse_call_common(function, "callbr")?;
+        self.skip_eol();
         self.expect_ident_is("to")?;
         let default_dest = self.parse_block_ref(function)?;
         self.expect_punct('[')?;
@@ -2745,6 +2760,65 @@ impl<'a> Parser<'a> {
                 indirect_dests,
             },
             result_ty,
+        ))
+    }
+
+    fn parse_invoke(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        let call = self.parse_call_common(function, "invoke")?;
+        self.skip_eol();
+        self.expect_ident_is("to")?;
+        let normal_dest = self.parse_block_ref(function)?;
+        self.skip_eol();
+        self.expect_ident_is("unwind")?;
+        let unwind_dest = self.parse_block_ref(function)?;
+        let result_ty = if self.module.types.get(call.ret_ty).is_void() {
+            None
+        } else {
+            Some(call.ret_ty)
+        };
+        Ok((
+            InstKind::Invoke {
+                ret_ty: call.ret_ty,
+                fn_ty: call.fn_ty,
+                callee: call.callee,
+                args: call.args,
+                arg_attrs: call.arg_attrs,
+                fastmath: call.fastmath,
+                ret_attrs: call.ret_attrs.into(),
+                attrs: call.attrs.into(),
+                normal_dest,
+                unwind_dest,
+            },
+            result_ty,
+        ))
+    }
+
+    fn parse_landingpad(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        let ty = self.parse_type()?;
+        self.skip_eol();
+        let cleanup = self.eat_ident("cleanup");
+        let mut clauses = Vec::new();
+        loop {
+            self.skip_eol();
+            let clause = if self.eat_ident("catch") {
+                LandingPadClause::Catch
+            } else if self.eat_ident("filter") {
+                LandingPadClause::Filter
+            } else {
+                break;
+            };
+            let clause_ty = self.parse_type()?;
+            let value = self.parse_value(function, clause_ty)?;
+            clauses.push((clause, value));
+        }
+        Ok((
+            InstKind::LandingPad {
+                ty,
+                cleanup,
+                clauses,
+            },
+            Some(ty),
         ))
     }
 

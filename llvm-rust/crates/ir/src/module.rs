@@ -778,12 +778,18 @@ fn for_each_operand_mut(kind: &mut InstKind, mut visit: impl FnMut(&mut Operand)
         InstKind::Freeze { value } => visit(value),
         InstKind::VaArg { list, .. } => visit(list),
         InstKind::IndirectBr { address, .. } => visit(address),
-        InstKind::CallBr { callee, args, .. } => {
+        InstKind::CallBr { callee, args, .. } | InstKind::Invoke { callee, args, .. } => {
             visit(callee);
             for arg in args {
                 visit(arg);
             }
         }
+        InstKind::LandingPad { clauses, .. } => {
+            for (_, value) in clauses {
+                visit(value);
+            }
+        }
+        InstKind::Resume { value } => visit(value),
         InstKind::Fence { .. } | InstKind::Br { .. } | InstKind::Unreachable => {}
     }
 }

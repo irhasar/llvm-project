@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use crate::constant::{ConstExpr, ConstId, ConstKind, Constant};
 use crate::function::{BlockId, FuncId, Function};
-use crate::inst::{Attribute, FastMath, InstKind, Instruction, IntFlags, TailKind};
+use crate::inst::{
+    Attribute, FastMath, InstKind, Instruction, IntFlags, LandingPadClause, TailKind,
+};
 use crate::linkage::{Linkage, Visibility};
 use crate::module::{Global, GlobalId, Module};
 use crate::names::{quote_name, write_name, write_quoted_bytes};
@@ -239,6 +241,10 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
     }
     for attr in function.attrs.iter() {
         let _ = write!(out, " {attr}");
+    }
+    if let Some(personality) = function.personality {
+        out.push_str(" personality ");
+        write_operand(module, function, personality, out);
     }
     if function.is_declaration {
         out.push('\n');
@@ -529,6 +535,71 @@ fn write_instruction(
                 let _ = write_name(out, label);
             }
             out.push(']');
+        }
+        InstKind::Invoke {
+            ret_ty,
+            fn_ty,
+            callee,
+            args,
+            arg_attrs,
+            fastmath,
+            ret_attrs,
+            attrs,
+            normal_dest,
+            unwind_dest,
+        } => {
+            write_call(
+                module,
+                function,
+                TailKind::None,
+                "invoke",
+                *ret_ty,
+                *fn_ty,
+                *callee,
+                args,
+                arg_attrs,
+                *fastmath,
+                ret_attrs,
+                attrs,
+                out,
+            );
+            out.push_str(" to label %");
+            let normal = function
+                .blocks
+                .get(*normal_dest)
+                .name
+                .map(|name| module.name(name))
+                .unwrap_or("0");
+            let _ = write_name(out, normal);
+            out.push_str(" unwind label %");
+            let unwind = function
+                .blocks
+                .get(*unwind_dest)
+                .name
+                .map(|name| module.name(name))
+                .unwrap_or("0");
+            let _ = write_name(out, unwind);
+        }
+        InstKind::LandingPad {
+            ty,
+            cleanup,
+            clauses,
+        } => {
+            let _ = write!(out, "landingpad {}", module.display_type(*ty));
+            if *cleanup {
+                out.push_str(" cleanup");
+            }
+            for (clause, value) in clauses {
+                out.push_str(match clause {
+                    LandingPadClause::Catch => " catch ",
+                    LandingPadClause::Filter => " filter ",
+                });
+                write_operand(module, function, *value, out);
+            }
+        }
+        InstKind::Resume { value } => {
+            out.push_str("resume ");
+            write_operand(module, function, *value, out);
         }
         InstKind::Phi { incoming } => {
             out.push_str("phi ");

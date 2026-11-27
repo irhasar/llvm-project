@@ -7,8 +7,8 @@ use llvm_rust_ir::ty::INVALID_TYPE;
 use llvm_rust_ir::{
     AtomicOrdering, AtomicRmwOp, Attribute, BinOp, BlockId, CastOp, ConstExpr, ConstId, ConstKind,
     Constant, FastMath, FcmpPred, FuncId, Function, GepIndex, Global, GlobalId, IcmpPred, InstId,
-    InstKind, IntFlags, Linkage, Module, Operand, OperandKind, SyncScope, TailKind, ThreadLocal,
-    Type, TypeId, Visibility,
+    InstKind, IntFlags, LandingPadClause, Linkage, Module, Operand, OperandKind, SyncScope,
+    TailKind, ThreadLocal, Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, FastHashMap, Result, Symbol};
 
@@ -81,7 +81,11 @@ const FUNC_INST_SELECT_OLD: u64 = 5;
 const FUNC_INST_RET: u64 = 10;
 const FUNC_INST_BR: u64 = 11;
 const FUNC_INST_SWITCH: u64 = 12;
+const FUNC_INST_INVOKE: u64 = 13;
 const FUNC_INST_UNREACHABLE: u64 = 15;
+const FUNC_INST_RESUME: u64 = 39;
+const FUNC_INST_LANDINGPAD_OLD: u64 = 40;
+const FUNC_INST_LANDINGPAD: u64 = 47;
 const FUNC_INST_PHI: u64 = 16;
 const FUNC_INST_ALLOCA: u64 = 19;
 const FUNC_INST_LOAD: u64 = 20;
@@ -168,6 +172,7 @@ pub fn read_bitcode_with_options(bytes: &[u8], options: ReadOptions) -> Result<M
         values: Vec::new(),
         pending_globals: Vec::new(),
         pending_block_addresses: Vec::new(),
+        pending_personalities: Vec::new(),
         defined_functions: Vec::new(),
         next_body: 0,
         attr_groups: FastHashMap::default(),
@@ -177,6 +182,7 @@ pub fn read_bitcode_with_options(bytes: &[u8], options: ReadOptions) -> Result<M
         llvm19_compat: options.llvm19_compat,
     };
     reader.read_module(module_block)?;
+    reader.resolve_personalities()?;
     reader.resolve_globals()?;
     reader.resolve_block_addresses()?;
     reader.module.assign_unnamed_slots();
@@ -191,6 +197,7 @@ struct Reader {
     values: Vec<ValueRef>,
     pending_globals: Vec<(GlobalId, u32)>,
     pending_block_addresses: Vec<(ConstId, u32, u32)>,
+    pending_personalities: Vec<(FuncId, u32)>,
     defined_functions: Vec<FuncId>,
     next_body: usize,
     attr_groups: FastHashMap<u64, (u32, Arc<Vec<Attribute>>)>,
@@ -563,6 +570,12 @@ impl Reader {
         }
         let id = self.module.function_or_insert(symbol);
         self.module.define_function(id, function);
+        let personality = record.operands.get(16).copied().unwrap_or(0);
+        if personality != 0 {
+            let personality = u32::try_from(personality - 1)
+                .map_err(|_| Error::bitcode("personality value id is out of range"))?;
+            self.pending_personalities.push((id, personality));
+        }
         if unnamed {
             self.module.mark_unnamed_function(id);
         }
@@ -887,6 +900,28 @@ impl Reader {
             self.module.constants[constant].kind = ConstKind::BlockAddress { function, block };
         }
         Ok(())
+    }
+
+    fn resolve_personalities(&mut self) -> Result<()> {
+        let pending = core::mem::take(&mut self.pending_personalities);
+        for (function, value) in pending {
+            let personality = self.resolve_module_operand(value)?;
+            self.module.functions[function].personality = Some(personality);
+        }
+        Ok(())
+    }
+
+    fn resolve_module_operand(&mut self, value: u32) -> Result<Operand> {
+        let ptr = self.ptr_type()?;
+        match self.values.get(value as usize).copied() {
+            Some(ValueRef::Function(id)) => Ok(Operand::function(ptr, id)),
+            Some(ValueRef::Global(id)) => Ok(Operand::global(ptr, id)),
+            Some(ValueRef::Constant(id)) => {
+                let ty = self.module.constant(id).ty;
+                Ok(Operand::constant(ty, id))
+            }
+            None => Err(Error::bitcode(format!("unknown module value {value}"))),
+        }
     }
 
     fn resolve_globals(&mut self) -> Result<()> {
@@ -1837,6 +1872,155 @@ impl Reader {
                     result,
                 ))
             }
+            FUNC_INST_INVOKE => {
+                let mut ret_attrs = Arc::new(Vec::new());
+                let mut call_attrs = Arc::new(Vec::new());
+                let mut arg_attr_entries = Vec::new();
+                for (index, attrs) in self
+                    .attribute_list(record.operands.first().copied().unwrap_or(0))?
+                    .iter()
+                {
+                    match *index {
+                        0 => ret_attrs = attrs.clone(),
+                        u32::MAX => call_attrs = attrs.clone(),
+                        _ => arg_attr_entries.push((*index, attrs.clone())),
+                    }
+                }
+                let mut index = 1;
+                let flags = record.operands.get(index).copied().unwrap_or(0);
+                index += 1;
+                if flags & (1 << 13) == 0 {
+                    return Err(Error::bitcode(
+                        "invoke record has no explicit function type",
+                    ));
+                }
+                let normal_dest =
+                    self.block_at(
+                        state,
+                        record.operands.get(index).copied().ok_or_else(|| {
+                            Error::bitcode("invoke record has no normal destination")
+                        })? as usize,
+                    )?;
+                index += 1;
+                let unwind_dest =
+                    self.block_at(
+                        state,
+                        record.operands.get(index).copied().ok_or_else(|| {
+                            Error::bitcode("invoke record has no unwind destination")
+                        })? as usize,
+                    )?;
+                index += 1;
+                let fn_ty = self.type_at(
+                    record
+                        .operands
+                        .get(index)
+                        .copied()
+                        .ok_or_else(|| Error::bitcode("invoke record has no function type"))?,
+                )?;
+                index += 1;
+                let (callee, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                let (ret_ty, fixed, varargs) = match self.module.types.get(fn_ty) {
+                    Type::Function {
+                        ret,
+                        params,
+                        varargs,
+                    } => (*ret, params.len(), *varargs),
+                    _ => return Err(Error::bitcode("invoke with a non-function type")),
+                };
+                let mut args = Vec::new();
+                for _ in 0..fixed {
+                    let (arg, next) = self.decode_value(record, index, inst_id, state)?;
+                    args.push(arg);
+                    index = next;
+                }
+                if varargs {
+                    while index < record.operands.len() {
+                        let (arg, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                        args.push(arg);
+                        index = next;
+                    }
+                }
+                let mut arg_attrs = vec![Arc::new(Vec::new()); args.len()];
+                for (index, attrs) in arg_attr_entries {
+                    let slot = index
+                        .checked_sub(1)
+                        .and_then(|value| arg_attrs.get_mut(value as usize))
+                        .ok_or_else(|| {
+                            Error::bitcode(format!(
+                                "invoke argument attribute index {index} is out of range"
+                            ))
+                        })?;
+                    *slot = attrs;
+                }
+                let result = if self.module.types.get(ret_ty).is_void() {
+                    None
+                } else {
+                    Some(ret_ty)
+                };
+                Ok((
+                    InstKind::Invoke {
+                        ret_ty,
+                        fn_ty,
+                        callee,
+                        args,
+                        arg_attrs,
+                        fastmath: FastMath::default(),
+                        ret_attrs,
+                        attrs: call_attrs,
+                        normal_dest,
+                        unwind_dest,
+                    },
+                    result,
+                ))
+            }
+            FUNC_INST_RESUME => {
+                let (value, _) = self.decode_typed_value(record, 0, inst_id, state)?;
+                Ok((InstKind::Resume { value }, None))
+            }
+            FUNC_INST_LANDINGPAD | FUNC_INST_LANDINGPAD_OLD => {
+                let mut index = 0;
+                let ty = self.type_at(
+                    record
+                        .operands
+                        .get(index)
+                        .copied()
+                        .ok_or_else(|| Error::bitcode("landingpad record has no type"))?,
+                )?;
+                index += 1;
+                if record.code == FUNC_INST_LANDINGPAD_OLD {
+                    let (_, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                    index = next;
+                }
+                let cleanup = record.operands.get(index).copied().unwrap_or(0) != 0;
+                index += 1;
+                let count = record.operands.get(index).copied().unwrap_or(0) as usize;
+                index += 1;
+                let mut clauses = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let clause = match record.operands.get(index).copied().unwrap_or(0) {
+                        0 => LandingPadClause::Catch,
+                        1 => LandingPadClause::Filter,
+                        other => {
+                            return Err(Error::bitcode(format!(
+                                "unknown landingpad clause kind {other}"
+                            )));
+                        }
+                    };
+                    index += 1;
+                    let (value, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                    index = next;
+                    clauses.push((clause, value));
+                }
+                Ok((
+                    InstKind::LandingPad {
+                        ty,
+                        cleanup,
+                        clauses,
+                    },
+                    Some(ty),
+                ))
+            }
             FUNC_INST_PHI => {
                 let ty = self.type_at(record.operands[0])?;
                 let mut incoming = Vec::new();
@@ -2365,6 +2549,7 @@ mod tests {
             types: Vec::new(),
             values: Vec::new(),
             pending_globals: Vec::new(),
+            pending_personalities: Vec::new(),
             pending_block_addresses: Vec::new(),
             defined_functions: Vec::new(),
             next_body: 0,

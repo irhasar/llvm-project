@@ -4,7 +4,7 @@ use llvm_rust_support::Error;
 
 use crate::constant::{ConstExpr, ConstKind};
 use crate::function::{Function, LocalId};
-use crate::inst::{InstKind, Instruction};
+use crate::inst::{InstKind, Instruction, LandingPadClause};
 use crate::linkage::Linkage;
 use crate::module::Module;
 use crate::ty::Type;
@@ -140,6 +140,18 @@ fn verify_function(
     ret: crate::ty::TypeId,
     errors: &mut Vec<VerifyError>,
 ) {
+    if !function.is_declaration
+        && function.personality.is_none()
+        && function
+            .insts
+            .iter()
+            .any(|(_, inst)| matches!(inst.kind, InstKind::LandingPad { .. }))
+    {
+        errors.push(Error::verify(format!(
+            "function @{} with a landingpad requires a personality",
+            module.name(function.name)
+        )));
+    }
     for (_, block) in function.blocks.iter() {
         if block.insts.is_empty() {
             let label = block.name.map(|name| module.name(name)).unwrap_or("0");
@@ -434,6 +446,58 @@ fn verify_instruction(
                     )),
                 }
             }
+        }
+        InstKind::Invoke {
+            callee,
+            args,
+            normal_dest,
+            unwind_dest,
+            ..
+        } => {
+            check_operand(module, function, *callee, errors, "invoke callee");
+            for arg in args {
+                check_operand(module, function, *arg, errors, "invoke argument");
+            }
+            check_block(function, *normal_dest, errors, "invoke normal destination");
+            check_block(function, *unwind_dest, errors, "invoke unwind destination");
+            if let OperandKind::Function(id) = callee.kind
+                && let Some(function_ref) = module.functions.try_get(id)
+                && module.types.is_valid(function_ref.ty)
+                && let Some((_, params, varargs)) = module.function_type(id)
+                && !varargs
+                && params.len() != args.len()
+            {
+                errors.push(Error::verify(format!(
+                    "invoke of @{} has the wrong number of arguments",
+                    module.name(function_ref.name)
+                )));
+            }
+        }
+        InstKind::LandingPad { ty, clauses, .. } => {
+            if result_ty != Some(*ty) {
+                errors.push(Error::verify(
+                    "landingpad result type does not match its declared type",
+                ));
+            }
+            for (clause, value) in clauses {
+                check_operand(module, function, *value, errors, "landingpad clause");
+                match clause {
+                    LandingPadClause::Catch
+                        if !matches!(module.types.get(value.ty), Type::Pointer) =>
+                    {
+                        errors.push(Error::verify("landingpad catch clause is not a pointer"));
+                    }
+                    LandingPadClause::Filter
+                        if !matches!(module.types.get(value.ty), Type::Array { .. }) =>
+                    {
+                        errors.push(Error::verify("landingpad filter clause is not an array"));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        InstKind::Resume { value } => {
+            check_operand(module, function, *value, errors, "resume value");
         }
         InstKind::Phi { incoming } => {
             let expected = inst.result.map(|local| function.local_type(local));

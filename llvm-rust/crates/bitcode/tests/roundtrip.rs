@@ -218,6 +218,45 @@ fn rust_bitcode_round_trip_matches_text() {
 }
 
 #[test]
+fn round_trips_exception_handling() {
+    let source = r#"
+declare i32 @may_throw()
+declare i32 @__gxx_personality_v0(...)
+
+define i32 @f() personality ptr @__gxx_personality_v0 {
+entry:
+  %r = invoke i32 @may_throw() to label %normal unwind label %lpad
+
+normal:
+  ret i32 %r
+
+lpad:
+  %lp = landingpad { ptr, i32 } cleanup catch ptr null filter [0 x ptr] zeroinitializer
+  resume { ptr, i32 } %lp
+}
+"#;
+    let mut module = parse_module(source).expect("parse exception handling");
+    let bytes = write_bitcode(&mut module).expect("write exception handling");
+    let read = read_bitcode(&bytes).expect("read exception handling");
+    let text = print_module(&read);
+    assert!(
+        text.contains("personality ptr @__gxx_personality_v0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("%r = invoke i32 @may_throw() to label %normal unwind label %lpad"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "landingpad { ptr, i32 } cleanup catch ptr null filter [0 x ptr] zeroinitializer"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("resume { ptr, i32 } %lp"), "{text}");
+}
+
+#[test]
 fn scoped_memory_overrides_are_visible_after_round_trip() {
     let source = r#"declare void @callee()
 declare void @inline_legacy(ptr) readnone #0

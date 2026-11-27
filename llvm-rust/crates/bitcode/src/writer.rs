@@ -76,7 +76,10 @@ const FUNC_INST_CAST: u32 = 3;
 const FUNC_INST_RET: u32 = 10;
 const FUNC_INST_BR: u32 = 11;
 const FUNC_INST_SWITCH: u32 = 12;
+const FUNC_INST_INVOKE: u32 = 13;
 const FUNC_INST_UNREACHABLE: u32 = 15;
+const FUNC_INST_RESUME: u32 = 39;
+const FUNC_INST_LANDINGPAD: u32 = 47;
 const FUNC_INST_PHI: u32 = 16;
 const FUNC_INST_ALLOCA: u32 = 19;
 const FUNC_INST_LOAD: u32 = 20;
@@ -631,6 +634,12 @@ impl<'a> Writer<'a> {
                     attrs,
                     arg_attrs,
                     ..
+                }
+                | InstKind::Invoke {
+                    ret_attrs,
+                    attrs,
+                    arg_attrs,
+                    ..
                 } => (ret_attrs, attrs, arg_attrs),
                 _ => continue,
             };
@@ -731,6 +740,10 @@ impl<'a> Writer<'a> {
             .get(&function_id)
             .copied()
             .unwrap_or(0) as u64;
+        let personality = match function.personality {
+            Some(personality) => self.operand_value_id(&personality)? as u64 + 1,
+            None => 0,
+        };
         let operands = vec![
             name_offset,
             name_len,
@@ -753,7 +766,7 @@ impl<'a> Writer<'a> {
             0,
             0,
             0,
-            0,
+            personality,
             function.dso_local as u64,
             0,
             0,
@@ -1309,6 +1322,65 @@ impl<'a> Writer<'a> {
                     }
                 }
                 self.stream.emit_record(FUNC_INST_CALLBR, &operands);
+            }
+            InstKind::Invoke {
+                fn_ty,
+                callee,
+                args,
+                normal_dest,
+                unwind_dest,
+                ..
+            } => {
+                let attr_list = self
+                    .call_attr_lists
+                    .get(&(function_id, arena_id))
+                    .copied()
+                    .unwrap_or(0) as u64;
+                let mut operands = Operands::new();
+                operands.push(attr_list);
+                operands.push(1 << 13);
+                operands.push(block_index(function, *normal_dest)? as u64);
+                operands.push(block_index(function, *unwind_dest)? as u64);
+                operands.push(self.type_index(*fn_ty)? as u64);
+                self.push_value_and_type(&mut operands, callee, inst_id)?;
+                let (fixed, varargs) = match self.module.types.get(*fn_ty) {
+                    Type::Function {
+                        params, varargs, ..
+                    } => (params.len(), *varargs),
+                    _ => (args.len(), false),
+                };
+                for arg in args.iter().take(fixed) {
+                    self.push_value(&mut operands, arg, inst_id)?;
+                }
+                if varargs {
+                    for arg in args.iter().skip(fixed) {
+                        self.push_value_and_type(&mut operands, arg, inst_id)?;
+                    }
+                }
+                self.stream.emit_record(FUNC_INST_INVOKE, &operands);
+            }
+            InstKind::LandingPad {
+                ty,
+                cleanup,
+                clauses,
+            } => {
+                let mut operands = Operands::new();
+                operands.push(self.type_index(*ty)? as u64);
+                operands.push(*cleanup as u64);
+                operands.push(clauses.len() as u64);
+                for (clause, value) in clauses {
+                    operands.push(match clause {
+                        llvm_rust_ir::LandingPadClause::Catch => 0,
+                        llvm_rust_ir::LandingPadClause::Filter => 1,
+                    });
+                    self.push_value_and_type(&mut operands, value, inst_id)?;
+                }
+                self.stream.emit_record(FUNC_INST_LANDINGPAD, &operands);
+            }
+            InstKind::Resume { value } => {
+                let mut operands = Operands::new();
+                self.push_value_and_type(&mut operands, value, inst_id)?;
+                self.stream.emit_record(FUNC_INST_RESUME, &operands);
             }
             InstKind::Phi { incoming } => {
                 let ty = result_type(function, inst)?;

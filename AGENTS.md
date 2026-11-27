@@ -191,6 +191,22 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   result type comes from `fty`. The verifier requires a non-empty indirect
   destination list, an inline-asm callee, and label operands that match the
   destinations.
+- `invoke` uses `FUNC_CODE_INST_INVOKE = 13` with `[attr, flags, normal_dest,
+  unwind_dest, fty, callee, args...]`. Both destinations are absolute block
+  indices and flags bit 13 (`CALL_EXPLICIT_TYPE`) must be set. Unlike `call`,
+  the destinations come before the function type.
+- `resume` uses `FUNC_CODE_INST_RESUME = 39` with a single `getValueTypePair`
+  operand. `landingpad` uses `FUNC_CODE_INST_LANDINGPAD = 47` with
+  `[ty, cleanup, num_clauses, kind0, value0, ...]`; kind 0 is `catch`, 1 is
+  `filter`. The legacy `LANDINGPAD_OLD = 40` record inserts a value before the
+  cleanup flag and is accepted on read.
+- The function record personality operand is index 16, after prologue (12),
+  DLL storage (13), comdat (14), and prefix data (15). Writing it at index 15
+  makes C++ `llvm-dis` print `prefix ptr @personality` instead of
+  `personality`. The operand is `value_id + 1`, with zero meaning absent.
+- Textual `landingpad` clauses and the `to`/`unwind` labels of `invoke` and
+  `callbr` may start on a new line in C++ pretty output. Skip EOL tokens before
+  `cleanup`, each clause, and each label.
 - Inline asm uses `CST_CODE_INLINEASM = 30` with `[fty, flags, asm_len,
   asm_bytes..., constraint_len, constraint_bytes...]`; flags are sideeffect
   (1), alignstack (2), inteldialect (4), and unwind (8). Textual inline asm
@@ -268,6 +284,14 @@ warmups), assembly was 73.3 ms C++ / 32.6 ms Rust and disassembly 62.0 ms /
 / 7.9 ms Rust and disassembly 23.9 ms / 8.2 ms, with peak RSS 54.3/14.1 MiB
 and 53.5/14.1 MiB. The new terminator therefore keeps Rust at about 3x
 throughput on a callbr-heavy input while using about 3.8x less memory.
+
+Post-`invoke`/`landingpad`/`resume` check: on a 276,955-byte corpus with 1000
+exception-handling functions (11 runs, 3 warmups), assembly was 28.6 ms C++ /
+7.7 ms Rust and disassembly 25.7 ms / 7.4 ms, with peak RSS 54.5/14.9 MiB and
+53.6/14.9 MiB. The same mixed 1,308,925-byte corpus stayed at 73.4/33.3 ms
+assembly and 59.3/34.2 ms disassembly, so the new records did not regress the
+existing path. Rust remains about 3.7x faster with 3.6x less memory on the
+exception-heavy input.
 
 The absolute jump from the earlier 26.7/27.4 ms Rust numbers is corpus growth,
 not a code regression: a 25-pair A/B on the identical 1,170,987-byte corpus

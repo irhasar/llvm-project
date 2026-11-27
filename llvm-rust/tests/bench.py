@@ -38,6 +38,11 @@ def main():
     parser.add_argument("--functions", type=int, default=1000)
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument(
+        "--eh",
+        action="store_true",
+        help="generate invoke/landingpad/resume functions instead of the mixed corpus",
+    )
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -89,6 +94,27 @@ def main():
                 out.write("  indirectbr ptr %target, [label %done]\n\n")
                 out.write("done:\n")
                 out.write("  ret i32 %sum5\n}\n\n")
+
+        if args.eh:
+            with open(source, "w", encoding="utf-8") as out:
+                out.write("declare i32 @may_throw()\n")
+                out.write("declare i32 @__gxx_personality_v0(...)\n\n")
+                for index in range(args.functions):
+                    out.write(
+                        f"define i32 @f{index}() personality ptr @__gxx_personality_v0 {{\n"
+                    )
+                    out.write("entry:\n")
+                    out.write(
+                        "  %r = invoke i32 @may_throw() to label %normal unwind label %lpad\n"
+                    )
+                    out.write("normal:\n")
+                    out.write("  ret i32 %r\n")
+                    out.write("lpad:\n")
+                    out.write(
+                        "  %lp = landingpad { ptr, i32 } cleanup catch ptr null "
+                        "filter [0 x ptr] zeroinitializer\n"
+                    )
+                    out.write("  resume { ptr, i32 } %lp\n}\n\n")
 
         prefix = ["taskset", "-c", "0"]
         cpp_as = [*prefix, os.path.join(args.llvm_bin, "llvm-as"), source, "-o", cpp_bc]

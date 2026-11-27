@@ -49,7 +49,8 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   `call`, `phi`, vector `select`, `shufflevector`, `freeze`, `fence` with
   system and single-thread sync scopes, atomic `load`/`store` with orderings
   and sync scopes, `atomicrmw`, `cmpxchg`, `va_arg`, `indirectbr`, inline asm
-  constants, and the `callbr` asm-goto terminator, casts, `ret`, `br`,
+  constants, the `callbr` asm-goto terminator, `invoke`, `landingpad`, and
+  `resume` with the `personality` function attribute, casts, `ret`, `br`,
   `condbr`, `switch`, `unreachable`, plus `blockaddress` constants that target
   named or numbered blocks in the same or another function.
   Unnamed values and blocks share one
@@ -132,7 +133,7 @@ This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
 debug info, other constant expressions (GEPs, casts, and `blockaddress` are
-supported), `invoke`/`landingpad`, scalable vector shuffles, sync
+supported), scalable vector shuffles, sync
 scopes beyond system and single-thread, or
 `fp128`/`x86_fp80`/`ppc_fp128` constants (wide float records are rejected).
 MC, object, X86, and codegen are still out of scope.
@@ -190,9 +191,12 @@ CARGO_TARGET_DIR=/tmp/llvm-rust-target cargo build --release \
 python3 tests/bench.py --runs 11 --warmup 3
 ```
 
+Add `--eh` to replace the mixed corpus with 1000 `invoke`/`landingpad`/`resume`
+functions.
+
 ## M1 results
 
-Differential harness: all 38 generic corpus inputs in `tests/corpus/` (37 text
+Differential harness: all 40 generic corpus inputs in `tests/corpus/` (39 text
 modules plus the checked-in bitcode fixture) match the selected C++ oracle in
 both directions after normalizing `source_filename`, `ModuleID`, and
 target-memory spelling. The
@@ -231,8 +235,9 @@ operations, `cmpxchg` success/failure orderings, weak/volatile forms,
 constants at module and function scope, including cross-function targets and
 unnamed/numbered blocks, `indirectbr` with named, numbered, duplicate, and empty
 destination lists, inline asm constants with sideeffect/alignstack/inteldialect/
-unwind flags, `callbr` asm-goto with result and argument forms, and
-function-local aggregate constants and forward local element operands.
+unwind flags, `callbr` asm-goto with result and argument forms,
+`invoke`/`landingpad`/`resume` with `personality`, and function-local aggregate
+constants and forward local element operands.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -278,6 +283,13 @@ Rust assembly and 62.0 ms / 34.6 ms disassembly (11 runs, 3 warmups). On a
 separate 178,890-byte corpus with 1000 `callbr` functions, Rust measured 7.9 ms
 assembly and 8.2 ms disassembly against 26.8 ms and 23.9 ms for C++, with peak
 RSS 14.1 MiB versus 54.3 MiB and 53.5 MiB.
+
+The `invoke`/`landingpad`/`resume` slice adds a 276,955-byte corpus with 1000
+exception-handling functions. Rust measured 7.7 ms assembly and 7.4 ms
+disassembly against 28.6 ms and 25.7 ms for C++, with peak RSS 14.9 MiB versus
+54.5 MiB and 53.6 MiB (11 runs, 3 warmups). The mixed corpus stayed at 73.4 ms
+C++ / 33.3 ms Rust assembly and 59.3 ms / 34.2 ms disassembly, so the new
+records did not regress the existing path.
 
 A same-corpus A/B check against the pre-atomic commit showed no atomic
 regression: assembly was 30.81 ms before and 30.28 ms after on the vector

@@ -138,6 +138,69 @@ entry:
 }
 
 #[test]
+fn exception_handling_roundtrip() {
+    let source = r#"
+declare i32 @may_throw()
+declare i32 @__gxx_personality_v0(...)
+
+define i32 @f() personality ptr @__gxx_personality_v0 {
+entry:
+  %r = invoke i32 @may_throw() to label %normal unwind label %lpad
+
+normal:
+  ret i32 %r
+
+lpad:
+  %lp = landingpad { ptr, i32 } cleanup catch ptr null filter [0 x ptr] zeroinitializer
+  resume { ptr, i32 } %lp
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(
+        printed.contains("personality ptr @__gxx_personality_v0"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("%r = invoke i32 @may_throw() to label %normal unwind label %lpad"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(
+            "landingpad { ptr, i32 } cleanup catch ptr null filter [0 x ptr] zeroinitializer"
+        ),
+        "{printed}"
+    );
+    assert!(printed.contains("resume { ptr, i32 } %lp"), "{printed}");
+}
+
+#[test]
+fn verifier_requires_personality_for_landingpad() {
+    let source = r#"
+declare i32 @may_throw()
+
+define i32 @f() {
+entry:
+  %r = invoke i32 @may_throw() to label %normal unwind label %lpad
+
+normal:
+  ret i32 %r
+
+lpad:
+  %lp = landingpad { ptr, i32 } cleanup
+  resume { ptr, i32 } %lp
+}
+"#;
+    let module = parse_module(source).expect("parse");
+    let errors = verify_module(&module).expect_err("missing personality");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("requires a personality")),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn gep_switch_select_and_casts() {
     let source = r#"
 %struct.pair = type { i32, i8 }

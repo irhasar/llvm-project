@@ -662,6 +662,13 @@ pub struct Instruction {
     pub kind: InstKind,
 }
 
+/// Clause kind on a legacy `landingpad` instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandingPadClause {
+    Catch,
+    Filter,
+}
+
 /// Instruction payload.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InstKind {
@@ -757,6 +764,26 @@ pub enum InstKind {
         default_dest: BlockId,
         indirect_dests: Vec<BlockId>,
     },
+    Invoke {
+        ret_ty: TypeId,
+        fn_ty: TypeId,
+        callee: Operand,
+        args: Vec<Operand>,
+        arg_attrs: Vec<Arc<Vec<Attribute>>>,
+        fastmath: FastMath,
+        ret_attrs: Arc<Vec<Attribute>>,
+        attrs: Arc<Vec<Attribute>>,
+        normal_dest: BlockId,
+        unwind_dest: BlockId,
+    },
+    LandingPad {
+        ty: TypeId,
+        cleanup: bool,
+        clauses: Vec<(LandingPadClause, Operand)>,
+    },
+    Resume {
+        value: Operand,
+    },
     Phi {
         incoming: Vec<(Operand, BlockId)>,
     },
@@ -839,6 +866,8 @@ impl InstKind {
                 | Self::Switch { .. }
                 | Self::IndirectBr { .. }
                 | Self::CallBr { .. }
+                | Self::Invoke { .. }
+                | Self::Resume { .. }
                 | Self::Unreachable
         )
     }
