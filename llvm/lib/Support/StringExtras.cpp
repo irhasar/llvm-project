@@ -88,6 +88,8 @@ void llvm::printPercentEncoded(StringRef String, raw_ostream &Out) {
   }
 }
 
+#if !defined(LLVM_RUST_STRINGEXTRAS)
+
 std::string llvm::convertToSnakeFromCamelCase(StringRef input) {
   if (input.empty())
     return "";
@@ -131,3 +133,5 @@ std::string llvm::convertToCamelFromSnakeCase(StringRef input,
   }
   return output;
 }
+
+#endif

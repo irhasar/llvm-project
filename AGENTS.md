@@ -43,6 +43,7 @@ cmake -S llvm -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DLLVM_ENABLE_RUST_XXHASH=ON -DLLVM_ENABLE_RUST_DJB=ON \
   -DLLVM_ENABLE_RUST_VERSIONTUPLE=ON -DLLVM_ENABLE_RUST_OPTIONSTRCMP=ON \
   -DLLVM_ENABLE_RUST_NATIVEFORMATTING=ON -DLLVM_ENABLE_RUST_UNICODE=ON \
+  -DLLVM_ENABLE_RUST_STRINGEXTRAS=ON \
   -DLLVM_ENABLE_RUST_RUSTDEMANGLE=ON -DLLVM_ENABLE_RUST_DLANG=ON \
   -DLLVM_TARGETS_TO_BUILD=X86 \
   -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_ZSTD=OFF -DLLVM_ENABLE_TERMINFO=OFF \
@@ -350,6 +351,55 @@ MiB for the C++ recompile (0.81x wall, -1.8% RSS). The wrapper includes only
 breaks the compile gate. `llvm-min-tblgen` is byte-identical (1,796,632
 bytes). `llvm-unicode-stable` is 20,288 bytes with C++ and 16,408 bytes with
 Rust (-3,880). The option stays opt-in by policy.
+
+## StringExtras port
+
+`llvm/lib/Support/rust/stringextras` ports the ASCII camel/snake conversions
+behind `LLVM_ENABLE_RUST_STRINGEXTRAS` (default `OFF`). The public
+`StringExtras.h` API and the other `StringExtras.cpp` functions are unchanged;
+the C++ wrapper owns the `std::string` and the Rust crate writes into a
+caller-sized buffer. The wrapper is the minimal `StringExtrasRust.cpp`, not
+`StringExtras.cpp`, so it does not pull `raw_ostream` into small consumers.
+The C++ fallback keeps the original `<cctype>` body so option `OFF` is
+byte-identical to the pre-port build. The Rust path and differential oracle
+use LLVM's C-locale ASCII helpers; the differential runs in the C locale. The
+wrapper also supplies a weak `rust_eh_personality` for debug-assertion
+archives.
+The crate uses `PRUNE_ARCHIVE` and `STRIP_DEBUG`, so the staged archive is
+2,764 bytes. The archive is installed with `LLVMSupport`, and
+`llvm-config --system-libs support` emits `-lllvm_stringextras`.
+
+```sh
+(cd llvm/lib/Support/rust/stringextras &&
+  cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test &&
+  cargo build --release --locked)
+
+ninja -C build check-llvm-rust-stringextras check-llvm-rust-stringextras-debug
+```
+
+`test/differential.cpp` compares the public Rust path with an exact C++
+reference over 300,810 inputs, including all 256 single bytes and 100,000
+random strings; `test/stable.cpp` is built with the option on and off.
+`check-llvm-rust-stringextras-debug` builds the crate with
+`-Cdebug-assertions=yes -Coverflow-checks=yes` and links it without
+`LLVMSupport`. It encodes those flags, plus `LLVM_RUST_FLAGS` and any ambient
+`CARGO_ENCODED_RUSTFLAGS`, so Cargo cannot ignore the checks. Its staging uses
+the normal build/content/staged stamp scripts, so Make does not repeat staging
+after a byte-identical Cargo rebuild. Five pinned runs
+on this Zen 4 host: camel-to-snake is 3.02x faster (95.11 ns -> 31.47 ns),
+snake-to-camel is 1.50x faster (26.51 ns -> 17.66 ns). The Rust stable binary
+is 17,920 bytes versus 1,558,560 bytes for the C++ fallback (-1,540,640
+bytes); the staged archive is 2,764 bytes. The option-off object and stable
+binary are byte-identical to the baseline. The compile rows include the
+`StringExtras.cpp` object that is still built with Rust on; the actual
+incremental Ninja build is 860 ms for Rust versus 880 ms for C++ (0.98x), and
+peak RSS is 113.8 MiB versus 116.23 MiB (-2.1%). The option stays opt-in.
+
+The Rust snake loop uses a packed lower-case/class table, a rolling three-byte
+window, an unchecked interior loop, and a branchless underscore store. The
+wrapper writes short snake results into a stack buffer instead of zero-filling
+a `2 * size` string, and handles underscore-free camel input without a Rust
+call. Both wrappers use branchless ASCII upper-casing.
 
 ## Demangler port
 

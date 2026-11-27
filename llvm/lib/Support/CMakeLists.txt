@@ -157,6 +157,10 @@ else()
   set_source_files_properties(UnicodeCaseFoldRust.cpp PROPERTIES HEADER_FILE_ONLY TRUE)
 endif()
 
+if(NOT LLVM_ENABLE_RUST_STRINGEXTRAS)
+  set_source_files_properties(StringExtrasRust.cpp PROPERTIES HEADER_FILE_ONLY TRUE)
+endif()
+
 add_llvm_component_library(LLVMSupport
   ABIBreak.cpp
   AMDGPUMetadata.cpp
@@ -276,6 +280,7 @@ add_llvm_component_library(LLVMSupport
   SpecialCaseList.cpp
   Statistic.cpp
   StringExtras.cpp
+  StringExtrasRust.cpp
   StringMap.cpp
   StringSaver.cpp
   StringRef.cpp
@@ -771,6 +776,171 @@ add_custom_target(check-llvm-unicode
   DEPENDS llvm-unicode-stable
   USES_TERMINAL)
 
+if(LLVM_ENABLE_RUST_STRINGEXTRAS)
+  include(AddRustLibrary)
+  add_llvm_rust_staticlib(llvm_stringextras
+    "${CMAKE_CURRENT_SOURCE_DIR}/rust/stringextras/Cargo.toml"
+    STRIP_DEBUG PRUNE_ARCHIVE)
+  target_compile_definitions(LLVMSupport PRIVATE LLVM_RUST_STRINGEXTRAS)
+  target_link_libraries(LLVMSupport PRIVATE llvm_stringextras)
+
+  add_executable(llvm-rust-stringextras-differential EXCLUDE_FROM_ALL
+    rust/stringextras/test/differential.cpp
+    rust/stringextras/test/reference.cpp)
+  target_include_directories(llvm-rust-stringextras-differential PRIVATE
+    ${LLVM_MAIN_INCLUDE_DIR}
+    ${LLVM_BINARY_DIR}/include)
+  target_link_libraries(llvm-rust-stringextras-differential PRIVATE LLVMSupport)
+  add_custom_target(check-llvm-rust-stringextras
+    COMMAND llvm-rust-stringextras-differential
+    COMMAND llvm-stringextras-stable
+    DEPENDS llvm-rust-stringextras-differential llvm-stringextras-stable
+    USES_TERMINAL)
+
+  # Debug assertions and overflow checks make the Rust object reference
+  # core's panic providers. Link this archive without LLVMSupport so the check
+  # proves that the StringExtras backend can supply its own weak personality
+  # routine.
+  if(NOT MSVC)
+    set(stringextras_debug_dir
+      "${CMAKE_CURRENT_BINARY_DIR}/rust-stringextras-debug")
+    set(stringextras_debug_archive
+      "${stringextras_debug_dir}/release/${CMAKE_STATIC_LIBRARY_PREFIX}llvm_stringextras${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    set(stringextras_debug_pruned
+      "${stringextras_debug_dir}/release/libllvm_stringextras.pruned.a")
+    set(stringextras_debug_staged
+      "${stringextras_debug_dir}/release/libllvm_stringextras.staged.a")
+    set(stringextras_debug_build_stamp
+      "${stringextras_debug_dir}/build.stamp")
+    set(stringextras_debug_content_stamp
+      "${stringextras_debug_dir}/content.stamp")
+    set(stringextras_debug_staged_stamp
+      "${stringextras_debug_dir}/staged.stamp")
+    set(stringextras_debug_flags
+      "${stringextras_debug_dir}/rust-flags.txt")
+    file(GENERATE OUTPUT "${stringextras_debug_flags}"
+      CONTENT "${LLVM_RUST_FLAGS}\n$ENV{CARGO_ENCODED_RUSTFLAGS}\n")
+
+    # Cargo prefers CARGO_ENCODED_RUSTFLAGS over RUSTFLAGS, so put the debug
+    # checks in the encoded variable as well. Preserve the caller's encoded
+    # flags and LLVM_RUST_FLAGS, which would otherwise be ignored.
+    string(ASCII 31 stringextras_flag_sep)
+    set(stringextras_debug_encoded "")
+    if(DEFINED ENV{CARGO_ENCODED_RUSTFLAGS}
+       AND NOT "$ENV{CARGO_ENCODED_RUSTFLAGS}" STREQUAL "")
+      set(stringextras_debug_encoded "$ENV{CARGO_ENCODED_RUSTFLAGS}")
+    endif()
+    set(stringextras_debug_flag_list "")
+    if(LLVM_RUST_FLAGS)
+      separate_arguments(stringextras_debug_flag_list NATIVE_COMMAND
+        "${LLVM_RUST_FLAGS}")
+    endif()
+    list(APPEND stringextras_debug_flag_list
+      "-Cdebug-assertions=yes" "-Coverflow-checks=yes")
+    list(JOIN stringextras_debug_flag_list "${stringextras_flag_sep}"
+      stringextras_debug_encoded_flags)
+    if(stringextras_debug_encoded)
+      set(stringextras_debug_encoded_flags
+        "${stringextras_debug_encoded}${stringextras_flag_sep}${stringextras_debug_encoded_flags}")
+    endif()
+
+    file(GLOB_RECURSE stringextras_debug_sources CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/stringextras/src/*.rs"
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/stringextras/Cargo.lock")
+    list(APPEND stringextras_debug_sources
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/stringextras/Cargo.toml"
+      "${stringextras_debug_flags}")
+
+    set(stringextras_debug_prune_script
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/modules/RustPruneArchive.cmake")
+    set(stringextras_debug_stamp_script
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/modules/RustArchiveStamp.cmake")
+    set(stringextras_debug_stage_script
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/modules/RustStageArchive.cmake")
+    set(stringextras_debug_ensure_script
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/modules/RustEnsureStaged.cmake")
+
+    add_custom_command(OUTPUT "${stringextras_debug_build_stamp}"
+      BYPRODUCTS "${stringextras_debug_archive}" "${stringextras_debug_pruned}"
+      COMMAND "${CMAKE_COMMAND}" -E env
+              "CARGO_ENCODED_RUSTFLAGS=${stringextras_debug_encoded_flags}"
+              "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
+              --manifest-path
+              "${CMAKE_CURRENT_SOURCE_DIR}/rust/stringextras/Cargo.toml"
+              --target-dir "${stringextras_debug_dir}"
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "${stringextras_debug_archive}" "${stringextras_debug_pruned}"
+      COMMAND "${CMAKE_COMMAND}"
+              "-DARCHIVE=${stringextras_debug_pruned}" "-DCRATE=llvm_stringextras"
+              "-DAR=${CMAKE_AR}" "-DNM=${CMAKE_NM}"
+              -P "${stringextras_debug_prune_script}"
+      COMMAND "${CMAKE_COMMAND}" -E touch "${stringextras_debug_build_stamp}"
+      DEPENDS ${stringextras_debug_sources} "${stringextras_debug_prune_script}"
+      COMMENT "Building StringExtras crate with debug assertions"
+      VERBATIM)
+
+    add_custom_command(OUTPUT "${stringextras_debug_content_stamp}"
+      COMMAND "${CMAKE_COMMAND}"
+              "-DSRC=${stringextras_debug_pruned}"
+              "-DSTAMP=${stringextras_debug_content_stamp}"
+              -P "${stringextras_debug_stamp_script}"
+      DEPENDS "${stringextras_debug_build_stamp}" "${stringextras_debug_stamp_script}"
+      COMMENT "Checking debug-assertion StringExtras archive"
+      VERBATIM)
+
+    add_custom_command(OUTPUT "${stringextras_debug_staged_stamp}"
+      COMMAND "${CMAKE_COMMAND}"
+              "-DSRC=${stringextras_debug_pruned}"
+              "-DDST=${stringextras_debug_staged}"
+              "-DSTAMP=${stringextras_debug_staged_stamp}"
+              "-DEXPECTED=${stringextras_debug_content_stamp}"
+              -P "${stringextras_debug_stage_script}"
+      BYPRODUCTS "${stringextras_debug_staged}"
+      DEPENDS "${stringextras_debug_content_stamp}" "${stringextras_debug_stage_script}"
+      COMMENT "Staging debug-assertion StringExtras archive"
+      VERBATIM)
+
+    if(CMAKE_GENERATOR MATCHES "Ninja")
+      add_custom_target(llvm-rust-stringextras-debug-archive
+        DEPENDS "${stringextras_debug_staged_stamp}" "${stringextras_debug_staged}")
+    else()
+      add_custom_target(llvm-rust-stringextras-debug-archive
+        COMMAND "${CMAKE_COMMAND}"
+                "-DSRC=${stringextras_debug_pruned}"
+                "-DDST=${stringextras_debug_staged}"
+                "-DEXPECTED=${stringextras_debug_content_stamp}"
+                -P "${stringextras_debug_ensure_script}"
+        DEPENDS "${stringextras_debug_build_stamp}"
+                "${stringextras_debug_content_stamp}"
+                "${stringextras_debug_staged_stamp}"
+        VERBATIM)
+    endif()
+
+    add_executable(llvm-rust-stringextras-debug-stable EXCLUDE_FROM_ALL
+      rust/stringextras/test/stable.cpp
+      StringExtrasRust.cpp
+      ABIBreak.cpp)
+    add_dependencies(llvm-rust-stringextras-debug-stable
+      llvm-rust-stringextras-debug-archive)
+    target_include_directories(llvm-rust-stringextras-debug-stable PRIVATE
+      ${LLVM_MAIN_INCLUDE_DIR}
+      ${LLVM_BINARY_DIR}/include)
+    target_link_libraries(llvm-rust-stringextras-debug-stable PRIVATE
+      "${stringextras_debug_staged}" ${CMAKE_DL_LIBS})
+    if(UNIX)
+      target_link_libraries(llvm-rust-stringextras-debug-stable PRIVATE m pthread)
+    endif()
+    add_custom_target(check-llvm-rust-stringextras-debug
+      COMMAND llvm-rust-stringextras-debug-stable
+      DEPENDS llvm-rust-stringextras-debug-stable
+      USES_TERMINAL)
+  endif()
+endif()
+
+add_executable(llvm-stringextras-stable EXCLUDE_FROM_ALL
+  rust/stringextras/test/stable.cpp)
+target_link_libraries(llvm-stringextras-stable PRIVATE LLVMSupport)
+
 add_executable(llvm-nativeformatting-stable EXCLUDE_FROM_ALL
   rust/nativeformatting/test/stable.cpp)
 target_link_libraries(llvm-nativeformatting-stable PRIVATE LLVMSupport)
@@ -822,7 +992,8 @@ set_property(TARGET LLVMSupport PROPERTY LLVM_SYSTEM_LIBS "${llvm_system_libs}")
 # The Rust ports are static archives installed next to the other LLVM
 # libraries, so downstream links need them in llvm-config --system-libs.
 foreach(rust_port SIPHASH CRC MD5 SHA1 SHA256 BASE64 CONVERTUTF CONVERTEBCDIC
-                  XXHASH RUSTDEMANGLE DLANG NATIVEFORMATTING UNICODE)
+                  XXHASH RUSTDEMANGLE DLANG NATIVEFORMATTING UNICODE
+                  STRINGEXTRAS)
   if(LLVM_ENABLE_RUST_${rust_port})
     if(rust_port STREQUAL "DLANG")
       set(rust_port_lower "dlangdemangle")

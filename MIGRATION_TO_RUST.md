@@ -132,10 +132,11 @@ larger. For standalone binaries the opposite holds: LTO rebuilds the standard
 library at link time and raised the VersionTuple build from about 0.23 s to
 2.55 s with no runtime gain. Do not use one profile for both artifact types.
 
-Full LLVM LTO is not supported yet: linking the C++ objects and the Rust archive
-with fat LTO fails on the undefined `rust_eh_personality` symbol. Thin LTO links
-and was measured on the NativeFormatting archive. Keep full LTO off for builds
-that enable a Rust port until the personality symbol is handled.
+Full LLVM LTO is not enabled yet. Individual Rust ports now provide a weak
+`rust_eh_personality` for debug-assertion archives, but a whole-LLVM fat-LTO
+link has not been measured. Thin LTO links and was measured on the
+NativeFormatting archive. Keep full LLVM LTO off for builds that enable a Rust
+port until the whole-program link is tested.
 
 Archive size is not binary size. A Rust staticlib carries `core`,
 `compiler_builtins`, and debug sections; the linker removes unused members from
@@ -204,8 +205,9 @@ Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
 (`LLVM_ENABLE_RUST_XXHASH`), `DJB.cpp` (`LLVM_ENABLE_RUST_DJB`),
 `VersionTuple.cpp` (`LLVM_ENABLE_RUST_VERSIONTUPLE`),
 `OptionStrCmp.cpp` (`LLVM_ENABLE_RUST_OPTIONSTRCMP`), the integer/hex core
-of `NativeFormatting.cpp` (`LLVM_ENABLE_RUST_NATIVEFORMATTING`), and Unicode
-simple case folding (`LLVM_ENABLE_RUST_UNICODE`).
+of `NativeFormatting.cpp` (`LLVM_ENABLE_RUST_NATIVEFORMATTING`), Unicode
+simple case folding (`LLVM_ENABLE_RUST_UNICODE`), and the StringExtras
+camel/snake case conversions (`LLVM_ENABLE_RUST_STRINGEXTRAS`).
 Selection criteria: small, deterministic,
 byte-buffer in / byte-buffer out, no LLVM types in the interface, existing unit
 tests.
@@ -392,6 +394,7 @@ generic x86-64 target unless noted:
 | xxHash 64-bit   | 0.99x at 12 B, 1.1x at 48 B, 2.5x at 768 B, 3.5x at 1 MiB |
 | xxHash 128-bit  | 1.04x at 12 B, 1.2x at 48 B, 2.3x at 768 B, 3.5x at 1 MiB |
 | NativeFormatting| 1.58x decimal, 2.48x grouped, 1.17x hex (public path) |
+| StringExtras    | 3.0x camel-to-snake, 1.5x snake-to-camel      |
 
 MD5 initially lost to GCC at the generic target (0.83x). LLVM's reassociation
 moved the round constant to the end of `a + f + x + t`, leaving three register
@@ -1252,6 +1255,118 @@ rebuilds, including the copy, prune, strip, and wrapper compile, are 336.84 ms
 and 94.32 MiB against 414.38 ms and 96.00 MiB for the C++ recompile (0.81x
 wall, -1.8% peak RSS). The option stays opt-in by policy, but this port is a
 gate-clearing result.
+
+## Thirteenth port: StringExtras case conversion
+
+Implementation: `llvm/lib/Support/rust/stringextras`, behind
+`LLVM_ENABLE_RUST_STRINGEXTRAS` (default `OFF`). The public functions remain
+`llvm::convertToSnakeFromCamelCase` and
+`llvm::convertToCamelFromSnakeCase`; only their bodies change. The C++ wrapper
+lives in `llvm/lib/Support/StringExtrasRust.cpp`, is compiled only when the
+option is on, and includes only `StringRef` and `std::string`. Keeping it out
+of `StringExtras.cpp` prevents the other StringExtras functions from pulling
+`raw_ostream` into a consumer that only uses case conversion. The wrapper
+allocates the result string, and the Rust crate receives `(pointer, length)`
+and an output buffer. Short snake-case inputs use a 128-byte stack buffer so
+the wrapper does not zero-fill a `2 * size` string before Rust overwrites it;
+camel inputs without underscores are copied and fixed in C++ without entering
+the converter. This keeps `StringRef`, `std::string`, and allocator ownership
+in C++.
+
+The C++ fallback stays in `StringExtras.cpp` under
+`#if !defined(LLVM_RUST_STRINGEXTRAS)` and keeps the original `<cctype>` body
+unchanged, so an option-off build is byte-identical to the pre-port binary.
+The Rust path and the differential oracle use LLVM's C-locale ASCII helpers;
+the differential test runs in the C locale, where the original fallback has
+the same byte rules. High bytes are left unchanged, and the differential test
+checks every single byte with a portable oracle.
+
+The crate uses `no_std`, the aborting panic handler, fat LTO, and one codegen
+unit, matching the staticlib policy. `PRUNE_ARCHIVE` and `STRIP_DEBUG` reduce
+the staged archive to 2,764 bytes; the full crate archive is 5,047,506 bytes.
+The staged archive is installed with `LLVMSupport`, and
+`llvm-config --link-static --system-libs support` emits
+`-lllvm_stringextras`; a `g++` consumer linked through `llvm-config` prints
+`http_server FooBar`.
+
+`StringExtrasRust.cpp` also defines a weak `rust_eh_personality`. A Rust
+archive built with `-Cdebug-assertions=yes` can reference core panic routines
+that need this symbol; the crate uses `panic=abort`, so unwinding never
+reaches it. The definition is weak so a real Rust runtime still wins, and
+another Rust port's weak definition is harmless. The
+`check-llvm-rust-stringextras-debug` target builds an archive with debug
+assertions and overflow checks and links it with the StringExtras wrapper
+alone, without `LLVMSupport`, so a StringExtras-only configuration is
+exercised independently. The target encodes `LLVM_RUST_FLAGS`, any ambient
+`CARGO_ENCODED_RUSTFLAGS`, and the check flags into
+`CARGO_ENCODED_RUSTFLAGS`; Cargo cannot ignore the check flags when the
+ambient encoded variable is set. Its build, content, and staging stamps follow
+the same `RustStageArchive.cmake` pattern as the other crates, so Make does not
+repeat staging after a byte-identical Cargo rebuild. The same check is part of
+the Rust CI differential job.
+
+Correctness coverage:
+
+* Four crate tests cover capital runs, digit-to-capital boundaries, leading and
+  trailing underscores, empty input, high bytes, and a short output buffer.
+* `llvm-rust-stringextras-differential` compares the public Rust path against
+  an exact C++ reference over 300,810 inputs, including every single byte,
+  100,000 random mixed-case strings, and both camel-case modes: 0 mismatches.
+* `llvm-stringextras-stable` checks the public API with the option on and off;
+  `check-llvm-rust-stringextras` runs both the differential and golden tests,
+  and `check-llvm-rust-stringextras-debug` runs the debug-assertion link check.
+* With the option off, the `StringExtras.cpp` object and the
+  `llvm-stringextras-stable` binary are byte-identical to the pre-port
+  baseline; this was checked by rebuilding the baseline source at the same
+  path and comparing the outputs.
+
+Measured on this Zen 4 host with `g++ -O3` against `-C opt-level=3`, five pinned
+runs (`taskset -c 0`) over the 100,014-string corpus through the public C++ API,
+median (min-max) ns/call:
+
+| Operation | C++ | Rust | Rust speedup |
+|-----------|-----|------|--------------|
+| Camel to snake | 95.11 (94.81-96.70) | 31.47 (31.19-32.00) | **3.02x** |
+| Snake to camel | 26.51 (26.41-27.99) | 17.66 (17.44-18.29) | **1.50x** |
+
+The C++ numbers come from the separately compiled reference target; the Rust
+numbers time the public wrapper, including its allocation and resize.
+
+The Rust snake path uses a 256-entry table that packs the lower-case byte and
+the ASCII class bits into one load, a rolling three-byte window, an unchecked
+interior loop, and a branchless underscore store. The branchless store writes
+one byte past the logical output and increments the length only when an
+underscore is needed; the next lower-case byte overwrites that slot otherwise,
+and the buffer always has `2 * size` bytes. The camel wrapper handles the
+common no-underscore case without a Rust call and uses branchless ASCII
+upper-casing for the first byte.
+
+The staged Rust archive is 2,764 bytes. The public stable test is 17,920 bytes
+with Rust versus 1,558,560 bytes with C++ (-1,540,640 bytes, -98.9%). The C++
+fallback object is 12,560 bytes; the Rust wrapper object is 4,760 bytes. The
+C++ stable test pulls the rest of `StringExtras.cpp` and its `raw_ostream`
+users into the link; the minimal Rust wrapper does not. Compile rows are
+medians of five pinned runs, using the CMake Release compile command and
+`cargo build --release --locked`. The Rust rows include the
+`StringExtras.cpp` object that `LLVMSupport` still compiles with the option
+on, not only the crate and wrapper. Peak RSS is the larger process peak, not a
+sum:
+
+| Backend | Wall ms | User ms | Sys ms | Peak RSS MiB | Object/archive bytes |
+|---------|---------|---------|--------|--------------|----------------------|
+| C++ (option OFF) | 560 | 470 | 90 | 116.23 | 12,560 |
+| `StringExtras.cpp` (option ON) | 540 | 450 | 80 | 114.09 | 9,072 |
+| Rust crate | 170 | 90 | 70 | 111.50 | 5,047,506 |
+| Rust wrapper (option ON) | 370 | 290 | 60 | 83.88 | 4,760 |
+| Rust serial sum | 1,080 | 830 | 210 | 114.09 | 2,764 staged |
+
+The serial sum is 1,080 ms because the three Rust-side processes do not share
+a cache entry. That is not the build cost the compile gate measures: the
+actual incremental Ninja build of `LLVMSupport` plus
+`llvm-stringextras-stable`, with all three files and the links included, is
+**860 ms (860-880)** for Rust against **880 ms (873-905)** for C++ option off
+(0.98x). The peak RSS is 113.8 MiB against 116.23 MiB (-2.1%). The option
+remains opt-in under the migration policy.
 
 ## Resource measurements for EBCDIC, D, DJB, and Unicode
 

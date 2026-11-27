@@ -1,0 +1,23 @@
+[package]
+name = "llvm-stringextras"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+license = "Apache-2.0 WITH LLVM-exception"
+
+[lib]
+name = "llvm_stringextras"
+crate-type = ["staticlib"]
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = 3
+# Release staticlibs follow the migration policy: fat LTO, one codegen unit.
+lto = "fat"
+codegen-units = 1
