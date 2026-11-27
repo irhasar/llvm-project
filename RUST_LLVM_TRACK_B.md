@@ -147,11 +147,12 @@ atomic `load`/`store` with system and single-thread sync scopes, `atomicrmw`,
 `cmpxchg`, `va_arg`, `blockaddress` constants, `indirectbr`, inline asm
 constants, the `callbr` asm-goto terminator, and the exception-handling
 instructions `invoke`, `landingpad` (legacy `cleanup`/`catch`/`filter`), and
-`resume` with the `personality` function attribute, plus
-`getelementptr` and cast constant expressions, are covered, including
-function-local aggregate constants, cross-function block addresses, and
-forward local element operands. The slice still does not cover metadata, other
-constant expressions, scalable-vector shuffles, or other sync scopes.
+`resume` with the `personality` function attribute, the Windows funclet
+instructions `catchswitch`, `catchpad`, `cleanuppad`, `catchret`, and
+`cleanupret`, plus `getelementptr` and cast constant expressions, are covered,
+including function-local aggregate constants, cross-function block addresses,
+and forward local element operands. The slice still does not cover metadata,
+other constant expressions, scalable-vector shuffles, or other sync scopes.
 
 ## Gates and kill criteria
 

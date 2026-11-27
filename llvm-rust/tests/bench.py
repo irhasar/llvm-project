@@ -43,6 +43,11 @@ def main():
         action="store_true",
         help="generate invoke/landingpad/resume functions instead of the mixed corpus",
     )
+    parser.add_argument(
+        "--wineh",
+        action="store_true",
+        help="generate catchswitch/catchpad/cleanuppad functions instead of the mixed corpus",
+    )
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -115,6 +120,40 @@ def main():
                         "filter [0 x ptr] zeroinitializer\n"
                     )
                     out.write("  resume { ptr, i32 } %lp\n}\n\n")
+
+        if args.wineh:
+            with open(source, "w", encoding="utf-8") as out:
+                out.write("declare i32 @may_throw()\n")
+                out.write("declare i32 @__CxxFrameHandler3(...)\n")
+                out.write("declare void @dtor(ptr)\n\n")
+                for index in range(args.functions):
+                    out.write(
+                        f"define i32 @f{index}() personality ptr @__CxxFrameHandler3 {{\n"
+                    )
+                    out.write("entry:\n")
+                    out.write(
+                        "  %r = invoke i32 @may_throw() to label %cont unwind label %dispatch\n"
+                    )
+                    out.write("dispatch:\n")
+                    out.write(
+                        "  %cs = catchswitch within none [label %catch1, label %catch2] "
+                        "unwind label %cleanup\n"
+                    )
+                    out.write("catch1:\n")
+                    out.write(
+                        "  %cp1 = catchpad within %cs [ptr null, i32 64, ptr null]\n"
+                    )
+                    out.write("  catchret from %cp1 to label %cont\n")
+                    out.write("catch2:\n")
+                    out.write(
+                        "  %cp2 = catchpad within %cs [ptr null, i32 64, ptr null]\n"
+                    )
+                    out.write("  catchret from %cp2 to label %cont\n")
+                    out.write("cleanup:\n")
+                    out.write("  %lp = cleanuppad within none [ptr @dtor]\n")
+                    out.write("  cleanupret from %lp unwind to caller\n")
+                    out.write("cont:\n")
+                    out.write("  ret i32 0\n}\n\n")
 
         prefix = ["taskset", "-c", "0"]
         cpp_as = [*prefix, os.path.join(args.llvm_bin, "llvm-as"), source, "-o", cpp_bc]

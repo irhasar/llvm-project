@@ -86,6 +86,11 @@ const FUNC_INST_UNREACHABLE: u64 = 15;
 const FUNC_INST_RESUME: u64 = 39;
 const FUNC_INST_LANDINGPAD_OLD: u64 = 40;
 const FUNC_INST_LANDINGPAD: u64 = 47;
+const FUNC_INST_CLEANUPRET: u64 = 48;
+const FUNC_INST_CATCHRET: u64 = 49;
+const FUNC_INST_CATCHPAD: u64 = 50;
+const FUNC_INST_CLEANUPPAD: u64 = 51;
+const FUNC_INST_CATCHSWITCH: u64 = 52;
 const FUNC_INST_PHI: u64 = 16;
 const FUNC_INST_ALLOCA: u64 = 19;
 const FUNC_INST_LOAD: u64 = 20;
@@ -1216,6 +1221,25 @@ impl Reader {
         Ok((self.resolve_value(state, value)?, index + 1))
     }
 
+    fn decode_parent_pad(
+        &mut self,
+        record: &Record,
+        index: usize,
+        inst_id: u32,
+        state: &mut FuncState,
+    ) -> Result<(Option<Operand>, usize)> {
+        let (operand, next) = self.decode_value(record, index, inst_id, state)?;
+        let is_none = match operand.kind {
+            OperandKind::Const(id) => {
+                let constant = self.module.constant(id);
+                matches!(self.module.types.get(constant.ty), Type::Token)
+                    && constant.kind == ConstKind::Null
+            }
+            _ => false,
+        };
+        Ok((if is_none { None } else { Some(operand) }, next))
+    }
+
     fn decode_value_as(
         &mut self,
         record: &Record,
@@ -1977,6 +2001,106 @@ impl Reader {
             FUNC_INST_RESUME => {
                 let (value, _) = self.decode_typed_value(record, 0, inst_id, state)?;
                 Ok((InstKind::Resume { value }, None))
+            }
+            FUNC_INST_CATCHSWITCH => {
+                let (parent_pad, mut index) = self.decode_parent_pad(record, 0, inst_id, state)?;
+                let count = record
+                    .operands
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| Error::bitcode("catchswitch record has no handler count"))?
+                    as usize;
+                index += 1;
+                let mut handlers = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let handler = *record
+                        .operands
+                        .get(index)
+                        .ok_or_else(|| Error::bitcode("catchswitch record is missing a handler"))?;
+                    handlers.push(self.block_at(state, handler as usize)?);
+                    index += 1;
+                }
+                let unwind_dest = if index < record.operands.len() {
+                    let dest = *record.operands.get(index).ok_or_else(|| {
+                        Error::bitcode("catchswitch record is missing unwind dest")
+                    })?;
+                    index += 1;
+                    Some(self.block_at(state, dest as usize)?)
+                } else {
+                    None
+                };
+                if index != record.operands.len() {
+                    return Err(Error::bitcode("catchswitch record has trailing operands"));
+                }
+                let ty = self.module.types.token();
+                Ok((
+                    InstKind::CatchSwitch {
+                        parent_pad,
+                        handlers,
+                        unwind_dest,
+                    },
+                    Some(ty),
+                ))
+            }
+            FUNC_INST_CATCHPAD | FUNC_INST_CLEANUPPAD => {
+                let (parent_pad, mut index) = self.decode_parent_pad(record, 0, inst_id, state)?;
+                let count = record
+                    .operands
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| Error::bitcode("funclet pad record has no argument count"))?
+                    as usize;
+                index += 1;
+                let mut args = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let (arg, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                    args.push(arg);
+                    index = next;
+                }
+                if index != record.operands.len() {
+                    return Err(Error::bitcode("funclet pad record has trailing operands"));
+                }
+                let ty = self.module.types.token();
+                let kind = if record.code == FUNC_INST_CATCHPAD {
+                    InstKind::CatchPad { parent_pad, args }
+                } else {
+                    InstKind::CleanupPad { parent_pad, args }
+                };
+                Ok((kind, Some(ty)))
+            }
+            FUNC_INST_CATCHRET => {
+                if record.operands.len() != 2 {
+                    return Err(Error::bitcode("catchret record must have two operands"));
+                }
+                let (catch_pad, _) = self.decode_value(record, 0, inst_id, state)?;
+                let successor = self.block_at(state, record.operands[1] as usize)?;
+                Ok((
+                    InstKind::CatchRet {
+                        catch_pad,
+                        successor,
+                    },
+                    None,
+                ))
+            }
+            FUNC_INST_CLEANUPRET => {
+                if record.operands.is_empty() || record.operands.len() > 2 {
+                    return Err(Error::bitcode(
+                        "cleanupret record must have one or two operands",
+                    ));
+                }
+                let (cleanup_pad, _) = self.decode_value(record, 0, inst_id, state)?;
+                let unwind_dest = if record.operands.len() == 2 {
+                    Some(self.block_at(state, record.operands[1] as usize)?)
+                } else {
+                    None
+                };
+                Ok((
+                    InstKind::CleanupRet {
+                        cleanup_pad,
+                        unwind_dest,
+                    },
+                    None,
+                ))
             }
             FUNC_INST_LANDINGPAD | FUNC_INST_LANDINGPAD_OLD => {
                 let mut index = 0;

@@ -200,6 +200,18 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   `[ty, cleanup, num_clauses, kind0, value0, ...]`; kind 0 is `catch`, 1 is
   `filter`. The legacy `LANDINGPAD_OLD = 40` record inserts a value before the
   cleanup flag and is accepted on read.
+- Windows funclets use `CLEANUPRET = 48` (`[pad]` or `[pad, unwind_bb]`),
+  `CATCHRET = 49` (`[pad, successor_bb]`), `CATCHPAD = 50` and
+  `CLEANUPPAD = 51` (`[parent_pad, num_args, typed args...]`), and
+  `CATCHSWITCH = 52` (`[parent_pad, num_handlers, handler_bb...,
+  unwind_bb?]`). The parent pad is a relative value; handlers and unwind
+  destinations are absolute basic-block indices. `catchswitch` requires at
+  least one handler, and `catchret` has no unwind destination.
+- A funclet parent of `none` is the `token` null constant. LLVM 19 always
+  writes that constant into the module constants block, so the writer adds it
+  when any pad has no parent and numbers it before the function body. Textual
+  `catchret`/`cleanupret` print the pad without its `token` type, unlike the
+  typed arguments of `catchpad` and `cleanuppad`.
 - The function record personality operand is index 16, after prologue (12),
   DLL storage (13), comdat (14), and prefix data (15). Writing it at index 15
   makes C++ `llvm-dis` print `prefix ptr @personality` instead of
@@ -292,6 +304,15 @@ exception-handling functions (11 runs, 3 warmups), assembly was 28.6 ms C++ /
 assembly and 59.3/34.2 ms disassembly, so the new records did not regress the
 existing path. Rust remains about 3.7x faster with 3.6x less memory on the
 exception-heavy input.
+
+Post-Windows-funclet check: on a 543,977-byte corpus with 1000 functions that
+mix `invoke`, `catchswitch`, two `catchpad`/`catchret` handlers, and a
+`cleanuppad`/`cleanupret` (7 runs, 2 warmups), assembly was 41.0 ms C++ /
+13.1 ms Rust and disassembly 34.9 ms / 12.5 ms, with peak RSS 55.6/15.0 MiB
+and 55.1/15.0 MiB. Rust is about 3x faster with 3.7x less memory on this input.
+The mixed and legacy-EH corpora stayed at 77.9/36.4 ms and 64.4/37.8 ms for
+assembly/disassembly and 29.2/7.8 ms and 26.4/7.7 ms respectively, so the new
+records did not regress existing paths.
 
 The absolute jump from the earlier 26.7/27.4 ms Rust numbers is corpus growth,
 not a code regression: a 25-pair A/B on the identical 1,170,987-byte corpus

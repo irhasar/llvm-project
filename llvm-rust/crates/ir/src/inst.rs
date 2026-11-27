@@ -784,6 +784,27 @@ pub enum InstKind {
     Resume {
         value: Operand,
     },
+    CatchSwitch {
+        parent_pad: Option<Operand>,
+        handlers: Vec<BlockId>,
+        unwind_dest: Option<BlockId>,
+    },
+    CatchPad {
+        parent_pad: Option<Operand>,
+        args: Vec<Operand>,
+    },
+    CleanupPad {
+        parent_pad: Option<Operand>,
+        args: Vec<Operand>,
+    },
+    CatchRet {
+        catch_pad: Operand,
+        successor: BlockId,
+    },
+    CleanupRet {
+        cleanup_pad: Operand,
+        unwind_dest: Option<BlockId>,
+    },
     Phi {
         incoming: Vec<(Operand, BlockId)>,
     },
@@ -868,6 +889,9 @@ impl InstKind {
                 | Self::CallBr { .. }
                 | Self::Invoke { .. }
                 | Self::Resume { .. }
+                | Self::CatchSwitch { .. }
+                | Self::CatchRet { .. }
+                | Self::CleanupRet { .. }
                 | Self::Unreachable
         )
     }

@@ -142,13 +142,20 @@ fn verify_function(
 ) {
     if !function.is_declaration
         && function.personality.is_none()
-        && function
-            .insts
-            .iter()
-            .any(|(_, inst)| matches!(inst.kind, InstKind::LandingPad { .. }))
+        && function.insts.iter().any(|(_, inst)| {
+            matches!(
+                inst.kind,
+                InstKind::LandingPad { .. }
+                    | InstKind::CatchSwitch { .. }
+                    | InstKind::CatchPad { .. }
+                    | InstKind::CleanupPad { .. }
+                    | InstKind::CatchRet { .. }
+                    | InstKind::CleanupRet { .. }
+            )
+        })
     {
         errors.push(Error::verify(format!(
-            "function @{} with a landingpad requires a personality",
+            "function @{} with exception-handling instructions requires a personality",
             module.name(function.name)
         )));
     }
@@ -498,6 +505,74 @@ fn verify_instruction(
         }
         InstKind::Resume { value } => {
             check_operand(module, function, *value, errors, "resume value");
+        }
+        InstKind::CatchSwitch {
+            parent_pad,
+            handlers,
+            unwind_dest,
+        } => {
+            if let Some(parent_pad) = parent_pad {
+                check_token_operand(
+                    module,
+                    function,
+                    *parent_pad,
+                    errors,
+                    "catchswitch parent pad",
+                );
+            }
+            if handlers.is_empty() {
+                errors.push(Error::verify("catchswitch has no handlers"));
+            }
+            for handler in handlers {
+                check_block(function, *handler, errors, "catchswitch handler");
+            }
+            if let Some(unwind_dest) = unwind_dest {
+                check_block(
+                    function,
+                    *unwind_dest,
+                    errors,
+                    "catchswitch unwind destination",
+                );
+            }
+            if let Some(result_ty) = result_ty
+                && !matches!(module.types.get(result_ty), Type::Token)
+            {
+                errors.push(Error::verify("catchswitch result type is not token"));
+            }
+        }
+        InstKind::CatchPad { parent_pad, args } | InstKind::CleanupPad { parent_pad, args } => {
+            if let Some(parent_pad) = parent_pad {
+                check_token_operand(module, function, *parent_pad, errors, "funclet parent pad");
+            }
+            for arg in args {
+                check_operand(module, function, *arg, errors, "funclet pad argument");
+            }
+            if let Some(result_ty) = result_ty
+                && !matches!(module.types.get(result_ty), Type::Token)
+            {
+                errors.push(Error::verify("funclet pad result type is not token"));
+            }
+        }
+        InstKind::CatchRet {
+            catch_pad,
+            successor,
+        } => {
+            check_token_operand(module, function, *catch_pad, errors, "catchret operand");
+            check_block(function, *successor, errors, "catchret successor");
+        }
+        InstKind::CleanupRet {
+            cleanup_pad,
+            unwind_dest,
+        } => {
+            check_token_operand(module, function, *cleanup_pad, errors, "cleanupret operand");
+            if let Some(unwind_dest) = unwind_dest {
+                check_block(
+                    function,
+                    *unwind_dest,
+                    errors,
+                    "cleanupret unwind destination",
+                );
+            }
         }
         InstKind::Phi { incoming } => {
             let expected = inst.result.map(|local| function.local_type(local));
@@ -967,6 +1042,19 @@ fn verify_block_address(
     };
     if !function.block_order().contains(&block_id) {
         errors.push(Error::verify("blockaddress block is not defined"));
+    }
+}
+
+fn check_token_operand(
+    module: &Module,
+    function: &Function,
+    operand: Operand,
+    errors: &mut Vec<VerifyError>,
+    what: &str,
+) {
+    check_operand(module, function, operand, errors, what);
+    if !matches!(module.types.get(operand.ty), Type::Token) {
+        errors.push(Error::verify(format!("{what} is not token")));
     }
 }
 

@@ -2259,6 +2259,11 @@ impl<'a> Parser<'a> {
                 let value = self.parse_value(function, ty)?;
                 Ok((InstKind::Resume { value }, None))
             }
+            "catchswitch" => self.parse_catchswitch(function),
+            "catchpad" => self.parse_catchpad(function),
+            "cleanuppad" => self.parse_cleanuppad(function),
+            "catchret" => self.parse_catchret(function),
+            "cleanupret" => self.parse_cleanupret(function),
             "tail" | "musttail" | "notail" => {
                 let tail = match &*mnemonic {
                     "tail" => TailKind::Tail,
@@ -2819,6 +2824,129 @@ impl<'a> Parser<'a> {
                 clauses,
             },
             Some(ty),
+        ))
+    }
+
+    fn parse_parent_pad(&mut self, function: &mut Function) -> Result<Option<Operand>> {
+        self.skip_eol();
+        self.expect_ident_is("within")?;
+        self.skip_eol();
+        if self.eat_ident("none") {
+            return Ok(None);
+        }
+        let ty = self.module.types.intern(Type::Token);
+        Ok(Some(self.parse_value_forward(function, ty)?))
+    }
+
+    fn parse_unwind_dest(&mut self, function: &mut Function) -> Result<Option<BlockId>> {
+        self.skip_eol();
+        self.expect_ident_is("unwind")?;
+        self.skip_eol();
+        if self.eat_ident("to") {
+            self.skip_eol();
+            self.expect_ident_is("caller")?;
+            return Ok(None);
+        }
+        Ok(Some(self.parse_block_ref(function)?))
+    }
+
+    fn parse_catchswitch(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        let parent_pad = self.parse_parent_pad(function)?;
+        self.skip_eol();
+        self.expect_punct('[')?;
+        let mut handlers = Vec::new();
+        loop {
+            self.skip_eol();
+            if self.eat_punct(']') {
+                break;
+            }
+            handlers.push(self.parse_block_ref(function)?);
+            self.skip_eol();
+            if self.eat_punct(']') {
+                break;
+            }
+            self.expect_punct(',')?;
+        }
+        let unwind_dest = self.parse_unwind_dest(function)?;
+        let ty = self.module.types.intern(Type::Token);
+        Ok((
+            InstKind::CatchSwitch {
+                parent_pad,
+                handlers,
+                unwind_dest,
+            },
+            Some(ty),
+        ))
+    }
+
+    fn parse_pad_args(&mut self, function: &mut Function) -> Result<Vec<Operand>> {
+        self.skip_eol();
+        self.expect_punct('[')?;
+        let mut args = Vec::new();
+        loop {
+            self.skip_eol();
+            if self.eat_punct(']') {
+                break;
+            }
+            let ty = self.parse_type()?;
+            args.push(self.parse_value_forward(function, ty)?);
+            self.skip_eol();
+            if self.eat_punct(']') {
+                break;
+            }
+            self.expect_punct(',')?;
+        }
+        Ok(args)
+    }
+
+    fn parse_catchpad(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        let parent_pad = self.parse_parent_pad(function)?;
+        let args = self.parse_pad_args(function)?;
+        let ty = self.module.types.intern(Type::Token);
+        Ok((InstKind::CatchPad { parent_pad, args }, Some(ty)))
+    }
+
+    fn parse_cleanuppad(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        let parent_pad = self.parse_parent_pad(function)?;
+        let args = self.parse_pad_args(function)?;
+        let ty = self.module.types.intern(Type::Token);
+        Ok((InstKind::CleanupPad { parent_pad, args }, Some(ty)))
+    }
+
+    fn parse_catchret(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        self.skip_eol();
+        self.expect_ident_is("from")?;
+        let ty = self.module.types.intern(Type::Token);
+        let catch_pad = self.parse_value_forward(function, ty)?;
+        self.skip_eol();
+        self.expect_ident_is("to")?;
+        let successor = self.parse_block_ref(function)?;
+        Ok((
+            InstKind::CatchRet {
+                catch_pad,
+                successor,
+            },
+            None,
+        ))
+    }
+
+    fn parse_cleanupret(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        self.skip_eol();
+        self.expect_ident_is("from")?;
+        let ty = self.module.types.intern(Type::Token);
+        let cleanup_pad = self.parse_value_forward(function, ty)?;
+        let unwind_dest = self.parse_unwind_dest(function)?;
+        Ok((
+            InstKind::CleanupRet {
+                cleanup_pad,
+                unwind_dest,
+            },
+            None,
         ))
     }
 

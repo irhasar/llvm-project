@@ -174,6 +174,61 @@ lpad:
 }
 
 #[test]
+fn windows_exception_handling_roundtrip() {
+    let source = r#"
+declare void @may_throw()
+declare i32 @__CxxFrameHandler3(...)
+declare void @dtor(ptr)
+
+define void @f() personality ptr @__CxxFrameHandler3 {
+entry:
+  invoke void @may_throw() to label %cont unwind label %dispatch
+
+dispatch:
+  %cs = catchswitch within none [label %catch1, label %catch2] unwind label %cleanup
+
+catch1:
+  %cp1 = catchpad within %cs [ptr null, i32 64, ptr null]
+  catchret from %cp1 to label %cont
+
+catch2:
+  %cp2 = catchpad within %cs [ptr null, i32 64, ptr null]
+  catchret from %cp2 to label %cont
+
+cleanup:
+  %lp = cleanuppad within none [ptr @dtor]
+  cleanupret from %lp unwind to caller
+
+cont:
+  ret void
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(
+        printed.contains(
+            "%cs = catchswitch within none [label %catch1, label %catch2] unwind label %cleanup"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("%cp1 = catchpad within %cs [ptr null, i32 64, ptr null]"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("catchret from %cp1 to label %cont"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("%lp = cleanuppad within none [ptr @dtor]"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("cleanupret from %lp unwind to caller"),
+        "{printed}"
+    );
+}
+
+#[test]
 fn verifier_requires_personality_for_landingpad() {
     let source = r#"
 declare i32 @may_throw()

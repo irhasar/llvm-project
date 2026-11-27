@@ -601,6 +601,63 @@ fn write_instruction(
             out.push_str("resume ");
             write_operand(module, function, *value, out);
         }
+        InstKind::CatchSwitch {
+            parent_pad,
+            handlers,
+            unwind_dest,
+        } => {
+            out.push_str("catchswitch ");
+            write_parent_pad(module, function, *parent_pad, out);
+            out.push_str(" [");
+            for (index, handler) in handlers.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                out.push_str("label %");
+                let label = function
+                    .blocks
+                    .get(*handler)
+                    .name
+                    .map(|name| module.name(name))
+                    .unwrap_or("0");
+                let _ = write_name(out, label);
+            }
+            out.push(']');
+            write_unwind_dest(module, function, *unwind_dest, out);
+        }
+        InstKind::CatchPad { parent_pad, args } => {
+            out.push_str("catchpad ");
+            write_parent_pad(module, function, *parent_pad, out);
+            write_pad_args(module, function, args, out);
+        }
+        InstKind::CleanupPad { parent_pad, args } => {
+            out.push_str("cleanuppad ");
+            write_parent_pad(module, function, *parent_pad, out);
+            write_pad_args(module, function, args, out);
+        }
+        InstKind::CatchRet {
+            catch_pad,
+            successor,
+        } => {
+            out.push_str("catchret from ");
+            write_value(module, function, *catch_pad, out);
+            out.push_str(" to label %");
+            let label = function
+                .blocks
+                .get(*successor)
+                .name
+                .map(|name| module.name(name))
+                .unwrap_or("0");
+            let _ = write_name(out, label);
+        }
+        InstKind::CleanupRet {
+            cleanup_pad,
+            unwind_dest,
+        } => {
+            out.push_str("cleanupret from ");
+            write_value(module, function, *cleanup_pad, out);
+            write_unwind_dest(module, function, *unwind_dest, out);
+        }
         InstKind::Phi { incoming } => {
             out.push_str("phi ");
             if let Some((first, _)) = incoming.first() {
@@ -893,6 +950,52 @@ fn write_callee(module: &Module, function: &Function, operand: Operand, out: &mu
         }
         OperandKind::Const(id) => write_constant(module, id, out),
     }
+}
+
+fn write_parent_pad(
+    module: &Module,
+    function: &Function,
+    parent_pad: Option<Operand>,
+    out: &mut String,
+) {
+    out.push_str("within ");
+    match parent_pad {
+        Some(parent_pad) => write_value(module, function, parent_pad, out),
+        None => out.push_str("none"),
+    }
+}
+
+fn write_unwind_dest(
+    module: &Module,
+    function: &Function,
+    unwind_dest: Option<BlockId>,
+    out: &mut String,
+) {
+    out.push_str(" unwind ");
+    match unwind_dest {
+        Some(dest) => {
+            out.push_str("label %");
+            let label = function
+                .blocks
+                .get(dest)
+                .name
+                .map(|name| module.name(name))
+                .unwrap_or("0");
+            let _ = write_name(out, label);
+        }
+        None => out.push_str("to caller"),
+    }
+}
+
+fn write_pad_args(module: &Module, function: &Function, args: &[Operand], out: &mut String) {
+    out.push_str(" [");
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        write_operand(module, function, *arg, out);
+    }
+    out.push(']');
 }
 
 fn write_operand(module: &Module, function: &Function, operand: Operand, out: &mut String) {

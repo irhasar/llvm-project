@@ -790,6 +790,21 @@ fn for_each_operand_mut(kind: &mut InstKind, mut visit: impl FnMut(&mut Operand)
             }
         }
         InstKind::Resume { value } => visit(value),
+        InstKind::CatchSwitch { parent_pad, .. } => {
+            if let Some(parent_pad) = parent_pad {
+                visit(parent_pad);
+            }
+        }
+        InstKind::CatchPad { parent_pad, args } | InstKind::CleanupPad { parent_pad, args } => {
+            if let Some(parent_pad) = parent_pad {
+                visit(parent_pad);
+            }
+            for arg in args {
+                visit(arg);
+            }
+        }
+        InstKind::CatchRet { catch_pad, .. } => visit(catch_pad),
+        InstKind::CleanupRet { cleanup_pad, .. } => visit(cleanup_pad),
         InstKind::Fence { .. } | InstKind::Br { .. } | InstKind::Unreachable => {}
     }
 }

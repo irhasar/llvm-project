@@ -405,6 +405,14 @@ impl TypeTable {
         self.intern(Type::Void)
     }
 
+    /// Returns `token`.
+    pub fn token(&mut self) -> TypeId {
+        if let Some(id) = self.simple_cache[2] {
+            return id;
+        }
+        self.intern(Type::Token)
+    }
+
     /// Returns `iN`.
     pub fn int(&mut self, bits: u32) -> TypeId {
         if let Some(id) = self.int_cache.get(bits as usize).copied().flatten() {

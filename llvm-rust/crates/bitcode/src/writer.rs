@@ -80,6 +80,11 @@ const FUNC_INST_INVOKE: u32 = 13;
 const FUNC_INST_UNREACHABLE: u32 = 15;
 const FUNC_INST_RESUME: u32 = 39;
 const FUNC_INST_LANDINGPAD: u32 = 47;
+const FUNC_INST_CLEANUPRET: u32 = 48;
+const FUNC_INST_CATCHRET: u32 = 49;
+const FUNC_INST_CATCHPAD: u32 = 50;
+const FUNC_INST_CLEANUPPAD: u32 = 51;
+const FUNC_INST_CATCHSWITCH: u32 = 52;
 const FUNC_INST_PHI: u32 = 16;
 const FUNC_INST_ALLOCA: u32 = 19;
 const FUNC_INST_LOAD: u32 = 20;
@@ -123,6 +128,7 @@ pub struct WriteOptions {
 /// Writes a module with explicit options.
 pub fn write_bitcode_with_options(module: &mut Module, options: WriteOptions) -> Result<Vec<u8>> {
     ensure_implicit_alloca(module);
+    ensure_token_none(module);
     let mut writer = Writer::new(module, options.llvm19_compat);
     writer.write()?;
     Ok(writer.finish())
@@ -145,6 +151,37 @@ fn ensure_implicit_alloca(module: &mut Module) {
         .any(|(_, constant)| constant.ty == i32_ty && constant.kind == ConstKind::Int(1));
     if !exists {
         module.const_int(i32_ty, 1);
+    }
+}
+
+fn ensure_token_none(module: &mut Module) {
+    let needs_token_none = module.functions.iter().any(|(_, function)| {
+        function.insts.iter().any(|(_, inst)| {
+            matches!(
+                inst.kind,
+                InstKind::CatchSwitch {
+                    parent_pad: None,
+                    ..
+                } | InstKind::CatchPad {
+                    parent_pad: None,
+                    ..
+                } | InstKind::CleanupPad {
+                    parent_pad: None,
+                    ..
+                }
+            )
+        })
+    });
+    if !needs_token_none {
+        return;
+    }
+    let token_ty = module.types.token();
+    let exists = module
+        .constants
+        .iter()
+        .any(|(_, constant)| constant.ty == token_ty && constant.kind == ConstKind::Null);
+    if !exists {
+        module.const_null(token_ty);
     }
 }
 
@@ -189,6 +226,7 @@ struct Writer<'a> {
     strtab: Vec<u8>,
     str_offsets: FastHashMap<String, u32>,
     i32_one: Option<ConstId>,
+    token_none: Option<ConstId>,
     sections: Vec<String>,
     section_ids: FastHashMap<String, u32>,
     function_attr_lists: FastHashMap<FuncId, u32>,
@@ -243,6 +281,17 @@ impl<'a> Writer<'a> {
                 .find(|(_, constant)| constant.ty == ty && constant.kind == ConstKind::Int(1))
                 .map(|(id, _)| id)
         });
+        let token_ty = module.types.iter().find_map(|(id, ty)| match ty {
+            Type::Token => Some(id),
+            _ => None,
+        });
+        let token_none = token_ty.and_then(|ty| {
+            module
+                .constants
+                .iter()
+                .find(|(_, constant)| constant.ty == ty && constant.kind == ConstKind::Null)
+                .map(|(id, _)| id)
+        });
         let mut strtab = Vec::new();
         let mut str_offsets = FastHashMap::default();
         for id in module.ordered_globals() {
@@ -277,6 +326,7 @@ impl<'a> Writer<'a> {
             strtab,
             str_offsets,
             i32_one,
+            token_none,
             sections,
             section_ids,
             function_attr_lists: FastHashMap::default(),
@@ -1382,6 +1432,56 @@ impl<'a> Writer<'a> {
                 self.push_value_and_type(&mut operands, value, inst_id)?;
                 self.stream.emit_record(FUNC_INST_RESUME, &operands);
             }
+            InstKind::CatchSwitch {
+                parent_pad,
+                handlers,
+                unwind_dest,
+            } => {
+                let mut operands = Operands::new();
+                self.push_parent_pad(&mut operands, *parent_pad, inst_id)?;
+                operands.push(handlers.len() as u64);
+                for handler in handlers {
+                    operands.push(block_index(function, *handler)? as u64);
+                }
+                if let Some(unwind_dest) = unwind_dest {
+                    operands.push(block_index(function, *unwind_dest)? as u64);
+                }
+                self.stream.emit_record(FUNC_INST_CATCHSWITCH, &operands);
+            }
+            InstKind::CatchPad { parent_pad, args } | InstKind::CleanupPad { parent_pad, args } => {
+                let mut operands = Operands::new();
+                self.push_parent_pad(&mut operands, *parent_pad, inst_id)?;
+                operands.push(args.len() as u64);
+                for arg in args {
+                    self.push_value_and_type(&mut operands, arg, inst_id)?;
+                }
+                let code = if matches!(inst.kind, InstKind::CatchPad { .. }) {
+                    FUNC_INST_CATCHPAD
+                } else {
+                    FUNC_INST_CLEANUPPAD
+                };
+                self.stream.emit_record(code, &operands);
+            }
+            InstKind::CatchRet {
+                catch_pad,
+                successor,
+            } => {
+                let mut operands = Operands::new();
+                self.push_value(&mut operands, catch_pad, inst_id)?;
+                operands.push(block_index(function, *successor)? as u64);
+                self.stream.emit_record(FUNC_INST_CATCHRET, &operands);
+            }
+            InstKind::CleanupRet {
+                cleanup_pad,
+                unwind_dest,
+            } => {
+                let mut operands = Operands::new();
+                self.push_value(&mut operands, cleanup_pad, inst_id)?;
+                if let Some(unwind_dest) = unwind_dest {
+                    operands.push(block_index(function, *unwind_dest)? as u64);
+                }
+                self.stream.emit_record(FUNC_INST_CLEANUPRET, &operands);
+            }
             InstKind::Phi { incoming } => {
                 let ty = result_type(function, inst)?;
                 let mut operands = Operands::new();
@@ -1533,6 +1633,25 @@ impl<'a> Writer<'a> {
             InstKind::Unreachable => self.stream.emit_record(FUNC_INST_UNREACHABLE, &[]),
         }
         Ok(())
+    }
+
+    fn push_parent_pad(
+        &mut self,
+        operands: &mut Operands,
+        parent_pad: Option<Operand>,
+        inst_id: u32,
+    ) -> Result<()> {
+        match parent_pad {
+            Some(parent_pad) => self.push_value(operands, &parent_pad, inst_id),
+            None => {
+                let id = self
+                    .token_none
+                    .ok_or_else(|| Error::bitcode("missing token none constant"))?;
+                let value_id = self.const_value_id(id)?;
+                operands.push(inst_id.wrapping_sub(value_id) as u64);
+                Ok(())
+            }
+        }
     }
 
     fn push_value(&mut self, operands: &mut Operands, value: &Operand, inst_id: u32) -> Result<()> {
