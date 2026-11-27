@@ -162,16 +162,17 @@ after 3 warmups.
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 47.4 ms | 46.5-49.3 ms | 58.4 MiB |
-| `llvm-as-rust` | 23.0 ms | 22.7-24.1 ms | 19.1 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 39.8 ms | 38.9-40.6 ms | 56.4 MiB |
-| `llvm-dis-rust` on C++ bitcode | 18.6 ms | 18.3-18.7 ms | 15.2 MiB |
+| `llvm-as` (C++) | 58.5 ms | 57.7-59.6 ms | 60.0 MiB |
+| `llvm-as-rust` | 29.7 ms | 29.3-30.5 ms | 24.5 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 48.3 ms | 47.3-56.8 ms | 57.9 MiB |
+| `llvm-dis-rust` on C++ bitcode | 23.4 ms | 23.1-24.6 ms | 18.4 MiB |
 
-In-process component medians: parse 7.56 ms, print 2.15 ms, bitcode write
-2.70 ms, bitcode read 6.12 ms, assemble 10.85 ms, disassemble 8.27 ms, verify
-8.10 ms. The optimization audit reduced parse from 8.48 ms, read from 6.66 ms,
-print from 2.35 ms, and disassemble from 8.98 ms; bitcode write stayed flat and
-the remaining deltas are within measurement noise. Regression target: do not
+In-process component medians: parse 10.43 ms, print 3.26 ms, bitcode write
+3.41 ms, bitcode read 7.85 ms, assemble 14.72 ms, disassemble 11.35 ms, verify
+10.62 ms. The optimization audit reduced parse from 8.48 ms, read from 6.66 ms,
+print from 2.35 ms, and disassemble from 8.98 ms on the earlier corpus; the
+current corpus adds vector arithmetic, comparison, select, and shufflevector,
+so its absolute component times are larger. Regression target: do not
 regress these medians beyond noise; investigate any consistent slowdown before
 adding features.
 

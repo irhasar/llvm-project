@@ -61,10 +61,21 @@ def main():
                 out.write("  %el = extractelement <4 x i32> %vec, i32 0\n")
                 out.write("  %n = insertelement <4 x i32> %vec, i32 %el, i32 0\n")
                 out.write("  %r = extractelement <4 x i32> %n, i32 0\n")
+                out.write("  %vsum = add <4 x i32> %vec, %n\n")
+                out.write(
+                    "  %vsh = shufflevector <4 x i32> %vec, <4 x i32> %n, "
+                    "<4 x i32> <i32 0, i32 5, i32 2, i32 7>\n"
+                )
+                out.write("  %vcmp = icmp slt <4 x i32> %vsh, %vsum\n")
+                out.write(
+                    "  %vsel = select <4 x i1> %vcmp, <4 x i32> %vsh, <4 x i32> %vsum\n"
+                )
+                out.write("  %vr = extractelement <4 x i32> %vsel, i32 1\n")
                 out.write("  %sum = add i32 %v9, %x\n")
                 out.write("  %sum2 = add i32 %sum, %r\n")
-                out.write("  call void @use(ptr align 8 @slot, i32 noundef %sum2)\n")
-                out.write("  ret i32 %sum2\n}\n\n")
+                out.write("  %sum3 = add i32 %sum2, %vr\n")
+                out.write("  call void @use(ptr align 8 @slot, i32 noundef %sum3)\n")
+                out.write("  ret i32 %sum3\n}\n\n")
 
         prefix = ["taskset", "-c", "0"]
         cpp_as = [*prefix, os.path.join(args.llvm_bin, "llvm-as"), source, "-o", cpp_bc]

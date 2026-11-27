@@ -131,8 +131,8 @@ bitcode reader/writer plus `llvm-as-rust` and `llvm-dis-rust`. The differential
 corpus in `llvm-rust/tests/corpus/` matches LLVM 19.1.7 in both directions, and
 the build/runtime/memory numbers are recorded in `llvm-rust/README.md`. On the
 1000-function parser/printer/bitcode corpus, the current Rust tools are about
-2.1x faster for assembly and disassembly than the LLVM 19 C++ tools and use
-about 3.1x/3.7x less peak RSS.
+2.0x faster for assembly and 2.1x faster for disassembly than the LLVM 19 C++
+tools and use about 2.4x/3.1x less peak RSS.
 Those are throughput and memory measurements for the migrated M1 surface, not
 a generated-code claim. The bitcode layer now covers function, return,
 parameter, and call-site attributes, including `#N` groups, common
