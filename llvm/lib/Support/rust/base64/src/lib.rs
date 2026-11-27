@@ -130,19 +130,12 @@ mod ssse3 {
         }
     }
 
-    /// 12 bytes in, 16 characters out per iteration. Only called with
-    /// `len` a multiple of 12 and at least 16 readable bytes, so the 16-byte
-    /// load never crosses the end of the input.
     #[target_feature(enable = "ssse3")]
     #[allow(unsafe_op_in_unsafe_fn)]
-    pub(super) unsafe fn encode(src: *const u8, dst: *mut u8, len: usize) {
+    unsafe fn encode_vec(v: core::arch::x86_64::__m128i) -> core::arch::x86_64::__m128i {
         use core::arch::x86_64::*;
 
-        // Spread each 3-byte group over a 32-bit lane.
         let spread = _mm_setr_epi8(1, 0, 2, 1, 4, 3, 5, 4, 7, 6, 8, 7, 10, 9, 11, 10);
-        // Offsets that turn a 6-bit value into its ASCII digit. The index is
-        // saturated at 51 and corrected by the "greater than 25" mask, so the
-        // four ranges (A-Z, a-z, 0-9, +/) select entries 0/1/2..11/12/13.
         let translate = _mm_setr_epi8(
             65, 71, -4, -4, -4, -4, -4, -4, -4, -4, -4, -4, -19, -16, 0, 0,
         );
@@ -153,19 +146,41 @@ mod ssse3 {
         let m2 = _mm_set1_epi32(0x003f_03f0u32 as i32);
         let m3 = _mm_set1_epi32(0x0100_0010u32 as i32);
 
+        let v = _mm_shuffle_epi8(v, spread);
+        let hi = _mm_mulhi_epu16(_mm_and_si128(v, m0), m1);
+        let lo = _mm_mullo_epi16(_mm_and_si128(v, m2), m3);
+        let v = _mm_or_si128(hi, lo);
+        let idx = _mm_subs_epu8(v, c51);
+        let idx = _mm_sub_epi8(idx, _mm_cmpgt_epi8(v, c25));
+        _mm_add_epi8(v, _mm_shuffle_epi8(translate, idx))
+    }
+
+    /// 12 bytes in, 16 characters out per iteration. Only called with
+    /// `len` a multiple of 12 and at least 16 readable bytes, so the 16-byte
+    /// load never crosses the end of the input.
+    #[target_feature(enable = "ssse3")]
+    #[allow(unsafe_op_in_unsafe_fn)]
+    pub(super) unsafe fn encode(src: *const u8, dst: *mut u8, len: usize) {
+        use core::arch::x86_64::*;
         let mut i = 0;
         while i < len {
             let v = _mm_loadu_si128(src.add(i).cast());
-            let v = _mm_shuffle_epi8(v, spread);
-            let hi = _mm_mulhi_epu16(_mm_and_si128(v, m0), m1);
-            let lo = _mm_mullo_epi16(_mm_and_si128(v, m2), m3);
-            let v = _mm_or_si128(hi, lo);
-            let idx = _mm_subs_epu8(v, c51);
-            let idx = _mm_sub_epi8(idx, _mm_cmpgt_epi8(v, c25));
-            let v = _mm_add_epi8(v, _mm_shuffle_epi8(translate, idx));
+            let v = encode_vec(v);
             _mm_storeu_si128(dst.add(i / 3 * 4).cast(), v);
             i += 12;
         }
+    }
+
+    /// Encodes exactly 12 bytes without reading past them. The two safe loads
+    /// avoid the stack copy that a 16-byte load would need for the final group.
+    #[target_feature(enable = "ssse3")]
+    #[allow(unsafe_op_in_unsafe_fn)]
+    pub(super) unsafe fn encode12(src: *const u8, dst: *mut u8) {
+        use core::arch::x86_64::*;
+        let lo = _mm_loadl_epi64(src.cast());
+        let hi = _mm_loadu_si32(src.add(8).cast());
+        let v = _mm_or_si128(lo, _mm_slli_si128(hi, 8));
+        _mm_storeu_si128(dst.cast(), encode_vec(v));
     }
 }
 
@@ -188,14 +203,24 @@ pub unsafe extern "C" fn llvm_base64_encode_rust(
     }
     #[cfg(target_arch = "x86_64")]
     {
-        // The SSSE3 loop needs at least 16 readable bytes and 12 input bytes
-        // to make a full vector; short inputs stay scalar and skip the CPUID
-        // cache check.
-        if len >= 16 && ssse3::available() {
-            let vec_len = (len - 4) / 12 * 12;
+        // Every complete 12-byte group can use the SSSE3 kernel. The last
+        // group may not have 16 readable bytes, so use two safe loads.
+        if len >= 12 && ssse3::available() {
+            let full = len / 12 * 12;
+            // Number of groups whose 16-byte load stays inside the input.
+            let direct = if len >= 16 {
+                ((len - 16) / 12 + 1) * 12
+            } else {
+                0
+            };
             unsafe {
-                ssse3::encode(src, dst, vec_len);
-                encode_scalar(src.add(vec_len), len - vec_len, dst.add(vec_len / 3 * 4));
+                if direct != 0 {
+                    ssse3::encode(src, dst, direct);
+                }
+                if direct < full {
+                    ssse3::encode12(src.add(direct), dst.add(direct / 3 * 4));
+                }
+                encode_scalar(src.add(full), len - full, dst.add(full / 3 * 4));
             }
             return len.div_ceil(3) * 4;
         }

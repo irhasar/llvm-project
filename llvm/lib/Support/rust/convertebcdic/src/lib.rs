@@ -132,14 +132,36 @@ unsafe fn to_utf8(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32,
     let mut written = 0;
     let mut i = 0;
     if cap >= len.saturating_mul(2) {
+        while i + 8 <= len {
+            let word = u64::from_le(core::ptr::read_unaligned(src.add(i).cast::<u64>()));
+            let mut out = 0u64;
+            let mut j = 0;
+            while j < 8 {
+                let ch = IBM1047_TO_ISO88591[((word >> (j * 8)) & 0xff) as usize];
+                if ch >= 128 {
+                    break;
+                }
+                out |= (ch as u64) << (j * 8);
+                j += 1;
+            }
+            if j != 8 {
+                break;
+            }
+            core::ptr::write_unaligned(dst.add(written).cast::<u64>(), out.to_le());
+            i += 8;
+            written += 8;
+        }
         while i < len {
             let ch = IBM1047_TO_ISO88591[*src.add(i) as usize];
             i += 1;
-            let high = ch >= 128;
-            let b0 = if high { 0xc0 | (ch >> 6) } else { ch };
-            *dst.add(written) = b0;
-            *dst.add(written + 1) = ch & 0xbf;
-            written += 1 + high as usize;
+            if ch >= 128 {
+                *dst.add(written) = 0xc0 | (ch >> 6);
+                *dst.add(written + 1) = ch & 0xbf;
+                written += 2;
+            } else {
+                *dst.add(written) = ch;
+                written += 1;
+            }
         }
         return (OK, written, len);
     }

@@ -223,10 +223,15 @@ pub fn format_hex(
     }
 
     let dst = &mut out[..num_chars];
-    for slot in dst.iter_mut() {
-        slot.write(b'0');
+    // When the digits already fill the field there are no leading zeros to
+    // write; the common fixed-width hex case avoids a full-width fill.
+    if num_chars > nibbles + prefix_chars {
+        for slot in dst.iter_mut() {
+            slot.write(b'0');
+        }
     }
     if prefix {
+        dst[0].write(b'0');
         dst[1].write(b'x');
     }
 
