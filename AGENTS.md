@@ -196,6 +196,11 @@ current corpus adds vector operations and atomic load/store, so its absolute
 component times are larger. Regression target: do not regress these medians
 beyond noise; investigate any consistent slowdown before adding features.
 
+Post-`atomicrmw`/`cmpxchg` spot check: assembly was 63.8 ms C++ / 24.6 ms Rust
+and disassembly 50.5 ms / 25.2 ms, with peak RSS 60.6/14.7 MiB and
+58.1/19.2 MiB. Those are within noise of the baseline, so the new instruction
+arms did not move throughput or memory.
+
 Performance lesson: a full-file `Vec<Token>` retained 354k tokens at 48 bytes
 each (552k capacity) and dominated peak RSS and page-fault time. The parser now
 lexes through a two-token streaming window. Internal parse CPU rose about 1 ms,
