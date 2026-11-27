@@ -383,63 +383,6 @@ pub unsafe extern "C" fn llvm_convertutf_utf32_to_utf16(
         source = unsafe { source.add(1) };
         target = unsafe { target.add(1) };
     }
-    // With two output slots per input code point the worst case cannot
-    // exhaust the target, so the hot loop can skip the capacity checks.
-    let src_len = if source == source_end {
-        0
-    } else {
-        (unsafe { source_end.offset_from(source) }) as usize
-    };
-    let dst_len = if target == target_end {
-        0
-    } else {
-        (unsafe { target_end.offset_from(target) }) as usize
-    };
-    if dst_len / 2 >= src_len {
-        while source < source_end {
-            let ch = unsafe { *source };
-            source = unsafe { source.add(1) };
-            if ch <= UNI_MAX_BMP {
-                if is_utf16_surrogate(ch) {
-                    if flags == STRICT_CONVERSION {
-                        source = unsafe { source.sub(1) };
-                        result = SOURCE_ILLEGAL;
-                        break;
-                    } else {
-                        unsafe { *target = UNI_REPLACEMENT_CHAR as u16 };
-                        target = unsafe { target.add(1) };
-                    }
-                } else {
-                    unsafe { *target = ch as u16 };
-                    target = unsafe { target.add(1) };
-                }
-            } else if ch > UNI_MAX_LEGAL_UTF32 {
-                if flags == STRICT_CONVERSION {
-                    result = SOURCE_ILLEGAL;
-                } else {
-                    unsafe { *target = UNI_REPLACEMENT_CHAR as u16 };
-                    target = unsafe { target.add(1) };
-                }
-            } else {
-                let ch = ch - HALF_BASE;
-                let hi = ((ch >> HALF_SHIFT) + UNI_SUR_HIGH_START) as u16;
-                let lo = ((ch & HALF_MASK) + UNI_SUR_LOW_START) as u16;
-                #[cfg(target_endian = "little")]
-                unsafe {
-                    (target as *mut u32).write_unaligned((hi as u32) | ((lo as u32) << 16));
-                }
-                #[cfg(not(target_endian = "little"))]
-                unsafe {
-                    *target = hi;
-                    *target.add(1) = lo;
-                }
-                target = unsafe { target.add(2) };
-            }
-        }
-        unsafe { *source_start = source };
-        unsafe { *target_start = target };
-        return result;
-    }
     while source < source_end {
         if target >= target_end {
             result = TARGET_EXHAUSTED;

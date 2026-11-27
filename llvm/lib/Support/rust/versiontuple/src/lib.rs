@@ -50,6 +50,32 @@ fn parse_component(input: &[u8], pos: &mut usize, value: &mut u32) -> bool {
         return true;
     }
     *value = (first - b'0') as u32;
+    // Version components are almost always one to four digits. Peel the
+    // common case so the loop branch runs only for unusually long fields.
+    if *pos < input.len() {
+        let byte = input[*pos];
+        if !is_digit(byte) {
+            return false;
+        }
+        *value = value.wrapping_mul(10).wrapping_add((byte - b'0') as u32);
+        *pos += 1;
+        if *pos < input.len() {
+            let byte = input[*pos];
+            if !is_digit(byte) {
+                return false;
+            }
+            *value = value.wrapping_mul(10).wrapping_add((byte - b'0') as u32);
+            *pos += 1;
+            if *pos < input.len() {
+                let byte = input[*pos];
+                if !is_digit(byte) {
+                    return false;
+                }
+                *value = value.wrapping_mul(10).wrapping_add((byte - b'0') as u32);
+                *pos += 1;
+            }
+        }
+    }
     while *pos < input.len() {
         let byte = input[*pos];
         if !is_digit(byte) {
