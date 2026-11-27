@@ -74,8 +74,11 @@ def main():
                 out.write("  %sum = add i32 %v9, %x\n")
                 out.write("  %sum2 = add i32 %sum, %r\n")
                 out.write("  %sum3 = add i32 %sum2, %vr\n")
-                out.write("  call void @use(ptr align 8 @slot, i32 noundef %sum3)\n")
-                out.write("  ret i32 %sum3\n}\n\n")
+                out.write("  %av = load atomic i32, ptr @slot seq_cst, align 4\n")
+                out.write("  %sum4 = add i32 %sum3, %av\n")
+                out.write("  store atomic i32 %sum4, ptr @slot release, align 4\n")
+                out.write("  call void @use(ptr align 8 @slot, i32 noundef %sum4)\n")
+                out.write("  ret i32 %sum4\n}\n\n")
 
         prefix = ["taskset", "-c", "0"]
         cpp_as = [*prefix, os.path.join(args.llvm_bin, "llvm-as"), source, "-o", cpp_bc]

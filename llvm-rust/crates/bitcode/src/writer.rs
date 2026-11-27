@@ -76,11 +76,13 @@ const FUNC_INST_UNREACHABLE: u32 = 15;
 const FUNC_INST_PHI: u32 = 16;
 const FUNC_INST_ALLOCA: u32 = 19;
 const FUNC_INST_LOAD: u32 = 20;
+const FUNC_INST_LOADATOMIC: u32 = 41;
 const FUNC_INST_CMP2: u32 = 28;
 const FUNC_INST_VSELECT: u32 = 29;
 const FUNC_INST_CALL: u32 = 34;
 const FUNC_INST_GEP: u32 = 43;
 const FUNC_INST_STORE: u32 = 44;
+const FUNC_INST_STOREATOMIC: u32 = 45;
 const FUNC_INST_UNOP: u32 = 56;
 const FUNC_INST_EXTRACTELT: u32 = 6;
 const FUNC_INST_INSERTELT: u32 = 7;
@@ -1020,26 +1022,50 @@ impl<'a> Writer<'a> {
                 ptr,
                 align,
                 volatile,
+                ordering,
+                syncscope,
             } => {
+                if ordering.is_atomic() && (align.is_none() || !ordering.is_load_valid()) {
+                    return Err(Error::bitcode("invalid atomic load"));
+                }
                 let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, ptr, inst_id)?;
                 operands.push(self.type_index(*ty)? as u64);
                 operands.push(encode_align(*align) as u64);
                 operands.push(*volatile as u64);
-                self.stream.emit_record(FUNC_INST_LOAD, &operands);
+                let code = if ordering.is_atomic() {
+                    operands.push(ordering.code());
+                    operands.push(syncscope.code());
+                    FUNC_INST_LOADATOMIC
+                } else {
+                    FUNC_INST_LOAD
+                };
+                self.stream.emit_record(code, &operands);
             }
             InstKind::Store {
                 value,
                 ptr,
                 align,
                 volatile,
+                ordering,
+                syncscope,
             } => {
+                if ordering.is_atomic() && (align.is_none() || !ordering.is_store_valid()) {
+                    return Err(Error::bitcode("invalid atomic store"));
+                }
                 let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, ptr, inst_id)?;
                 self.push_value_and_type(&mut operands, value, inst_id)?;
                 operands.push(encode_align(*align) as u64);
                 operands.push(*volatile as u64);
-                self.stream.emit_record(FUNC_INST_STORE, &operands);
+                let code = if ordering.is_atomic() {
+                    operands.push(ordering.code());
+                    operands.push(syncscope.code());
+                    FUNC_INST_STOREATOMIC
+                } else {
+                    FUNC_INST_STORE
+                };
+                self.stream.emit_record(code, &operands);
             }
             InstKind::Gep {
                 inbounds,

@@ -334,13 +334,25 @@ fn write_instruction(
             ptr,
             align,
             volatile,
+            ordering,
+            syncscope,
         } => {
             out.push_str("load ");
+            if ordering.is_atomic() {
+                out.push_str("atomic ");
+            }
             if *volatile {
                 out.push_str("volatile ");
             }
             let _ = write!(out, "{}, ", module.display_type(*ty));
             write_operand(module, function, *ptr, out);
+            if ordering.is_atomic() {
+                out.push(' ');
+                if *syncscope == crate::inst::SyncScope::SingleThread {
+                    out.push_str("syncscope(\"singlethread\") ");
+                }
+                out.push_str(ordering.as_str());
+            }
             if let Some(align) = align {
                 let _ = write!(out, ", align {align}");
             }
@@ -350,14 +362,26 @@ fn write_instruction(
             ptr,
             align,
             volatile,
+            ordering,
+            syncscope,
         } => {
             out.push_str("store ");
+            if ordering.is_atomic() {
+                out.push_str("atomic ");
+            }
             if *volatile {
                 out.push_str("volatile ");
             }
             write_operand(module, function, *value, out);
             out.push_str(", ");
             write_operand(module, function, *ptr, out);
+            if ordering.is_atomic() {
+                out.push(' ');
+                if *syncscope == crate::inst::SyncScope::SingleThread {
+                    out.push_str("syncscope(\"singlethread\") ");
+                }
+                out.push_str(ordering.as_str());
+            }
             if let Some(align) = align {
                 let _ = write!(out, ", align {align}");
             }

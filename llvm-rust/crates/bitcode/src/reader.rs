@@ -79,11 +79,13 @@ const FUNC_INST_UNREACHABLE: u64 = 15;
 const FUNC_INST_PHI: u64 = 16;
 const FUNC_INST_ALLOCA: u64 = 19;
 const FUNC_INST_LOAD: u64 = 20;
+const FUNC_INST_LOADATOMIC: u64 = 41;
 const FUNC_INST_CMP2: u64 = 28;
 const FUNC_INST_VSELECT: u64 = 29;
 const FUNC_INST_CALL: u64 = 34;
 const FUNC_INST_GEP: u64 = 43;
 const FUNC_INST_STORE: u64 = 44;
+const FUNC_INST_STOREATOMIC: u64 = 45;
 const FUNC_INST_UNOP: u64 = 56;
 const FUNC_INST_EXTRACTELT: u64 = 6;
 const FUNC_INST_INSERTELT: u64 = 7;
@@ -1243,6 +1245,39 @@ impl Reader {
                         ptr,
                         align,
                         volatile,
+                        ordering: AtomicOrdering::NotAtomic,
+                        syncscope: SyncScope::System,
+                    },
+                    Some(ty),
+                ))
+            }
+            FUNC_INST_LOADATOMIC => {
+                let (ptr, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                if record.operands.len() != index + 5 {
+                    return Err(Error::bitcode("invalid atomic load record"));
+                }
+                let ty = self.type_at(record.operands[index])?;
+                index += 1;
+                let align = decode_align(record.operands[index]);
+                index += 1;
+                let volatile = record.operands[index] != 0;
+                index += 1;
+                let ordering = AtomicOrdering::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("invalid atomic load ordering"))?;
+                index += 1;
+                let syncscope = SyncScope::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("unsupported atomic load syncscope"))?;
+                if align.is_none() || !ordering.is_load_valid() {
+                    return Err(Error::bitcode("invalid atomic load"));
+                }
+                Ok((
+                    InstKind::Load {
+                        ty,
+                        ptr,
+                        align,
+                        volatile,
+                        ordering,
+                        syncscope,
                     },
                     Some(ty),
                 ))
@@ -1260,6 +1295,39 @@ impl Reader {
                         ptr,
                         align,
                         volatile,
+                        ordering: AtomicOrdering::NotAtomic,
+                        syncscope: SyncScope::System,
+                    },
+                    None,
+                ))
+            }
+            FUNC_INST_STOREATOMIC => {
+                let (ptr, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (value, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                if record.operands.len() != index + 4 {
+                    return Err(Error::bitcode("invalid atomic store record"));
+                }
+                let align = decode_align(record.operands[index]);
+                index += 1;
+                let volatile = record.operands[index] != 0;
+                index += 1;
+                let ordering = AtomicOrdering::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("invalid atomic store ordering"))?;
+                index += 1;
+                let syncscope = SyncScope::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("unsupported atomic store syncscope"))?;
+                if align.is_none() || !ordering.is_store_valid() {
+                    return Err(Error::bitcode("invalid atomic store"));
+                }
+                Ok((
+                    InstKind::Store {
+                        value,
+                        ptr,
+                        align,
+                        volatile,
+                        ordering,
+                        syncscope,
                     },
                     None,
                 ))
@@ -1977,6 +2045,8 @@ mod tests {
             FUNC_INST_INSERTELT,
             FUNC_INST_SHUFFLEVEC,
             FUNC_INST_FREEZE,
+            FUNC_INST_LOADATOMIC,
+            FUNC_INST_STOREATOMIC,
         ] {
             let record = Record {
                 code,

@@ -139,6 +139,11 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   `fence` uses `System` and prints without a `syncscope(...)` prefix. Do not
   write zero for the default, and reject unknown scope IDs instead of
   silently changing their meaning.
+- Atomic load/store syntax places `syncscope(...)` after the pointer and
+  before the ordering, unlike `fence`, where it precedes the ordering.
+  Atomic loads reject `release`/`acq_rel`; atomic stores reject
+  `acquire`/`acq_rel`; both require an explicit alignment. Encode them with
+  bitcode codes 41/45 and keep the non-atomic 20/44 paths unchanged.
 - Consume parser tokens with `take` when the current token is always advanced.
   Do not clone `TokenKind` in type or constant parsing; `CStr` payloads are
   heap vectors and cloning them is avoidable.
@@ -166,17 +171,17 @@ after 3 warmups.
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 58.5 ms | 57.7-59.6 ms | 60.0 MiB |
-| `llvm-as-rust` | 29.7 ms | 29.3-30.5 ms | 24.5 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 48.3 ms | 47.3-56.8 ms | 57.9 MiB |
-| `llvm-dis-rust` on C++ bitcode | 23.4 ms | 23.1-24.6 ms | 18.4 MiB |
+| `llvm-as` (C++) | 64.7 ms | 62.4-74.4 ms | 60.6 MiB |
+| `llvm-as-rust` | 33.5 ms | 33.0-35.5 ms | 26.0 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 53.0 ms | 51.3-74.2 ms | 58.1 MiB |
+| `llvm-dis-rust` on C++ bitcode | 26.1 ms | 25.9-27.5 ms | 19.2 MiB |
 
-In-process component medians: parse 10.43 ms, print 3.26 ms, bitcode write
-3.41 ms, bitcode read 7.85 ms, assemble 14.72 ms, disassemble 11.35 ms, verify
-10.62 ms. The optimization audit reduced parse from 8.48 ms, read from 6.66 ms,
+In-process component medians: parse 11.18 ms, print 3.59 ms, bitcode write
+3.62 ms, bitcode read 8.51 ms, assemble 15.62 ms, disassemble 12.00 ms, verify
+11.62 ms. The optimization audit reduced parse from 8.48 ms, read from 6.66 ms,
 print from 2.35 ms, and disassemble from 8.98 ms on the earlier corpus; the
-current corpus adds vector arithmetic, comparison, select, and shufflevector,
-so its absolute component times are larger. Regression target: do not
+current corpus adds vector operations and atomic load/store, so its absolute
+component times are larger. Regression target: do not
 regress these medians beyond noise; investigate any consistent slowdown before
 adding features.
 

@@ -295,6 +295,73 @@ entry:
 }
 
 #[test]
+fn atomic_load_store() {
+    let source = r#"
+define i32 @load_seq_cst(ptr %p) {
+entry:
+  %v = load atomic i32, ptr %p seq_cst, align 4
+  ret i32 %v
+}
+
+define void @store_release(ptr %p, i32 %v) {
+entry:
+  store atomic i32 %v, ptr %p release, align 4
+  ret void
+}
+
+define i32 @load_single(ptr %p) {
+entry:
+  %v = load atomic i32, ptr %p syncscope("singlethread") acquire, align 4
+  ret i32 %v
+}
+
+define void @store_volatile(ptr %p, i32 %v) {
+entry:
+  store atomic volatile i32 %v, ptr %p seq_cst, align 4
+  ret void
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%v = load atomic i32, ptr %p seq_cst, align 4"));
+    assert!(printed.contains("store atomic i32 %v, ptr %p release, align 4"));
+    assert!(
+        printed
+            .contains("%v = load atomic i32, ptr %p syncscope(\"singlethread\") acquire, align 4")
+    );
+    assert!(printed.contains("store atomic volatile i32 %v, ptr %p seq_cst, align 4"));
+}
+
+#[test]
+fn rejects_invalid_atomic_load_store() {
+    let load_release = r#"
+define i32 @bad(ptr %p) {
+entry:
+  %v = load atomic i32, ptr %p release, align 4
+  ret i32 %v
+}
+"#;
+    assert!(parse_module(load_release).is_err());
+
+    let store_acquire = r#"
+define void @bad(ptr %p, i32 %v) {
+entry:
+  store atomic i32 %v, ptr %p acquire, align 4
+  ret void
+}
+"#;
+    assert!(parse_module(store_acquire).is_err());
+
+    let load_no_align = r#"
+define i32 @bad(ptr %p) {
+entry:
+  %v = load atomic i32, ptr %p seq_cst
+  ret i32 %v
+}
+"#;
+    assert!(parse_module(load_no_align).is_err());
+}
+
+#[test]
 fn varargs_and_attribute_groups() {
     let source = r#"
 declare i32 @printf(ptr, ...)

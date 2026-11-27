@@ -446,6 +446,27 @@ impl AtomicOrdering {
             Self::Acquire | Self::Release | Self::AcquireRelease | Self::SequentiallyConsistent
         )
     }
+
+    /// Returns true when the ordering is valid on an atomic load.
+    pub const fn is_load_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Unordered | Self::Monotonic | Self::Acquire | Self::SequentiallyConsistent
+        )
+    }
+
+    /// Returns true when the ordering is valid on an atomic store.
+    pub const fn is_store_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Unordered | Self::Monotonic | Self::Release | Self::SequentiallyConsistent
+        )
+    }
+
+    /// Returns true when the operation is atomic.
+    pub const fn is_atomic(self) -> bool {
+        !matches!(self, Self::NotAtomic)
+    }
 }
 
 /// Synchronization scope used by fences.
@@ -528,12 +549,16 @@ pub enum InstKind {
         ptr: Operand,
         align: Option<u64>,
         volatile: bool,
+        ordering: AtomicOrdering,
+        syncscope: SyncScope,
     },
     Store {
         value: Operand,
         ptr: Operand,
         align: Option<u64>,
         volatile: bool,
+        ordering: AtomicOrdering,
+        syncscope: SyncScope,
     },
     Gep {
         inbounds: bool,

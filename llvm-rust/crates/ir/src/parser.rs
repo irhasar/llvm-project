@@ -1873,37 +1873,69 @@ impl<'a> Parser<'a> {
             }
             "load" => {
                 self.advance();
+                let atomic = self.eat_ident("atomic");
                 let volatile = self.eat_ident("volatile");
                 let ty = self.parse_type()?;
                 self.expect_punct(',')?;
                 let ptr_ty = self.parse_type()?;
                 let ptr = self.parse_value(function, ptr_ty)?;
+                let (syncscope, ordering) = if atomic {
+                    let syncscope = self.parse_syncscope()?;
+                    let ordering = self.parse_atomic_ordering()?;
+                    if !ordering.is_load_valid() {
+                        return Err(self.error("invalid atomic load ordering"));
+                    }
+                    (syncscope, ordering)
+                } else {
+                    (SyncScope::System, AtomicOrdering::NotAtomic)
+                };
                 let align = self.parse_optional_align()?;
+                if atomic && align.is_none() {
+                    return Err(self.error("atomic load requires an explicit alignment"));
+                }
                 Ok((
                     InstKind::Load {
                         ty,
                         ptr,
                         align,
                         volatile,
+                        ordering,
+                        syncscope,
                     },
                     Some(ty),
                 ))
             }
             "store" => {
                 self.advance();
+                let atomic = self.eat_ident("atomic");
                 let volatile = self.eat_ident("volatile");
                 let ty = self.parse_type()?;
                 let value = self.parse_value(function, ty)?;
                 self.expect_punct(',')?;
                 let ptr_ty = self.parse_type()?;
                 let ptr = self.parse_value(function, ptr_ty)?;
+                let (syncscope, ordering) = if atomic {
+                    let syncscope = self.parse_syncscope()?;
+                    let ordering = self.parse_atomic_ordering()?;
+                    if !ordering.is_store_valid() {
+                        return Err(self.error("invalid atomic store ordering"));
+                    }
+                    (syncscope, ordering)
+                } else {
+                    (SyncScope::System, AtomicOrdering::NotAtomic)
+                };
                 let align = self.parse_optional_align()?;
+                if atomic && align.is_none() {
+                    return Err(self.error("atomic store requires an explicit alignment"));
+                }
                 Ok((
                     InstKind::Store {
                         value,
                         ptr,
                         align,
                         volatile,
+                        ordering,
+                        syncscope,
                     },
                     None,
                 ))

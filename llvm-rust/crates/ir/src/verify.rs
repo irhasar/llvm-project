@@ -208,12 +208,39 @@ fn verify_instruction(
                 check_operand(module, function, *count, errors, "alloca count");
             }
         }
-        InstKind::Load { ptr, .. } => {
+        InstKind::Load {
+            ptr,
+            align,
+            ordering,
+            ..
+        } => {
             check_operand(module, function, *ptr, errors, "load pointer");
+            if ordering.is_atomic() {
+                if align.is_none() {
+                    errors.push(Error::verify("atomic load requires an explicit alignment"));
+                }
+                if !ordering.is_load_valid() {
+                    errors.push(Error::verify("invalid atomic load ordering"));
+                }
+            }
         }
-        InstKind::Store { value, ptr, .. } => {
+        InstKind::Store {
+            value,
+            ptr,
+            align,
+            ordering,
+            ..
+        } => {
             check_operand(module, function, *value, errors, "store value");
             check_operand(module, function, *ptr, errors, "store pointer");
+            if ordering.is_atomic() {
+                if align.is_none() {
+                    errors.push(Error::verify("atomic store requires an explicit alignment"));
+                }
+                if !ordering.is_store_valid() {
+                    errors.push(Error::verify("invalid atomic store ordering"));
+                }
+            }
         }
         InstKind::Gep {
             source_ty,

@@ -131,8 +131,8 @@ bitcode reader/writer plus `llvm-as-rust` and `llvm-dis-rust`. The differential
 corpus in `llvm-rust/tests/corpus/` matches LLVM 19.1.7 in both directions, and
 the build/runtime/memory numbers are recorded in `llvm-rust/README.md`. On the
 1000-function parser/printer/bitcode corpus, the current Rust tools are about
-2.0x faster for assembly and 2.1x faster for disassembly than the LLVM 19 C++
-tools and use about 2.4x/3.1x less peak RSS.
+1.9x faster for assembly and 2.0x faster for disassembly than the LLVM 19 C++
+tools and use about 2.3x/3.0x less peak RSS.
 Those are throughput and memory measurements for the migrated M1 surface, not
 a generated-code claim. The bitcode layer now covers function, return,
 parameter, and call-site attributes, including `#N` groups, common
@@ -140,11 +140,11 @@ enum/integer/string attributes, and the legacy memory attributes. This is not
 an M2 parity claim: the upstream `llvm/test` suite is still not vendored. Type
 attributes (`byval`, `sret`, `elementtype`), aggregate/vector element
 extraction and insertion, vector integer and floating-point arithmetic,
-vector comparisons and `select`, `shufflevector`, `freeze`, and `fence` with
-system and single-thread sync scopes are covered, including function-local
-aggregate constants and forward local element operands. The slice still does
-not cover metadata, constant expressions, atomic load/store,
-`atomicrmw`/`cmpxchg`, scalable-vector shuffles, or other fence sync scopes.
+vector comparisons and `select`, `shufflevector`, `freeze`, `fence`, and
+atomic `load`/`store` with system and single-thread sync scopes are covered,
+including function-local aggregate constants and forward local element
+operands. The slice still does not cover metadata, constant expressions,
+`atomicrmw`/`cmpxchg`, scalable-vector shuffles, or other sync scopes.
 
 ## Gates and kill criteria
 
