@@ -97,6 +97,66 @@ Build only the Rust workspace and the specific C++ oracle tool needed.
 - Separate final binary size from intermediate archive or object size.
 - A performance claim needs both throughput and generated-code quality.
 
+## Performance playbook (M1 lessons)
+
+Track B must be faster than C++ on the migrated surface without a large LLVM
+build. Optimize only after measuring the component, and keep every change
+correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
+
+- Measure components separately: parse, print, bitcode read, bitcode write,
+  assemble, and disassemble. `llvm-rust-bench` has modes for each; process
+  startup and file I/O must be reported separately from in-process timings.
+- Keep source text borrowed. Lexer tokens use `Cow<'a, str>` and consumed
+  names are moved out of tokens instead of cloned. Quoted or escaped names may
+  remain owned; do not add per-token `String` allocations back into the hot
+  path.
+- Avoid per-record and per-instruction heap allocation. Small bitcode records
+  and instruction operands stay inline; tune inline capacity with
+  measurements. Four inline operands beat two and eight on the M1 corpus
+  because the larger inline forms hurt cache/RSS.
+- Use dense IDs as vector-backed tables with a sentinel value, not `HashMap`,
+  for type, global, function, constant, and local-value maps. Reserve hash
+  maps for sparse or non-index keys.
+- Use a fast non-cryptographic hasher (FNV-1a) for compiler-internal maps.
+  This is a deliberate compiler trade-off; if a map is exposed to adversarial
+  input, revisit hash-flooding risk and document the trust boundary.
+- Share immutable abbreviation tables across blocks with `Arc` and
+  copy-on-write. Do not clone an abbreviation vector for every block.
+- Decode function bodies by iterating records by reference. Do not clone an
+  entire body just to satisfy borrow checking.
+- Short-lived CLI tools may skip arena teardown with `process::exit(0)` after
+  flushing output. Never do this in library code or tests.
+- Do not keep unhelpful preallocation or cache tweaks. Measure both throughput
+  and RSS; revert changes that only add memory or do not move the median.
+- For M1 performance claims use `taskset -c 0`, 11 runs after 3 warmups, the
+  same corpus for both sides, and the same C++-produced bitcode for both
+  disassemblers. Report median, min-max, and peak RSS.
+- For M1 parser/printer/bitcode, report throughput and memory only and label
+  them as such. A full performance claim still needs generated-code quality
+  once codegen exists; never turn M1 numbers into an LLVM parity claim.
+
+### M1 performance baseline (2026-11-26)
+
+Corpus: 1000 functions, 664,987 bytes, LLVM 19.1.7, `taskset -c 0`, 11 runs
+after 3 warmups.
+
+| Tool | Median | Min-max | Peak RSS |
+| --- | ---: | ---: | ---: |
+| `llvm-as` (C++) | 47.1 ms | 46.7-49.2 ms | 58.5 MiB |
+| `llvm-as-rust` | 23.5 ms | 23.0-26.5 ms | 19.1 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 39.7 ms | 39.3-42.8 ms | 56.4 MiB |
+| `llvm-dis-rust` on C++ bitcode | 19.5 ms | 19.2-19.8 ms | 15.2 MiB |
+
+In-process component medians: parse 8.48 ms, print 2.35 ms, bitcode write
+2.68 ms, bitcode read 6.66 ms, assemble 11.41 ms, disassemble 8.98 ms.
+Regression target: do not regress these medians beyond noise; investigate any
+consistent slowdown before adding features.
+
+Before merging a performance change: capture the component baseline, make the
+change, run `cargo test --workspace` and `tests/differential.sh`, rerun the
+11-run/3-warmup benchmark, compare median and peak RSS, and keep the change
+only when correctness passes and the hot component improves.
+
 ## Do not
 
 - Do not start with CodeGen, SelectionDAG, GlobalISel, or the target backends.
