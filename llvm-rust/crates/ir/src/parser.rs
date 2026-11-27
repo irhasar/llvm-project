@@ -640,6 +640,17 @@ fn is_attr_keyword(text: &str) -> bool {
     )
 }
 
+struct ParsedCall {
+    fastmath: FastMath,
+    attrs: Vec<Attribute>,
+    ret_attrs: Vec<Attribute>,
+    ret_ty: TypeId,
+    fn_ty: TypeId,
+    callee: Operand,
+    args: Vec<Operand>,
+    arg_attrs: Vec<Arc<Vec<Attribute>>>,
+}
+
 struct Parser<'a> {
     lexer: Lexer<'a>,
     tokens: VecDeque<Token<'a>>,
@@ -1857,6 +1868,11 @@ impl<'a> Parser<'a> {
 
     fn parse_callee(&mut self, function: &mut Function) -> Result<Operand> {
         match self.peek_kind().clone() {
+            TokenKind::Ident(text) if &*text == "asm" => {
+                let constant = self.parse_inline_asm(INVALID_TYPE)?;
+                let ty = self.module.types.pointer();
+                Ok(Operand::constant(ty, constant))
+            }
             TokenKind::Global(name) => {
                 let span = self.peek().span;
                 let quoted = self.peek().quoted;
@@ -1889,6 +1905,51 @@ impl<'a> Parser<'a> {
                 self.parse_value(function, ty)
             }
         }
+    }
+
+    fn parse_inline_asm(&mut self, fn_ty: TypeId) -> Result<ConstId> {
+        self.expect_ident_is("asm")?;
+        let mut sideeffect = false;
+        let mut alignstack = false;
+        let mut inteldialect = false;
+        let mut unwind = false;
+        loop {
+            match self.peek_kind() {
+                TokenKind::Ident(text) if &**text == "sideeffect" => {
+                    sideeffect = true;
+                    self.advance();
+                }
+                TokenKind::Ident(text) if &**text == "alignstack" => {
+                    alignstack = true;
+                    self.advance();
+                }
+                TokenKind::Ident(text) if &**text == "inteldialect" => {
+                    inteldialect = true;
+                    self.advance();
+                }
+                TokenKind::Ident(text) if &**text == "unwind" => {
+                    unwind = true;
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+        let asm = self.expect_string_bytes()?;
+        self.expect_punct(',')?;
+        let constraints = self.expect_string_bytes()?;
+        let ty = self.module.types.pointer();
+        Ok(self.module.add_constant(Constant::new(
+            ty,
+            ConstKind::InlineAsm {
+                fn_ty,
+                asm,
+                constraints,
+                sideeffect,
+                alignstack,
+                inteldialect,
+                unwind,
+            },
+        )))
     }
 
     fn parse_instruction(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
@@ -2183,6 +2244,7 @@ impl<'a> Parser<'a> {
                 ))
             }
             "call" => self.parse_call(function, TailKind::None),
+            "callbr" => self.parse_callbr(function),
             "tail" | "musttail" | "notail" => {
                 let tail = match &*mnemonic {
                     "tail" => TailKind::Tail,
@@ -2626,7 +2688,68 @@ impl<'a> Parser<'a> {
         function: &mut Function,
         tail: TailKind,
     ) -> Result<(InstKind, Option<TypeId>)> {
-        self.expect_ident_is("call")?;
+        let call = self.parse_call_common(function, "call")?;
+        let result_ty = if self.module.types.get(call.ret_ty).is_void() {
+            None
+        } else {
+            Some(call.ret_ty)
+        };
+        Ok((
+            InstKind::Call {
+                tail,
+                ret_ty: call.ret_ty,
+                fn_ty: call.fn_ty,
+                callee: call.callee,
+                args: call.args,
+                arg_attrs: call.arg_attrs,
+                fastmath: call.fastmath,
+                ret_attrs: call.ret_attrs.into(),
+                attrs: call.attrs.into(),
+            },
+            result_ty,
+        ))
+    }
+
+    fn parse_callbr(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        let call = self.parse_call_common(function, "callbr")?;
+        self.expect_ident_is("to")?;
+        let default_dest = self.parse_block_ref(function)?;
+        self.expect_punct('[')?;
+        let mut indirect_dests = Vec::new();
+        if self.eat_punct(']') {
+            return Err(self.error("callbr requires at least one indirect destination"));
+        }
+        loop {
+            indirect_dests.push(self.parse_block_ref(function)?);
+            if !self.eat_punct(',') {
+                break;
+            }
+        }
+        self.expect_punct(']')?;
+        let result_ty = if self.module.types.get(call.ret_ty).is_void() {
+            None
+        } else {
+            Some(call.ret_ty)
+        };
+        Ok((
+            InstKind::CallBr {
+                ret_ty: call.ret_ty,
+                fn_ty: call.fn_ty,
+                callee: call.callee,
+                args: call.args,
+                arg_attrs: call.arg_attrs,
+                fastmath: call.fastmath,
+                ret_attrs: call.ret_attrs.into(),
+                attrs: call.attrs.into(),
+                default_dest,
+                indirect_dests,
+            },
+            result_ty,
+        ))
+    }
+
+    fn parse_call_common(&mut self, function: &mut Function, mnemonic: &str) -> Result<ParsedCall> {
+        self.expect_ident_is(mnemonic)?;
         let fastmath = self.parse_fastmath()?;
         let mut attrs = Vec::new();
         if let TokenKind::Ident(text) = self.peek_kind() {
@@ -2653,9 +2776,9 @@ impl<'a> Parser<'a> {
             }
         }
         let ty = self.parse_type()?;
-        let (ret_ty, _explicit_params) = match self.module.types.get(ty) {
-            Type::Function { ret, params, .. } => (*ret, Some(params.clone())),
-            _ => (ty, None),
+        let ret_ty = match self.module.types.get(ty) {
+            Type::Function { ret, .. } => *ret,
+            _ => ty,
         };
         let callee = self.parse_callee(function)?;
         self.expect_punct('(')?;
@@ -2673,11 +2796,6 @@ impl<'a> Parser<'a> {
         }
         self.expect_punct(')')?;
         self.parse_call_attrs(&mut attrs)?;
-        let result_ty = if self.module.types.get(ret_ty).is_void() {
-            None
-        } else {
-            Some(ret_ty)
-        };
         let fn_ty = if matches!(self.module.types.get(ty), Type::Function { .. }) {
             ty
         } else if let OperandKind::Function(id) = callee.kind {
@@ -2691,20 +2809,24 @@ impl<'a> Parser<'a> {
             let params = args.iter().map(|arg| arg.ty).collect();
             self.module.types.function(ret_ty, params, false)
         };
-        Ok((
-            InstKind::Call {
-                tail,
-                ret_ty,
-                fn_ty,
-                callee,
-                args,
-                arg_attrs: arg_attrs.into_iter().map(Arc::new).collect(),
-                fastmath,
-                ret_attrs: ret_attrs.into(),
-                attrs: attrs.into(),
-            },
-            result_ty,
-        ))
+        if let OperandKind::Const(id) = callee.kind {
+            if let ConstKind::InlineAsm {
+                fn_ty: asm_fn_ty, ..
+            } = &mut self.module.constants[id].kind
+            {
+                *asm_fn_ty = fn_ty;
+            }
+        }
+        Ok(ParsedCall {
+            fastmath,
+            attrs,
+            ret_attrs,
+            ret_ty,
+            fn_ty,
+            callee,
+            args,
+            arg_attrs: arg_attrs.into_iter().map(Arc::new).collect(),
+        })
     }
 
     fn parse_call_attrs(&mut self, attrs: &mut Vec<Attribute>) -> Result<()> {
@@ -2963,6 +3085,17 @@ impl<'a> Parser<'a> {
                     .map_err(|_| self.error("string literal is not valid UTF-8"))
             }
             other => Err(self.error(format!("expected a string, found {other:?}"))),
+        }
+    }
+
+    fn expect_string_bytes(&mut self) -> Result<Vec<u8>> {
+        let token = self.take();
+        match token.kind {
+            TokenKind::Str(bytes) => Ok(bytes),
+            other => Err(Error::parse_at(
+                format!("expected a string, found {other:?}"),
+                token.span,
+            )),
         }
     }
 

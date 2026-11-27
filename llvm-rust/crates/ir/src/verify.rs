@@ -36,6 +36,16 @@ pub fn verify_module(module: &Module) -> Result<(), Vec<VerifyError>> {
             ConstKind::BlockAddress { function, block } => {
                 verify_block_address(module, constant.ty, *function, *block, &mut errors);
             }
+            ConstKind::InlineAsm { fn_ty, .. } => {
+                if !matches!(module.types.get(constant.ty), Type::Pointer) {
+                    errors.push(Error::verify("inline asm type is not a pointer"));
+                }
+                if !module.types.is_valid(*fn_ty)
+                    || !matches!(module.types.get(*fn_ty), Type::Function { .. })
+                {
+                    errors.push(Error::verify("inline asm type is not a function type"));
+                }
+            }
             _ => {}
         }
     }
@@ -349,6 +359,79 @@ fn verify_instruction(
                             }
                         }
                     }
+                }
+            }
+        }
+        InstKind::CallBr {
+            callee,
+            args,
+            default_dest,
+            indirect_dests,
+            ..
+        } => {
+            check_operand(module, function, *callee, errors, "callbr callee");
+            for arg in args {
+                check_operand(module, function, *arg, errors, "callbr argument");
+            }
+            check_block(
+                function,
+                *default_dest,
+                errors,
+                "callbr default destination",
+            );
+            for destination in indirect_dests {
+                check_block(
+                    function,
+                    *destination,
+                    errors,
+                    "callbr indirect destination",
+                );
+            }
+            if indirect_dests.is_empty() {
+                errors.push(Error::verify(
+                    "callbr requires at least one indirect destination",
+                ));
+            }
+            for (index, destination) in indirect_dests.iter().enumerate() {
+                if indirect_dests[..index].contains(destination) {
+                    errors.push(Error::verify("callbr has a duplicate indirect destination"));
+                }
+            }
+            match callee.kind {
+                OperandKind::Const(id)
+                    if module.constants.try_get(id).is_some_and(|constant| {
+                        matches!(constant.kind, ConstKind::InlineAsm { .. })
+                    }) => {}
+                _ => errors.push(Error::verify("callbr callee is not inline asm")),
+            }
+            for arg in args {
+                let OperandKind::Const(id) = arg.kind else {
+                    continue;
+                };
+                let Some(ConstKind::BlockAddress {
+                    function: target_function,
+                    block,
+                }) = module.constants.try_get(id).map(|constant| &constant.kind)
+                else {
+                    continue;
+                };
+                let Some(target) = module.functions.try_get(*target_function) else {
+                    errors.push(Error::verify(
+                        "callbr label argument targets an unknown function",
+                    ));
+                    continue;
+                };
+                if target.name != function.name {
+                    errors.push(Error::verify(
+                        "callbr label argument targets another function",
+                    ));
+                    continue;
+                }
+                match function.block_named(*block) {
+                    Some(destination) if indirect_dests.contains(&destination) => {}
+                    _ => errors.push(Error::verify(
+                        "callbr label argument does not match an indirect destination",
+                    )),
                 }
             }
         }

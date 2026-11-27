@@ -68,6 +68,7 @@ const CST_CE_CAST: u32 = 11;
 const CST_CE_GEP: u32 = 32;
 const CST_POISON: u32 = 26;
 const CST_BLOCKADDRESS: u32 = 21;
+const CST_INLINEASM: u32 = 30;
 
 const FUNC_DECLAREBLOCKS: u32 = 1;
 const FUNC_INST_BINOP: u32 = 2;
@@ -83,6 +84,7 @@ const FUNC_INST_LOADATOMIC: u32 = 41;
 const FUNC_INST_CMP2: u32 = 28;
 const FUNC_INST_VSELECT: u32 = 29;
 const FUNC_INST_CALL: u32 = 34;
+const FUNC_INST_CALLBR: u32 = 57;
 const FUNC_INST_GEP: u32 = 43;
 const FUNC_INST_STORE: u32 = 44;
 const FUNC_INST_STOREATOMIC: u32 = 45;
@@ -617,14 +619,20 @@ impl<'a> Writer<'a> {
         }
 
         for (inst_id, inst) in function.insts.iter() {
-            let InstKind::Call {
-                ret_attrs,
-                attrs,
-                arg_attrs,
-                ..
-            } = &inst.kind
-            else {
-                continue;
+            let (ret_attrs, attrs, arg_attrs) = match &inst.kind {
+                InstKind::Call {
+                    ret_attrs,
+                    attrs,
+                    arg_attrs,
+                    ..
+                }
+                | InstKind::CallBr {
+                    ret_attrs,
+                    attrs,
+                    arg_attrs,
+                    ..
+                } => (ret_attrs, attrs, arg_attrs),
+                _ => continue,
             };
             let mut entries = Vec::new();
             let ret_attrs = expand_attributes(self.module, ret_attrs)?;
@@ -857,6 +865,28 @@ impl<'a> Writer<'a> {
                         block_index as u64,
                     ];
                     self.stream.emit_record(CST_BLOCKADDRESS, &operands);
+                }
+                ConstKind::InlineAsm {
+                    fn_ty,
+                    asm,
+                    constraints,
+                    sideeffect,
+                    alignstack,
+                    inteldialect,
+                    unwind,
+                } => {
+                    let flags = sideeffect as u64
+                        | (alignstack as u64) << 1
+                        | (inteldialect as u64) << 2
+                        | (unwind as u64) << 3;
+                    let mut operands = Vec::with_capacity(3 + asm.len() + 1 + constraints.len());
+                    operands.push(self.type_index(fn_ty)? as u64);
+                    operands.push(flags);
+                    operands.push(asm.len() as u64);
+                    operands.extend(asm.iter().map(|byte| *byte as u64));
+                    operands.push(constraints.len() as u64);
+                    operands.extend(constraints.iter().map(|byte| *byte as u64));
+                    self.stream.emit_record(CST_INLINEASM, &operands);
                 }
                 ConstKind::String(bytes) => {
                     let operands: Vec<u64> = bytes.iter().map(|b| *b as u64).collect();
@@ -1240,6 +1270,45 @@ impl<'a> Writer<'a> {
                     }
                 }
                 self.stream.emit_record(FUNC_INST_CALL, &operands);
+            }
+            InstKind::CallBr {
+                fn_ty,
+                callee,
+                args,
+                default_dest,
+                indirect_dests,
+                ..
+            } => {
+                let attr_list = self
+                    .call_attr_lists
+                    .get(&(function_id, arena_id))
+                    .copied()
+                    .unwrap_or(0) as u64;
+                let mut operands = Operands::new();
+                operands.push(attr_list);
+                operands.push(1 << 15);
+                operands.push(block_index(function, *default_dest)? as u64);
+                operands.push(indirect_dests.len() as u64);
+                for destination in indirect_dests {
+                    operands.push(block_index(function, *destination)? as u64);
+                }
+                operands.push(self.type_index(*fn_ty)? as u64);
+                self.push_value_and_type(&mut operands, callee, inst_id)?;
+                let (fixed, varargs) = match self.module.types.get(*fn_ty) {
+                    Type::Function {
+                        params, varargs, ..
+                    } => (params.len(), *varargs),
+                    _ => (args.len(), false),
+                };
+                for arg in args.iter().take(fixed) {
+                    self.push_value(&mut operands, arg, inst_id)?;
+                }
+                if varargs {
+                    for arg in args.iter().skip(fixed) {
+                        self.push_value_and_type(&mut operands, arg, inst_id)?;
+                    }
+                }
+                self.stream.emit_record(FUNC_INST_CALLBR, &operands);
             }
             InstKind::Phi { incoming } => {
                 let ty = result_type(function, inst)?;

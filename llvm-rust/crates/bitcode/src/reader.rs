@@ -68,6 +68,7 @@ const CST_STRING: u64 = 8;
 const CST_CSTRING: u64 = 9;
 const CST_DATA: u64 = 22;
 const CST_BLOCKADDRESS: u64 = 21;
+const CST_INLINEASM: u64 = 30;
 const CST_CE_CAST: u64 = 11;
 const CST_CE_GEP: u64 = 32;
 const CST_POISON: u64 = 26;
@@ -88,6 +89,7 @@ const FUNC_INST_LOADATOMIC: u64 = 41;
 const FUNC_INST_CMP2: u64 = 28;
 const FUNC_INST_VSELECT: u64 = 29;
 const FUNC_INST_CALL: u64 = 34;
+const FUNC_INST_CALLBR: u64 = 57;
 const FUNC_INST_GEP: u64 = 43;
 const FUNC_INST_STORE: u64 = 44;
 const FUNC_INST_STOREATOMIC: u64 = 45;
@@ -654,6 +656,52 @@ impl Reader {
             },
             CST_UNDEF => ConstKind::Undef,
             CST_POISON => ConstKind::Poison,
+            CST_INLINEASM => {
+                if record.operands.len() < 3 {
+                    return Err(Error::bitcode("invalid inline asm record"));
+                }
+                if !matches!(self.module.types.get(ty), Type::Pointer) {
+                    return Err(Error::bitcode("inline asm type is not a pointer"));
+                }
+                let fn_ty = self.type_at(record.operands[0])?;
+                if !matches!(self.module.types.get(fn_ty), Type::Function { .. }) {
+                    return Err(Error::bitcode("inline asm type is not a function type"));
+                }
+                let flags = record.operands[1];
+                let asm_len = usize::try_from(record.operands[2])
+                    .map_err(|_| Error::bitcode("inline asm string length overflow"))?;
+                let asm_start: usize = 3;
+                let asm_end = asm_start
+                    .checked_add(asm_len)
+                    .ok_or_else(|| Error::bitcode("inline asm string length overflow"))?;
+                if asm_end >= record.operands.len() {
+                    return Err(Error::bitcode("truncated inline asm string"));
+                }
+                let constraints_len = usize::try_from(record.operands[asm_end])
+                    .map_err(|_| Error::bitcode("inline asm constraint length overflow"))?;
+                let constraints_start = asm_end + 1;
+                let constraints_end = constraints_start
+                    .checked_add(constraints_len)
+                    .ok_or_else(|| Error::bitcode("inline asm constraint length overflow"))?;
+                if constraints_end > record.operands.len() {
+                    return Err(Error::bitcode("truncated inline asm constraints"));
+                }
+                ConstKind::InlineAsm {
+                    fn_ty,
+                    asm: record.operands[asm_start..asm_end]
+                        .iter()
+                        .map(|byte| *byte as u8)
+                        .collect(),
+                    constraints: record.operands[constraints_start..constraints_end]
+                        .iter()
+                        .map(|byte| *byte as u8)
+                        .collect(),
+                    sideeffect: flags & 1 != 0,
+                    alignstack: flags & 2 != 0,
+                    inteldialect: flags & 4 != 0,
+                    unwind: flags & 8 != 0,
+                }
+            }
             CST_BLOCKADDRESS => {
                 if record.operands.len() < 3 {
                     return Err(Error::bitcode("invalid blockaddress record"));
@@ -1674,6 +1722,117 @@ impl Reader {
                         fastmath: fmf,
                         ret_attrs,
                         attrs: call_attrs,
+                    },
+                    result,
+                ))
+            }
+            FUNC_INST_CALLBR => {
+                let mut ret_attrs = Arc::new(Vec::new());
+                let mut call_attrs = Arc::new(Vec::new());
+                let mut arg_attr_entries = Vec::new();
+                for (index, attrs) in self
+                    .attribute_list(record.operands.first().copied().unwrap_or(0))?
+                    .iter()
+                {
+                    match *index {
+                        0 => ret_attrs = attrs.clone(),
+                        u32::MAX => call_attrs = attrs.clone(),
+                        _ => arg_attr_entries.push((*index, attrs.clone())),
+                    }
+                }
+                let mut index = 1;
+                let flags = record.operands.get(index).copied().unwrap_or(0);
+                index += 1;
+                if flags & (1 << 15) == 0 {
+                    return Err(Error::bitcode(
+                        "callbr record has no explicit function type",
+                    ));
+                }
+                let default_dest =
+                    self.block_at(
+                        state,
+                        record.operands.get(index).copied().ok_or_else(|| {
+                            Error::bitcode("callbr record has no default destination")
+                        })? as usize,
+                    )?;
+                index += 1;
+                let indirect_count = record
+                    .operands
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| Error::bitcode("callbr record has no indirect count"))?
+                    as usize;
+                index += 1;
+                let mut indirect_dests = Vec::with_capacity(indirect_count);
+                for _ in 0..indirect_count {
+                    let destination = record
+                        .operands
+                        .get(index)
+                        .copied()
+                        .ok_or_else(|| Error::bitcode("truncated callbr destinations"))?;
+                    index += 1;
+                    indirect_dests.push(self.block_at(state, destination as usize)?);
+                }
+                let fn_ty = self.type_at(
+                    record
+                        .operands
+                        .get(index)
+                        .copied()
+                        .ok_or_else(|| Error::bitcode("callbr record has no function type"))?,
+                )?;
+                index += 1;
+                let (callee, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                let (ret_ty, fixed, varargs) = match self.module.types.get(fn_ty) {
+                    Type::Function {
+                        ret,
+                        params,
+                        varargs,
+                    } => (*ret, params.len(), *varargs),
+                    _ => return Err(Error::bitcode("callbr with a non-function type")),
+                };
+                let mut args = Vec::new();
+                for _ in 0..fixed {
+                    let (arg, next) = self.decode_value(record, index, inst_id, state)?;
+                    args.push(arg);
+                    index = next;
+                }
+                if varargs {
+                    while index < record.operands.len() {
+                        let (arg, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                        args.push(arg);
+                        index = next;
+                    }
+                }
+                let mut arg_attrs = vec![Arc::new(Vec::new()); args.len()];
+                for (index, attrs) in arg_attr_entries {
+                    let slot = index
+                        .checked_sub(1)
+                        .and_then(|value| arg_attrs.get_mut(value as usize))
+                        .ok_or_else(|| {
+                            Error::bitcode(format!(
+                                "callbr argument attribute index {index} is out of range"
+                            ))
+                        })?;
+                    *slot = attrs;
+                }
+                let result = if self.module.types.get(ret_ty).is_void() {
+                    None
+                } else {
+                    Some(ret_ty)
+                };
+                Ok((
+                    InstKind::CallBr {
+                        ret_ty,
+                        fn_ty,
+                        callee,
+                        args,
+                        arg_attrs,
+                        fastmath: FastMath::default(),
+                        ret_attrs,
+                        attrs: call_attrs,
+                        default_dest,
+                        indirect_dests,
                     },
                     result,
                 ))

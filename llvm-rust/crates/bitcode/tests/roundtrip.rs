@@ -538,3 +538,56 @@ entry:
     );
     assert!(text.contains("indirectbr ptr %target, []"), "{text}");
 }
+
+#[test]
+fn round_trips_inline_asm_and_callbr() {
+    let source = r#"
+define void @jump() {
+entry:
+  callbr void asm sideeffect "jmp ${0:l}", "!i"() to label %fallthrough [label %indirect]
+
+fallthrough:
+  ret void
+
+indirect:
+  ret void
+}
+
+define i32 @with_result(i32 %x) {
+entry:
+  %r = callbr i32 asm "add $0, $1", "=r,r,!i"(i32 %x) to label %fallthrough [label %indirect]
+
+fallthrough:
+  ret i32 %r
+
+indirect:
+  ret i32 0
+}
+
+define void @asm_call() {
+entry:
+  call void asm sideeffect "nop", ""()
+  ret void
+}
+"#;
+    let mut module = parse_module(source).expect("parse inline asm");
+    let bytes = write_bitcode(&mut module).expect("write inline asm");
+    let read = read_bitcode(&bytes).expect("read inline asm");
+    let text = print_module(&read);
+    assert!(
+        text.contains(
+            "callbr void asm sideeffect \"jmp ${0:l}\", \"!i\"() to label %fallthrough [label %indirect]"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "%r = callbr i32 asm \"add $0, $1\", \"=r,r,!i\"(i32 %x) to label %fallthrough [label %indirect]"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("call void asm sideeffect \"nop\", \"\"()"),
+        "{text}"
+    );
+}

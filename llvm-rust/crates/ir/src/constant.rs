@@ -44,6 +44,16 @@ pub enum ConstKind {
         function: FuncId,
         block: Symbol,
     },
+    /// `asm [sideeffect] [alignstack] [inteldialect] [unwind] "...", "..."`.
+    InlineAsm {
+        fn_ty: TypeId,
+        asm: Vec<u8>,
+        constraints: Vec<u8>,
+        sideeffect: bool,
+        alignstack: bool,
+        inteldialect: bool,
+        unwind: bool,
+    },
 }
 
 /// A constant expression.

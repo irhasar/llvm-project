@@ -1,10 +1,11 @@
 //! Deterministic textual LLVM IR printer.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use crate::constant::{ConstExpr, ConstId, ConstKind, Constant};
 use crate::function::{BlockId, FuncId, Function};
-use crate::inst::{Attribute, FastMath, InstKind, Instruction, IntFlags};
+use crate::inst::{Attribute, FastMath, InstKind, Instruction, IntFlags, TailKind};
 use crate::linkage::{Linkage, Visibility};
 use crate::module::{Global, GlobalId, Module};
 use crate::names::{quote_name, write_name, write_quoted_bytes};
@@ -474,40 +475,60 @@ fn write_instruction(
             fastmath,
             ret_attrs,
             attrs,
+        } => write_call(
+            module, function, *tail, "call", *ret_ty, *fn_ty, *callee, args, arg_attrs, *fastmath,
+            ret_attrs, attrs, out,
+        ),
+        InstKind::CallBr {
+            ret_ty,
+            fn_ty,
+            callee,
+            args,
+            arg_attrs,
+            fastmath,
+            ret_attrs,
+            attrs,
+            default_dest,
+            indirect_dests,
         } => {
-            out.push_str(tail.prefix());
-            out.push_str("call");
-            write_fastmath(*fastmath, out);
-            out.push(' ');
-            for attr in attrs.iter().filter(|attr| is_calling_convention(attr)) {
-                let _ = write!(out, "{attr} ");
-            }
-            for attr in ret_attrs.iter() {
-                let _ = write!(out, "{attr} ");
-            }
-            let ty = match module.types.get(*fn_ty) {
-                Type::Function { varargs: true, .. } => *fn_ty,
-                _ => *ret_ty,
-            };
-            let _ = write!(out, "{} ", module.display_type(ty));
-            write_callee(module, function, *callee, out);
-            out.push('(');
-            for (index, arg) in args.iter().enumerate() {
-                if index > 0 {
+            write_call(
+                module,
+                function,
+                TailKind::None,
+                "callbr",
+                *ret_ty,
+                *fn_ty,
+                *callee,
+                args,
+                arg_attrs,
+                *fastmath,
+                ret_attrs,
+                attrs,
+                out,
+            );
+            out.push_str(" to label %");
+            let label = function
+                .blocks
+                .get(*default_dest)
+                .name
+                .map(|name| module.name(name))
+                .unwrap_or("0");
+            let _ = write_name(out, label);
+            out.push_str(" [");
+            for (index, destination) in indirect_dests.iter().enumerate() {
+                if index != 0 {
                     out.push_str(", ");
                 }
-                let _ = write!(out, "{} ", module.display_type(arg.ty));
-                if let Some(attrs) = arg_attrs.get(index) {
-                    for attr in attrs.iter() {
-                        let _ = write!(out, "{attr} ");
-                    }
-                }
-                write_value(module, function, *arg, out);
+                out.push_str("label %");
+                let label = function
+                    .blocks
+                    .get(*destination)
+                    .name
+                    .map(|name| module.name(name))
+                    .unwrap_or("0");
+                let _ = write_name(out, label);
             }
-            out.push(')');
-            for attr in attrs.iter().filter(|attr| !is_calling_convention(attr)) {
-                let _ = write!(out, " {attr}");
-            }
+            out.push(']');
         }
         InstKind::Phi { incoming } => {
             out.push_str("phi ");
@@ -730,6 +751,57 @@ fn write_instruction(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn write_call(
+    module: &Module,
+    function: &Function,
+    tail: TailKind,
+    mnemonic: &str,
+    ret_ty: TypeId,
+    fn_ty: TypeId,
+    callee: Operand,
+    args: &[Operand],
+    arg_attrs: &[Arc<Vec<Attribute>>],
+    fastmath: FastMath,
+    ret_attrs: &[Attribute],
+    attrs: &[Attribute],
+    out: &mut String,
+) {
+    out.push_str(tail.prefix());
+    out.push_str(mnemonic);
+    write_fastmath(fastmath, out);
+    out.push(' ');
+    for attr in attrs.iter().filter(|attr| is_calling_convention(attr)) {
+        let _ = write!(out, "{attr} ");
+    }
+    for attr in ret_attrs {
+        let _ = write!(out, "{attr} ");
+    }
+    let ty = match module.types.get(fn_ty) {
+        Type::Function { varargs: true, .. } => fn_ty,
+        _ => ret_ty,
+    };
+    let _ = write!(out, "{} ", module.display_type(ty));
+    write_callee(module, function, callee, out);
+    out.push('(');
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{} ", module.display_type(arg.ty));
+        if let Some(attrs) = arg_attrs.get(index) {
+            for attr in attrs.iter() {
+                let _ = write!(out, "{attr} ");
+            }
+        }
+        write_value(module, function, *arg, out);
+    }
+    out.push(')');
+    for attr in attrs.iter().filter(|attr| !is_calling_convention(attr)) {
+        let _ = write!(out, " {attr}");
+    }
+}
+
 fn write_callee(module: &Module, function: &Function, operand: Operand, out: &mut String) {
     match operand.kind {
         OperandKind::Function(id) => {
@@ -829,6 +901,33 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
             out.push_str(", %");
             let _ = write_name(out, module.name(*block));
             out.push(')');
+        }
+        ConstKind::InlineAsm {
+            asm,
+            constraints,
+            sideeffect,
+            alignstack,
+            inteldialect,
+            unwind,
+            ..
+        } => {
+            out.push_str("asm");
+            if *sideeffect {
+                out.push_str(" sideeffect");
+            }
+            if *alignstack {
+                out.push_str(" alignstack");
+            }
+            if *inteldialect {
+                out.push_str(" inteldialect");
+            }
+            if *unwind {
+                out.push_str(" unwind");
+            }
+            out.push(' ');
+            write_quoted_bytes(out, asm);
+            out.push_str(", ");
+            write_quoted_bytes(out, constraints);
         }
         ConstKind::Aggregate(elems) => {
             let (open, close, padded) = match module.types.get(constant.ty) {

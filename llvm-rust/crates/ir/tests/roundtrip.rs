@@ -88,6 +88,56 @@ exit:
 }
 
 #[test]
+fn inline_asm_and_callbr() {
+    let source = r#"
+define void @jump() {
+entry:
+  callbr void asm sideeffect "jmp ${0:l}", "!i"() to label %fallthrough [label %indirect]
+
+fallthrough:
+  ret void
+
+indirect:
+  ret void
+}
+
+define i32 @with_result(i32 %x) {
+entry:
+  %r = callbr i32 asm "add $0, $1", "=r,r,!i"(i32 %x) to label %fallthrough [label %indirect]
+
+fallthrough:
+  ret i32 %r
+
+indirect:
+  ret i32 0
+}
+
+define void @asm_call() {
+entry:
+  call void asm sideeffect "nop", ""()
+  ret void
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(
+        printed.contains(
+            "callbr void asm sideeffect \"jmp ${0:l}\", \"!i\"() to label %fallthrough [label %indirect]"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(
+            "%r = callbr i32 asm \"add $0, $1\", \"=r,r,!i\"(i32 %x) to label %fallthrough [label %indirect]"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("call void asm sideeffect \"nop\", \"\"()"),
+        "{printed}"
+    );
+}
+
+#[test]
 fn gep_switch_select_and_casts() {
     let source = r#"
 %struct.pair = type { i32, i8 }

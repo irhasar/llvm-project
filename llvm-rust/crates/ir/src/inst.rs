@@ -745,6 +745,18 @@ pub enum InstKind {
         ret_attrs: Arc<Vec<Attribute>>,
         attrs: Arc<Vec<Attribute>>,
     },
+    CallBr {
+        ret_ty: TypeId,
+        fn_ty: TypeId,
+        callee: Operand,
+        args: Vec<Operand>,
+        arg_attrs: Vec<Arc<Vec<Attribute>>>,
+        fastmath: FastMath,
+        ret_attrs: Arc<Vec<Attribute>>,
+        attrs: Arc<Vec<Attribute>>,
+        default_dest: BlockId,
+        indirect_dests: Vec<BlockId>,
+    },
     Phi {
         incoming: Vec<(Operand, BlockId)>,
     },
@@ -826,6 +838,7 @@ impl InstKind {
                 | Self::CondBr { .. }
                 | Self::Switch { .. }
                 | Self::IndirectBr { .. }
+                | Self::CallBr { .. }
                 | Self::Unreachable
         )
     }

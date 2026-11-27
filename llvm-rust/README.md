@@ -48,10 +48,10 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   comparisons, `icmp`/`fcmp`, `alloca`, `load`, `store`, `getelementptr`,
   `call`, `phi`, vector `select`, `shufflevector`, `freeze`, `fence` with
   system and single-thread sync scopes, atomic `load`/`store` with orderings
-  and sync scopes, `atomicrmw`, `cmpxchg`, `va_arg`, and `indirectbr`, casts,
-  `ret`, `br`, `condbr`, `switch`, `unreachable`, plus `blockaddress`
-  constants that target named or numbered blocks in the same or another
-  function.
+  and sync scopes, `atomicrmw`, `cmpxchg`, `va_arg`, `indirectbr`, inline asm
+  constants, and the `callbr` asm-goto terminator, casts, `ret`, `br`,
+  `condbr`, `switch`, `unreachable`, plus `blockaddress` constants that target
+  named or numbered blocks in the same or another function.
   Unnamed values and blocks share one
   numbering sequence, and `phi` accepts forward and self references.
   `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
@@ -132,7 +132,7 @@ This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
 debug info, other constant expressions (GEPs, casts, and `blockaddress` are
-supported), `invoke`/`landingpad`/`callbr`, scalable vector shuffles, sync
+supported), `invoke`/`landingpad`, scalable vector shuffles, sync
 scopes beyond system and single-thread, or
 `fp128`/`x86_fp80`/`ppc_fp128` constants (wide float records are rejected).
 MC, object, X86, and codegen are still out of scope.
@@ -230,8 +230,9 @@ operations, `cmpxchg` success/failure orderings, weak/volatile forms,
 `va_arg` with scalar, pointer, vector, and struct result types, `blockaddress`
 constants at module and function scope, including cross-function targets and
 unnamed/numbered blocks, `indirectbr` with named, numbered, duplicate, and empty
-destination lists, and function-local aggregate constants and forward local
-element operands.
+destination lists, inline asm constants with sideeffect/alignstack/inteldialect/
+unwind flags, `callbr` asm-goto with result and argument forms, and
+function-local aggregate constants and forward local element operands.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -271,6 +272,12 @@ disassemble -1.5%). These are throughput and memory measurements, not a
 generated-code performance claim. The Rust binaries are 5.6 MiB
 (`llvm-as-rust`) and 4.7 MiB (`llvm-dis-rust`); the C++ tools need the 124 MiB
 `libLLVM.so.19.1`.
+
+The `callbr`/inline-asm slice keeps the same corpus at 73.3 ms C++ / 32.6 ms
+Rust assembly and 62.0 ms / 34.6 ms disassembly (11 runs, 3 warmups). On a
+separate 178,890-byte corpus with 1000 `callbr` functions, Rust measured 7.9 ms
+assembly and 8.2 ms disassembly against 26.8 ms and 23.9 ms for C++, with peak
+RSS 14.1 MiB versus 54.3 MiB and 53.5 MiB.
 
 A same-corpus A/B check against the pre-atomic commit showed no atomic
 regression: assembly was 30.81 ms before and 30.28 ms after on the vector

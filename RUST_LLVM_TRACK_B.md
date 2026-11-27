@@ -144,7 +144,8 @@ attributes (`byval`, `sret`, `elementtype`), aggregate/vector element
 extraction and insertion, vector integer and floating-point arithmetic,
 vector comparisons and `select`, `shufflevector`, `freeze`, `fence`, and
 atomic `load`/`store` with system and single-thread sync scopes, `atomicrmw`,
-`cmpxchg`, `va_arg`, `blockaddress` constants, and `indirectbr`, plus
+`cmpxchg`, `va_arg`, `blockaddress` constants, `indirectbr`, inline asm
+constants, and the `callbr` asm-goto terminator, plus
 `getelementptr` and cast constant expressions, are covered, including
 function-local aggregate constants, cross-function block addresses, and
 forward local element operands. The slice still does not cover metadata, other

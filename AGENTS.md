@@ -185,6 +185,18 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   terminator of a function whose blocks are referenced by `blockaddress`.
   Ignore it in the function body reader; treating it as an instruction fails
   with "instruction after the last block".
+- `callbr` uses `FUNC_CODE_INST_CALLBR = 57` with `[attr, flags, default_dest,
+  num_indirect, dest..., fty, callee, args...]`. The destinations are absolute
+  block indices, and flags bit 15 (`CALL_EXPLICIT_TYPE`) must be set. Its
+  result type comes from `fty`. The verifier requires a non-empty indirect
+  destination list, an inline-asm callee, and label operands that match the
+  destinations.
+- Inline asm uses `CST_CODE_INLINEASM = 30` with `[fty, flags, asm_len,
+  asm_bytes..., constraint_len, constraint_bytes...]`; flags are sideeffect
+  (1), alignstack (2), inteldialect (4), and unwind (8). Textual inline asm
+  spells only the return type before `asm`, so infer the function type after
+  parsing the argument list and patch the constant. Keep the asm and
+  constraint strings as bytes; they need not be UTF-8.
 - LLVM abbreviations may contain a zero-width `Fixed(0)` field, for example
   `SimpleGVarAbbrev` when the module has no alignment. `BitReader::read_bits`
   must return zero for width 0 without consuming bits, not reject the field.
@@ -248,6 +260,14 @@ dispatch block and one blockaddress constant per function: assembly was 72.3 ms
 C++ / 31.4 ms Rust and disassembly 59.9 ms / 34.0 ms, with peak RSS
 62.0/16.4 MiB and 59.4/26.1 MiB. Rust stayed at 2.3x assembly and 1.8x
 disassembly throughput with lower RSS.
+
+Post-`callbr`/inline-asm check: on the same 1,308,925-byte corpus (11 runs, 3
+warmups), assembly was 73.3 ms C++ / 32.6 ms Rust and disassembly 62.0 ms /
+34.6 ms, with peak RSS 61.9/18.1 MiB and 59.6/27.9 MiB. A separate
+178,890-byte corpus with 1000 `callbr` functions measured assembly 26.8 ms C++
+/ 7.9 ms Rust and disassembly 23.9 ms / 8.2 ms, with peak RSS 54.3/14.1 MiB
+and 53.5/14.1 MiB. The new terminator therefore keeps Rust at about 3x
+throughput on a callbr-heavy input while using about 3.8x less memory.
 
 The absolute jump from the earlier 26.7/27.4 ms Rust numbers is corpus growth,
 not a code regression: a 25-pair A/B on the identical 1,170,987-byte corpus
