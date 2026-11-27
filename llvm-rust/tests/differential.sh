@@ -4,13 +4,14 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-llvm_major() {
-    "$1/llvm-as" --version 2>/dev/null | sed -n 's/.*LLVM version \([0-9][0-9]*\)\..*/\1/p' | head -n1
+llvm_tool_major() {
+    "$1/$2" --version 2>/dev/null | sed -n 's/.*LLVM version \([0-9][0-9]*\)\..*/\1/p' | head -n1
 }
 
 llvm19_complete() {
     [ -n "$1" ] && [ -x "$1/llvm-as" ] && [ -x "$1/llvm-dis" ] &&
-        [ "$(llvm_major "$1")" = 19 ]
+        [ "$(llvm_tool_major "$1" llvm-as)" = 19 ] &&
+        [ "$(llvm_tool_major "$1" llvm-dis)" = 19 ]
 }
 
 LLVM_BIN=${LLVM_BIN:-/usr/lib/llvm-19/bin}

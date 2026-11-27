@@ -164,10 +164,10 @@ separately against `LLVM19_BIN` with `--llvm19`, which omits target clauses
 and accepts legacy AArch64 memory text. Relative oracle paths are resolved
 from this `llvm-rust/` directory. If `LLVM19_BIN` is unset, the harness uses
 `LLVM_BIN` when it reports LLVM 19, then scans standard locations for a
-complete install with both `llvm-as` and `llvm-dis`; incomplete candidates
-are skipped. The harness fails if no LLVM 19 oracle is available, so legacy
-coverage cannot be skipped accidentally. The version-2 fixture keeps
-target-aware output.
+complete install where both `llvm-as` and `llvm-dis` report LLVM 19;
+incomplete or mixed-version candidates are skipped. The harness fails if no
+LLVM 19 oracle is available, so legacy coverage cannot be skipped
+accidentally. The version-2 fixture keeps target-aware output.
 
 Reproducible benchmark (5 runs, `taskset -c 0`, median and min/max):
 
