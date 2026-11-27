@@ -360,9 +360,11 @@ behind `LLVM_ENABLE_RUST_STRINGEXTRAS` (default `OFF`). The public
 the C++ wrapper owns the `std::string` and the Rust crate writes into a
 caller-sized buffer. The wrapper is the minimal `StringExtrasRust.cpp`, not
 `StringExtras.cpp`, so it does not pull `raw_ostream` into small consumers.
-The C++ fallback uses LLVM's C-locale ASCII helpers, matching the Rust byte
-rules and avoiding signed-`char` `<cctype>` undefined behavior. The wrapper
-also supplies a weak `rust_eh_personality` for debug-assertion archives.
+The C++ fallback keeps the original `<cctype>` body so option `OFF` is
+byte-identical to the pre-port build. The Rust path and differential oracle
+use LLVM's C-locale ASCII helpers; the differential runs in the C locale. The
+wrapper also supplies a weak `rust_eh_personality` for debug-assertion
+archives.
 The crate uses `PRUNE_ARCHIVE` and `STRIP_DEBUG`, so the staged archive is
 1,900 bytes. The archive is installed with `LLVMSupport`, and
 `llvm-config --system-libs support` emits `-lllvm_stringextras`.
@@ -380,13 +382,18 @@ reference over 300,810 inputs, including all 256 single bytes and 100,000
 random strings; `test/stable.cpp` is built with the option on and off.
 `check-llvm-rust-stringextras-debug` builds the crate with
 `-Cdebug-assertions=yes -Coverflow-checks=yes` and links it without
-`LLVMSupport`. Five pinned runs
-on this Zen 4 host: camel-to-snake is 1.32x faster (95.86 ns -> 72.51 ns),
-snake-to-camel is 1.09x faster (26.69 ns -> 24.39 ns). The Rust stable binary
-is 17,424 bytes versus 1,558,568 bytes for the C++ fallback (-1,541,144
-bytes); the staged archive is 1,900 bytes. The compile process sum is 480 ms
-versus 560 ms for the C++ one-TU object, and peak RSS is 109.55 MiB versus
-116.23 MiB (-5.7%). The option stays opt-in.
+`LLVMSupport`. It encodes those flags, plus `LLVM_RUST_FLAGS` and any ambient
+`CARGO_ENCODED_RUSTFLAGS`, so Cargo cannot ignore the checks. Its staging uses
+the normal build/content/staged stamp scripts, so Make does not repeat staging
+after a byte-identical Cargo rebuild. Five pinned runs
+on this Zen 4 host: camel-to-snake is 1.33x faster (96.44 ns -> 72.36 ns),
+snake-to-camel is 1.10x faster (26.65 ns -> 24.31 ns). The Rust stable binary
+is 17,424 bytes versus 1,558,560 bytes for the C++ fallback (-1,541,136
+bytes); the staged archive is 1,900 bytes. The option-off object and stable
+binary are byte-identical to the baseline. The compile rows include the
+`StringExtras.cpp` object that is still built with Rust on; the actual
+incremental Ninja build is 842 ms for Rust versus 880 ms for C++ (0.96x), and
+peak RSS is 113.94 MiB versus 116.23 MiB (-2.0%). The option stays opt-in.
 
 ## Demangler port
 

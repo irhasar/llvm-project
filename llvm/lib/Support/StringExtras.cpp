@@ -13,6 +13,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
+#include <cctype>
 
 using namespace llvm;
 
@@ -89,25 +90,21 @@ void llvm::printPercentEncoded(StringRef String, raw_ostream &Out) {
 
 #if !defined(LLVM_RUST_STRINGEXTRAS)
 
-// Use LLVM's C-locale ASCII helpers, not <cctype>, so this fallback and the
-// Rust backend agree for every byte and do not depend on the process locale.
 std::string llvm::convertToSnakeFromCamelCase(StringRef input) {
   if (input.empty())
     return "";
 
   std::string snakeCase;
   snakeCase.reserve(input.size());
-  auto check = [&input](size_t j, function_ref<bool(char)> predicate) {
+  auto check = [&input](size_t j, function_ref<bool(int)> predicate) {
     return j < input.size() && predicate(input[j]);
   };
   for (size_t i = 0; i < input.size(); ++i) {
-    snakeCase.push_back(llvm::toLower(input[i]));
+    snakeCase.push_back(tolower(input[i]));
     // Handles "runs" of capitals, such as in OPName -> op_name.
-    if (check(i, llvm::isUpper) && check(i + 1, llvm::isUpper) &&
-        check(i + 2, llvm::isLower))
+    if (check(i, isupper) && check(i + 1, isupper) && check(i + 2, islower))
       snakeCase.push_back('_');
-    if ((check(i, llvm::isLower) || check(i, llvm::isDigit)) &&
-        check(i + 1, llvm::isUpper))
+    if ((check(i, islower) || check(i, isdigit)) && check(i + 1, isupper))
       snakeCase.push_back('_');
   }
   return snakeCase;
@@ -122,14 +119,14 @@ std::string llvm::convertToCamelFromSnakeCase(StringRef input,
   output.reserve(input.size());
 
   // Push the first character, capatilizing if necessary.
-  if (capitalizeFirst && llvm::isLower(input.front()))
+  if (capitalizeFirst && std::islower(input.front()))
     output.push_back(llvm::toUpper(input.front()));
   else
     output.push_back(input.front());
 
   // Walk the input converting any `*_[a-z]` snake case into `*[A-Z]` camelCase.
   for (size_t pos = 1, e = input.size(); pos < e; ++pos) {
-    if (input[pos] == '_' && pos != (e - 1) && llvm::isLower(input[pos + 1]))
+    if (input[pos] == '_' && pos != (e - 1) && std::islower(input[pos + 1]))
       output.push_back(llvm::toUpper(input[++pos]));
     else
       output.push_back(input[pos]);
