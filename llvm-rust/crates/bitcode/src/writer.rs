@@ -1,9 +1,9 @@
 //! LLVM bitcode writer for the Track B IR subset.
 
 use llvm_rust_ir::{
-    Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, FastMath, FcmpPred, FuncId, Function,
-    GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand, OperandKind,
-    TailKind, Type, TypeId, Visibility,
+    Attribute, BinOp, BlockId, CastOp, ConstExpr, ConstId, ConstKind, FastMath, FcmpPred, FuncId,
+    Function, GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand,
+    OperandKind, TailKind, Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, FastHashMap, Result};
 
@@ -64,6 +64,8 @@ const CST_WIDE_INTEGER: u32 = 5;
 const CST_FLOAT: u32 = 6;
 const CST_AGGREGATE: u32 = 7;
 const CST_STRING: u32 = 8;
+const CST_CE_CAST: u32 = 11;
+const CST_CE_GEP: u32 = 32;
 const CST_POISON: u32 = 26;
 
 const FUNC_DECLAREBLOCKS: u32 = 1;
@@ -801,6 +803,34 @@ impl<'a> Writer<'a> {
                         "metadata strings are not supported in bitcode yet",
                     ));
                 }
+                ConstKind::Expr(expr) => match expr {
+                    ConstExpr::Gep {
+                        inbounds,
+                        source_ty,
+                        ptr,
+                        indices,
+                    } => {
+                        let mut operands = vec![
+                            self.type_index(source_ty)? as u64,
+                            if inbounds { 3 } else { 0 },
+                            self.type_index(ptr.ty)? as u64,
+                            self.operand_value_id(&ptr)? as u64,
+                        ];
+                        for index in indices {
+                            operands.push(self.type_index(index.ty)? as u64);
+                            operands.push(self.operand_value_id(&index.value)? as u64);
+                        }
+                        self.stream.emit_record(CST_CE_GEP, &operands);
+                    }
+                    ConstExpr::Cast { op, value } => {
+                        let operands = [
+                            encode_cast_op(op),
+                            self.type_index(value.ty)? as u64,
+                            self.operand_value_id(&value)? as u64,
+                        ];
+                        self.stream.emit_record(CST_CE_CAST, &operands);
+                    }
+                },
                 ConstKind::String(bytes) => {
                     let operands: Vec<u64> = bytes.iter().map(|b| *b as u64).collect();
                     self.stream.emit_record(CST_STRING, &operands);
@@ -1624,6 +1654,24 @@ fn fmf_bits(flags: FastMath) -> u64 {
         | (flags.contract as u64) << 5
         | (flags.afn as u64) << 6
         | (flags.reassoc as u64) << 7
+}
+
+fn encode_cast_op(op: CastOp) -> u64 {
+    match op {
+        CastOp::Trunc => 0,
+        CastOp::ZExt => 1,
+        CastOp::SExt => 2,
+        CastOp::FPToUI => 3,
+        CastOp::FPToSI => 4,
+        CastOp::UIToFP => 5,
+        CastOp::SIToFP => 6,
+        CastOp::FPTrunc => 7,
+        CastOp::FPExt => 8,
+        CastOp::PtrToInt => 9,
+        CastOp::IntToPtr => 10,
+        CastOp::BitCast => 11,
+        CastOp::AddrSpaceCast => 12,
+    }
 }
 
 #[cfg(test)]

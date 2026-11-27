@@ -17,7 +17,7 @@ pub mod ty;
 pub mod value;
 pub mod verify;
 
-pub use constant::{ConstId, ConstKind, Constant};
+pub use constant::{ConstExpr, ConstId, ConstKind, Constant};
 pub use function::{Block, BlockId, FuncId, Function, Local, LocalId, Param};
 pub use inst::{
     AtomicOrdering, AtomicRmwOp, Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred,

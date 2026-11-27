@@ -3,8 +3,10 @@
 use llvm_rust_support::{Arena, Idx};
 
 use crate::function::FuncId;
+use crate::inst::{CastOp, GepIndex};
 use crate::module::GlobalId;
 use crate::ty::TypeId;
+use crate::value::Operand;
 
 /// Handle to a constant.
 pub type ConstId = Idx<Constant>;
@@ -33,8 +35,24 @@ pub enum ConstKind {
     String(Vec<u8>),
     /// Metadata string, spelled `!"..."`.
     MetadataString(String),
+    /// Constant expression such as a GEP or a pointer cast.
+    Expr(ConstExpr),
     Global(GlobalId),
     Function(FuncId),
+}
+
+/// A constant expression.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConstExpr {
+    /// `getelementptr` over constant operands.
+    Gep {
+        inbounds: bool,
+        source_ty: TypeId,
+        ptr: Operand,
+        indices: Vec<GepIndex>,
+    },
+    /// A cast between constant operands.
+    Cast { op: CastOp, value: Operand },
 }
 
 impl Constant {

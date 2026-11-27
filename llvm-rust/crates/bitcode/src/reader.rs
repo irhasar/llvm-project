@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use llvm_rust_ir::ty::INVALID_TYPE;
 use llvm_rust_ir::{
-    AtomicOrdering, AtomicRmwOp, Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant,
-    FastMath, FcmpPred, FuncId, Function, Global, GlobalId, IcmpPred, InstId, InstKind, IntFlags,
-    Linkage, Module, Operand, OperandKind, SyncScope, TailKind, ThreadLocal, Type, TypeId,
-    Visibility,
+    AtomicOrdering, AtomicRmwOp, Attribute, BinOp, BlockId, CastOp, ConstExpr, ConstId, ConstKind,
+    Constant, FastMath, FcmpPred, FuncId, Function, GepIndex, Global, GlobalId, IcmpPred, InstId,
+    InstKind, IntFlags, Linkage, Module, Operand, OperandKind, SyncScope, TailKind, ThreadLocal,
+    Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, FastHashMap, Result};
 
@@ -67,6 +67,8 @@ const CST_AGGREGATE: u64 = 7;
 const CST_STRING: u64 = 8;
 const CST_CSTRING: u64 = 9;
 const CST_DATA: u64 = 22;
+const CST_CE_CAST: u64 = 11;
+const CST_CE_GEP: u64 = 32;
 const CST_POISON: u64 = 26;
 
 const FUNC_DECLAREBLOCKS: u64 = 1;
@@ -680,6 +682,63 @@ impl Reader {
                         )));
                     }
                 }
+            }
+            CST_CE_CAST => {
+                if record.operands.len() < 3 {
+                    return Err(Error::bitcode("invalid cast constant expression record"));
+                }
+                let op = decode_cast_op(record.operands[0])
+                    .ok_or_else(|| Error::bitcode("unknown cast constant expression opcode"))?;
+                let operand_ty = self.type_at(record.operands[1])?;
+                let value = self.resolve_const_in(record.operands[2] as u32, locals, local_base)?;
+                ConstKind::Expr(ConstExpr::Cast {
+                    op,
+                    value: Operand::constant(operand_ty, value),
+                })
+            }
+            CST_CE_GEP => {
+                if record.operands.len() < 4 || !record.operands.len().is_multiple_of(2) {
+                    return Err(Error::bitcode(
+                        "invalid getelementptr constant expression record",
+                    ));
+                }
+                let source_ty = self.type_at(record.operands[0])?;
+                let flags = record.operands[1];
+                if flags & !0b11 != 0 {
+                    return Err(Error::bitcode(format!(
+                        "unsupported getelementptr constant expression flags {flags}"
+                    )));
+                }
+                if !matches!(self.module.types.get(ty), Type::Pointer) {
+                    return Err(Error::bitcode(
+                        "getelementptr constant expression result is not a pointer",
+                    ));
+                }
+                let mut operands = Vec::new();
+                let mut index = 2;
+                while index < record.operands.len() {
+                    let operand_ty = self.type_at(record.operands[index])?;
+                    let value = self.resolve_const_in(
+                        record.operands[index + 1] as u32,
+                        locals,
+                        local_base,
+                    )?;
+                    operands.push(GepIndex {
+                        ty: operand_ty,
+                        value: Operand::constant(operand_ty, value),
+                    });
+                    index += 2;
+                }
+                let mut operands = operands.into_iter();
+                let ptr = operands
+                    .next()
+                    .ok_or_else(|| Error::bitcode("getelementptr constant has no pointer"))?;
+                ConstKind::Expr(ConstExpr::Gep {
+                    inbounds: flags & 1 != 0,
+                    source_ty,
+                    ptr: ptr.value,
+                    indices: operands.collect(),
+                })
             }
             CST_STRING | CST_CSTRING => {
                 let mut bytes: Vec<u8> = record.operands.iter().map(|b| *b as u8).collect();
@@ -2015,6 +2074,25 @@ fn bytes_to_utf8(bytes: &[u64]) -> Option<String> {
     String::from_utf8(raw).ok()
 }
 
+fn decode_cast_op(code: u64) -> Option<CastOp> {
+    Some(match code {
+        0 => CastOp::Trunc,
+        1 => CastOp::ZExt,
+        2 => CastOp::SExt,
+        3 => CastOp::FPToUI,
+        4 => CastOp::FPToSI,
+        5 => CastOp::UIToFP,
+        6 => CastOp::SIToFP,
+        7 => CastOp::FPTrunc,
+        8 => CastOp::FPExt,
+        9 => CastOp::PtrToInt,
+        10 => CastOp::IntToPtr,
+        11 => CastOp::BitCast,
+        12 => CastOp::AddrSpaceCast,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2118,6 +2196,57 @@ mod tests {
         let second = reader.attribute_list(2).expect("second list");
         assert_eq!(second.len(), 1);
         assert!(Arc::ptr_eq(&second[0].1, &reader.attr_groups[&3].1));
+    }
+
+    #[test]
+    fn malformed_constant_expression_records_return_errors() {
+        let mut reader = test_reader(Vec::new());
+        let ptr = reader.module.types.pointer();
+        reader.types.push(ptr);
+
+        let cases = [
+            (
+                CST_CE_CAST,
+                Vec::new(),
+                "invalid cast constant expression record",
+            ),
+            (
+                CST_CE_CAST,
+                vec![99, 0, 0],
+                "unknown cast constant expression opcode",
+            ),
+            (
+                CST_CE_GEP,
+                Vec::new(),
+                "invalid getelementptr constant expression record",
+            ),
+            (
+                CST_CE_GEP,
+                vec![0, 0],
+                "invalid getelementptr constant expression record",
+            ),
+            (
+                CST_CE_GEP,
+                vec![0, 0, 0, 0, 0],
+                "invalid getelementptr constant expression record",
+            ),
+            (
+                CST_CE_GEP,
+                vec![0, 4, 0, 0, 0, 0],
+                "unsupported getelementptr constant expression flags",
+            ),
+        ];
+        for (code, operands, needle) in cases {
+            let record = Record {
+                code,
+                operands: operands.into(),
+                blob: None,
+            };
+            let error = reader
+                .read_constant_kind(code, ptr, &record)
+                .expect_err("malformed constant expression must fail");
+            assert!(error.message.contains(needle), "{code}: {error}");
+        }
     }
 
     #[test]

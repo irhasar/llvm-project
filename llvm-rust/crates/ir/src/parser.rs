@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use llvm_rust_support::{Error, FastHashMap, Result, Span, Symbol};
 
-use crate::constant::{ConstId, ConstKind, Constant};
+use crate::constant::{ConstExpr, ConstId, ConstKind, Constant};
 use crate::function::{BlockId, Function, LocalId};
 use crate::inst::{
     AtomicOrdering, AtomicRmwOp, Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred,
@@ -1573,6 +1573,12 @@ impl<'a> Parser<'a> {
                 Ok(self.module.add_constant(Constant::new(ty, kind)))
             }
             TokenKind::Ident(text) => {
+                if &*text == "getelementptr" {
+                    return self.parse_const_gep(ty, span);
+                }
+                if let Some(op) = CastOp::parse(&text) {
+                    return self.parse_const_cast(ty, op, span);
+                }
                 let kind = match &*text {
                     "true" => ConstKind::Int(1),
                     "false" => ConstKind::Int(0),
@@ -1638,6 +1644,75 @@ impl<'a> Parser<'a> {
                 span,
             )),
         }
+    }
+
+    fn parse_const_gep(&mut self, result_ty: TypeId, span: Span) -> Result<ConstId> {
+        if !matches!(self.module.types.get(result_ty), Type::Pointer) {
+            return Err(Error::parse_at(
+                "getelementptr constant expression must produce a pointer",
+                span,
+            ));
+        }
+        let inbounds = self.eat_ident("inbounds");
+        self.expect_punct('(')?;
+        let source_ty = self.parse_type()?;
+        self.expect_punct(',')?;
+        let ptr_ty = self.parse_type()?;
+        if !matches!(self.module.types.get(ptr_ty), Type::Pointer) {
+            return Err(Error::parse_at(
+                "getelementptr constant expression base must be a scalar pointer",
+                span,
+            ));
+        }
+        let ptr_const = self.parse_constant(ptr_ty)?;
+        let ptr = Operand::constant(ptr_ty, ptr_const);
+        let mut indices = Vec::new();
+        while self.eat_punct(',') {
+            let index_ty = self.parse_type()?;
+            let index = self.parse_constant(index_ty)?;
+            indices.push(GepIndex {
+                ty: index_ty,
+                value: Operand::constant(index_ty, index),
+            });
+        }
+        self.expect_punct(')')?;
+        if indices.is_empty() {
+            return Err(Error::parse_at(
+                "getelementptr constant expression needs at least one index",
+                span,
+            ));
+        }
+        Ok(self.module.add_constant(Constant::new(
+            result_ty,
+            ConstKind::Expr(ConstExpr::Gep {
+                inbounds,
+                source_ty,
+                ptr,
+                indices,
+            }),
+        )))
+    }
+
+    fn parse_const_cast(&mut self, result_ty: TypeId, op: CastOp, span: Span) -> Result<ConstId> {
+        self.expect_punct('(')?;
+        let value_ty = self.parse_type()?;
+        let value = self.parse_constant(value_ty)?;
+        self.expect_ident_is("to")?;
+        let declared_ty = self.parse_type()?;
+        self.expect_punct(')')?;
+        if declared_ty != result_ty {
+            return Err(Error::parse_at(
+                "constant expression result type does not match its use",
+                span,
+            ));
+        }
+        Ok(self.module.add_constant(Constant::new(
+            result_ty,
+            ConstKind::Expr(ConstExpr::Cast {
+                op,
+                value: Operand::constant(value_ty, value),
+            }),
+        )))
     }
 
     fn parse_struct_constant(&mut self, ty: TypeId) -> Result<ConstId> {

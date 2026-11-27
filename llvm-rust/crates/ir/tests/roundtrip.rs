@@ -558,3 +558,71 @@ def:
     assert!(printed.contains("%x = extractelement <2 x i32> %v, i32 0"));
     assert!(printed.contains("%v = insertelement <2 x i32> zeroinitializer, i32 %n, i32 0"));
 }
+
+#[test]
+fn constant_expressions_roundtrip() {
+    let source = r#"
+@a = global i32 0, align 4
+@arr = global [4 x i32] zeroinitializer, align 4
+@b = global ptr getelementptr (i32, ptr @a, i64 1)
+@c = global ptr getelementptr inbounds ([4 x i32], ptr @arr, i64 0, i64 2)
+@d = global i64 ptrtoint (ptr @a to i64)
+@e = global ptr inttoptr (i64 8 to ptr)
+@nested = global i64 ptrtoint (ptr getelementptr (i32, ptr @a, i64 1) to i64)
+@nested_gep = global ptr getelementptr inbounds (i32, ptr getelementptr (i32, ptr @a, i64 1), i64 2)
+
+define ptr @f() {
+entry:
+  ret ptr getelementptr (i32, ptr @a, i64 2)
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("@b = global ptr getelementptr (i32, ptr @a, i64 1)"));
+    assert!(
+        printed
+            .contains("@c = global ptr getelementptr inbounds ([4 x i32], ptr @arr, i64 0, i64 2)")
+    );
+    assert!(printed.contains("@d = global i64 ptrtoint (ptr @a to i64)"));
+    assert!(printed.contains("@e = global ptr inttoptr (i64 8 to ptr)"));
+    assert!(
+        printed.contains(
+            "@nested = global i64 ptrtoint (ptr getelementptr (i32, ptr @a, i64 1) to i64)"
+        )
+    );
+    assert!(printed.contains(
+        "@nested_gep = global ptr getelementptr inbounds (i32, ptr getelementptr (i32, ptr @a, i64 1), i64 2)"
+    ));
+    assert!(printed.contains("ret ptr getelementptr (i32, ptr @a, i64 2)"));
+}
+
+#[test]
+fn forward_constant_expression_reference_roundtrips() {
+    let source = r#"
+@b = global ptr getelementptr (i32, ptr @a, i64 1)
+@a = global i32 0, align 4
+
+define ptr @f() {
+entry:
+  ret ptr @b
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("@b = global ptr getelementptr (i32, ptr @a, i64 1)"));
+}
+
+#[test]
+fn parser_rejects_invalid_constant_gep() {
+    let cases = [
+        r#"
+@a = global i32 0
+@b = global i32 getelementptr (i32, ptr @a, i64 1)
+"#,
+        r#"
+@a = global i32 0
+@b = global ptr getelementptr (i32, ptr @a)
+"#,
+    ];
+    for source in cases {
+        parse_module(source).expect_err("invalid constant GEP must fail");
+    }
+}

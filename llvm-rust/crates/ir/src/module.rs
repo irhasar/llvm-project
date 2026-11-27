@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use llvm_rust_support::{Arena, FastHashMap, Idx, Interner, Symbol};
 
-use crate::constant::{ConstId, ConstKind, Constant, ConstantPool};
+use crate::constant::{ConstExpr, ConstId, ConstKind, Constant, ConstantPool};
 use crate::function::{FuncId, Function};
 use crate::inst::InstKind;
 use crate::linkage::{Linkage, Visibility};
@@ -191,21 +191,60 @@ impl Module {
     /// complete, constants pointing at an unresolved placeholder are retargeted
     /// to the real global or function with the same name.
     pub fn resolve_forward_references(&mut self) {
+        let mut function_to_global = FastHashMap::default();
+        for (id, function) in self.functions.iter() {
+            if !self.types.is_valid(function.ty)
+                && let Some(global) = self.global_named(function.name)
+            {
+                function_to_global.insert(id, global);
+            }
+        }
+        let mut global_to_function = FastHashMap::default();
+        for (id, global) in self.globals.iter() {
+            if !self.types.is_valid(global.ty)
+                && let Some(function) = self.function_named(global.name)
+            {
+                global_to_function.insert(id, function);
+            }
+        }
+
         let mut rewrites = Vec::new();
         for (id, constant) in self.constants.iter() {
-            match constant.kind {
-                ConstKind::Function(function)
-                    if !self.types.is_valid(self.functions[function].ty) =>
-                {
-                    let name = self.functions[function].name;
-                    if let Some(global) = self.global_named(name) {
-                        rewrites.push((id, ConstKind::Global(global)));
+            match &constant.kind {
+                ConstKind::Function(function) => {
+                    if let Some(global) = function_to_global.get(function) {
+                        rewrites.push((id, ConstKind::Global(*global)));
                     }
                 }
-                ConstKind::Global(global) if !self.types.is_valid(self.globals[global].ty) => {
-                    let name = self.globals[global].name;
-                    if let Some(function) = self.function_named(name) {
-                        rewrites.push((id, ConstKind::Function(function)));
+                ConstKind::Global(global) => {
+                    if let Some(function) = global_to_function.get(global) {
+                        rewrites.push((id, ConstKind::Function(*function)));
+                    }
+                }
+                ConstKind::Expr(expr) => {
+                    let mut expr = expr.clone();
+                    let changed = match &mut expr {
+                        ConstExpr::Gep { ptr, indices, .. } => {
+                            let mut changed = rewrite_forward_operand(
+                                ptr,
+                                &function_to_global,
+                                &global_to_function,
+                            );
+                            for index in indices {
+                                changed |= rewrite_forward_operand(
+                                    &mut index.value,
+                                    &function_to_global,
+                                    &global_to_function,
+                                );
+                            }
+                            changed
+                        }
+                        ConstExpr::Cast { value, .. } => {
+                            rewrite_forward_operand(value, &function_to_global, &global_to_function)
+                        }
+                    };
+                    if changed {
+                        rewrites.push((id, ConstKind::Expr(expr)));
                     }
                 }
                 _ => {}
@@ -512,6 +551,29 @@ impl Module {
             _ => None,
         }
     }
+}
+
+fn rewrite_forward_operand(
+    operand: &mut Operand,
+    function_to_global: &FastHashMap<FuncId, GlobalId>,
+    global_to_function: &FastHashMap<GlobalId, FuncId>,
+) -> bool {
+    match operand.kind {
+        OperandKind::Function(function) => {
+            if let Some(global) = function_to_global.get(&function) {
+                operand.kind = OperandKind::Global(*global);
+                return true;
+            }
+        }
+        OperandKind::Global(global) => {
+            if let Some(function) = global_to_function.get(&global) {
+                operand.kind = OperandKind::Function(*function);
+                return true;
+            }
+        }
+        _ => {}
+    }
+    false
 }
 
 fn half_bits(value: f64) -> u16 {

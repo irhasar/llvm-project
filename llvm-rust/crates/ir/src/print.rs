@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use crate::constant::{ConstId, ConstKind, Constant};
+use crate::constant::{ConstExpr, ConstId, ConstKind, Constant};
 use crate::function::{BlockId, FuncId, Function};
 use crate::inst::{Attribute, FastMath, InstKind, Instruction, IntFlags};
 use crate::linkage::{Linkage, Visibility};
@@ -786,6 +786,7 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
             out.push('!');
             write_quoted_bytes(out, text.as_bytes());
         }
+        ConstKind::Expr(expr) => write_const_expr(module, constant.ty, expr, out),
         ConstKind::Global(id) => {
             out.push('@');
             write_global_name(out, module, *id);
@@ -819,6 +820,57 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
             }
             out.push_str(close);
         }
+    }
+}
+
+fn write_const_expr(module: &Module, result_ty: TypeId, expr: &ConstExpr, out: &mut String) {
+    match expr {
+        ConstExpr::Gep {
+            inbounds,
+            source_ty,
+            ptr,
+            indices,
+        } => {
+            out.push_str("getelementptr ");
+            if *inbounds {
+                out.push_str("inbounds ");
+            }
+            out.push('(');
+            let _ = write!(out, "{}, ", module.display_type(*source_ty));
+            write_const_operand(module, *ptr, out);
+            for index in indices {
+                out.push_str(", ");
+                let _ = write!(out, "{} ", module.display_type(index.ty));
+                write_const_value(module, index.value, out);
+            }
+            out.push(')');
+        }
+        ConstExpr::Cast { op, value } => {
+            out.push_str(op.as_str());
+            out.push_str(" (");
+            write_const_operand(module, *value, out);
+            let _ = write!(out, " to {})", module.display_type(result_ty));
+        }
+    }
+}
+
+fn write_const_operand(module: &Module, operand: Operand, out: &mut String) {
+    let _ = write!(out, "{} ", module.display_type(operand.ty));
+    write_const_value(module, operand, out);
+}
+
+fn write_const_value(module: &Module, operand: Operand, out: &mut String) {
+    match operand.kind {
+        OperandKind::Const(id) => write_constant(module, id, out),
+        OperandKind::Global(id) => {
+            out.push('@');
+            write_global_name(out, module, id);
+        }
+        OperandKind::Function(id) => {
+            out.push('@');
+            write_function_name(out, module, id);
+        }
+        OperandKind::Local(_) => out.push_str("%<local>"),
     }
 }
 

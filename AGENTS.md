@@ -156,6 +156,14 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   `[ptr, cmp, new, volatile, success, syncscope, failure, weak, align]`.
   LLVM 19 accepts a failure ordering stronger than success, so do not add a
   strength comparison that the oracle does not enforce.
+- Constant expressions use `CST_CODE_CE_GEP = 32` and
+  `CST_CODE_CE_CAST = 11`. A GEP record is
+  `[source_ty, flags, ptr_ty, ptr, index_ty, index, ...]`; flags bit 0 is
+  `inbounds`, bit 1 is `nusw`, and bit 2 is `nuw`. LLVM 19 spells textual
+  `inbounds` as flags 3, so write 3 and accept 0, 1, or 3. Cast opcodes use
+  the bitcode `CAST_*` values, not the instruction enum values. Resolve
+  nested forward global/function references inside constant expressions
+  before verification and bitcode emission.
 - Consume parser tokens with `take` when the current token is always advanced.
   Do not clone `TokenKind` in type or constant parsing; `CStr` payloads are
   heap vectors and cloning them is avoidable.
@@ -200,6 +208,10 @@ Post-`atomicrmw`/`cmpxchg` spot check: assembly was 63.8 ms C++ / 24.6 ms Rust
 and disassembly 50.5 ms / 25.2 ms, with peak RSS 60.6/14.7 MiB and
 58.1/19.2 MiB. Those are within noise of the baseline, so the new instruction
 arms did not move throughput or memory.
+
+Post-constant-expression spot check: assembly was 62.9 ms C++ / 25.1 ms Rust
+and disassembly 51.1 ms / 25.1 ms, with peak RSS 60.6/14.8 MiB and
+58.3/19.5 MiB. Also within noise.
 
 Performance lesson: a full-file `Vec<Token>` retained 354k tokens at 48 bytes
 each (552k capacity) and dominated peak RSS and page-fault time. The parser now

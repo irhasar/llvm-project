@@ -2,7 +2,7 @@
 
 use llvm_rust_support::Error;
 
-use crate::constant::ConstKind;
+use crate::constant::{ConstExpr, ConstKind};
 use crate::function::{Function, LocalId};
 use crate::inst::{InstKind, Instruction};
 use crate::linkage::Linkage;
@@ -27,6 +27,12 @@ pub fn verify_module(module: &Module) -> Result<(), Vec<VerifyError>> {
                     "type %{name} is referenced but never defined"
                 )));
             }
+        }
+    }
+
+    for (_, constant) in module.constants.iter() {
+        if let ConstKind::Expr(expr) = &constant.kind {
+            verify_const_expr(module, constant.ty, expr, &mut errors);
         }
     }
 
@@ -613,6 +619,102 @@ fn is_i1_or_vector_i1(module: &Module, ty: crate::ty::TypeId) -> bool {
         Type::Int(1) => true,
         Type::Vector { elem, .. } => matches!(module.types.get(*elem), Type::Int(1)),
         _ => false,
+    }
+}
+
+fn verify_const_expr(
+    module: &Module,
+    result_ty: crate::ty::TypeId,
+    expr: &ConstExpr,
+    errors: &mut Vec<VerifyError>,
+) {
+    match expr {
+        ConstExpr::Gep {
+            source_ty,
+            ptr,
+            indices,
+            ..
+        } => {
+            if !module.types.is_valid(result_ty) {
+                errors.push(Error::verify(
+                    "getelementptr constant expression has an invalid result type",
+                ));
+            } else if !matches!(module.types.get(result_ty), Type::Pointer) {
+                errors.push(Error::verify(
+                    "getelementptr constant expression does not produce a pointer",
+                ));
+            }
+            if !module.types.is_valid(*source_ty) {
+                errors.push(Error::verify(
+                    "getelementptr constant expression has an invalid source type",
+                ));
+            }
+            if !module.types.is_valid(ptr.ty) {
+                errors.push(Error::verify(
+                    "getelementptr constant expression base has an invalid type",
+                ));
+            } else if !matches!(module.types.get(ptr.ty), Type::Pointer) {
+                errors.push(Error::verify(
+                    "getelementptr constant expression base is not a pointer",
+                ));
+            }
+            if indices.is_empty() {
+                errors.push(Error::verify(
+                    "getelementptr constant expression has no indices",
+                ));
+            }
+            check_const_operand(module, *ptr, errors, "getelementptr constant base");
+            for index in indices {
+                if !module.types.is_valid(index.ty) {
+                    errors.push(Error::verify(
+                        "getelementptr constant expression has an invalid index type",
+                    ));
+                }
+                check_const_operand(module, index.value, errors, "getelementptr constant index");
+            }
+        }
+        ConstExpr::Cast { value, .. } => {
+            if !module.types.is_valid(result_ty) {
+                errors.push(Error::verify(
+                    "cast constant expression has an invalid result type",
+                ));
+            }
+            check_const_operand(module, *value, errors, "cast constant operand");
+        }
+    }
+}
+
+fn check_const_operand(
+    module: &Module,
+    operand: Operand,
+    errors: &mut Vec<VerifyError>,
+    what: &str,
+) {
+    match operand.kind {
+        OperandKind::Const(id) => match module.constants.try_get(id) {
+            Some(constant) if constant.ty == operand.ty => {}
+            Some(_) => errors.push(Error::verify(format!(
+                "{what} type does not match the constant"
+            ))),
+            None => errors.push(Error::verify(format!("{what} constant is out of range"))),
+        },
+        OperandKind::Global(id) => match module.globals.try_get(id) {
+            Some(global) if module.types.is_valid(global.ty) => {}
+            Some(_) => errors.push(Error::verify(format!(
+                "{what} refers to an undefined global"
+            ))),
+            None => errors.push(Error::verify(format!("{what} global is out of range"))),
+        },
+        OperandKind::Function(id) => match module.functions.try_get(id) {
+            Some(function) if module.types.is_valid(function.ty) => {}
+            Some(_) => errors.push(Error::verify(format!(
+                "{what} refers to an undefined function"
+            ))),
+            None => errors.push(Error::verify(format!("{what} function is out of range"))),
+        },
+        OperandKind::Local(_) => {
+            errors.push(Error::verify(format!("{what} is a local value")));
+        }
     }
 }
 

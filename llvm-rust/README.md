@@ -111,6 +111,11 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   would otherwise imply different target effects, so Rust disassembly can
   be reassembled without changing the target contract. Parameter and return
   `readnone`/`readonly`/`writeonly` remain distinct flags.
+- `constants`: `getelementptr` and cast constant expressions, including
+  `inbounds` GEPs, pointer-to-integer and integer-to-pointer casts, nested
+  expressions, and forward global references. The bitcode reader and writer
+  use LLVM 19 `CE_GEP` and `CE_CAST` records and preserve the GEP `inbounds`
+  flag.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
 
 Half and bfloat conversion handles subnormals, infinities, quiet NaNs, and
@@ -124,8 +129,9 @@ rejected otherwise instead of being lossily rewritten.
 This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
-debug info, constant expressions, `invoke`/`landingpad`, scalable vector
-shuffles, sync scopes beyond system and single-thread, or
+debug info, constant expressions other than GEPs and casts,
+`invoke`/`landingpad`, scalable vector shuffles, sync scopes beyond system
+and single-thread, or
 `fp128`/`x86_fp80`/`ppc_fp128` constants (wide float records are rejected).
 MC, object, X86, and codegen are still out of scope.
 
@@ -245,10 +251,13 @@ warmups:
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer/bitcode
 corpus, Rust throughput was about 2.6x the C++ assembler and 2.1x the C++
-disassembler, and peak RSS was about 4.1x and 3.0x lower respectively. These
-are throughput and memory measurements, not a generated-code performance
-claim. The Rust binaries are 5.5 MiB (`llvm-as-rust`) and 4.6 MiB
-(`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
+disassembler, and peak RSS was about 4.1x and 3.0x lower respectively. A
+post-constant-expression spot check measured 62.9 ms C++ / 25.1 ms Rust
+assembly and 51.1 ms / 25.1 ms disassembly, with peak RSS 60.6/14.8 MiB and
+58.3/19.5 MiB, all within noise of the table. These are throughput and memory
+measurements, not a generated-code performance claim. The Rust binaries are
+5.5 MiB (`llvm-as-rust`) and 4.6 MiB (`llvm-dis-rust`); the C++ tools need the
+124 MiB `libLLVM.so.19.1`.
 
 A same-corpus A/B check against the pre-atomic commit showed no atomic
 regression: assembly was 30.81 ms before and 30.28 ms after on the vector
