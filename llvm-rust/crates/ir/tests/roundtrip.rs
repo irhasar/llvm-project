@@ -265,3 +265,88 @@ entry:
     let error = parse_module(source).expect_err("parse should fail");
     assert!(error.message.contains("undefined local"));
 }
+
+#[test]
+fn aggregate_indices_can_wrap_lines() {
+    let source = r#"
+%pair = type { i32, [2 x i8] }
+
+define i8 @extract(%pair %p) {
+entry:
+  %v = extractvalue %pair %p,
+    1,
+    0
+  ret i8 %v
+}
+
+define %pair @insert(%pair %p, i8 %v) {
+entry:
+  %q = insertvalue %pair %p, i8 %v,
+    1, 1
+  ret %pair %q
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%v = extractvalue %pair %p, 1, 0"));
+    assert!(printed.contains("%q = insertvalue %pair %p, i8 %v, 1, 1"));
+}
+
+#[test]
+fn parser_rejects_mistyped_element_operands() {
+    let cases = [
+        r#"
+define i32 @extractvalue_type(i32 %p) {
+entry:
+  %x = extractvalue { i32, i32 } %p, 0
+  ret i32 %x
+}
+"#,
+        r#"
+define i32 @insertvalue_type({ i32, i32 } %p) {
+entry:
+  %x = insertvalue { i32, i32 } %p, i64 1, 0
+  ret i32 0
+}
+"#,
+        r#"
+define i32 @extractelement_type(<2 x i64> %v) {
+entry:
+  %x = extractelement <2 x i32> %v, i32 0
+  ret i32 %x
+}
+"#,
+        r#"
+define i32 @insertelement_type(<2 x i32> %v) {
+entry:
+  %x = insertelement <2 x i32> %v, i64 1, i32 0
+  ret i32 0
+}
+"#,
+    ];
+    for source in cases {
+        let error = parse_module(source).expect_err("mistyped operand must fail");
+        assert!(
+            error.message.contains("type does not match"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn forward_element_reference_roundtrips() {
+    let source = r#"
+define i32 @f(i32 %n) {
+entry:
+  br label %def
+use:
+  %x = extractelement <2 x i32> %v, i32 0
+  ret i32 %x
+def:
+  %v = insertelement <2 x i32> zeroinitializer, i32 %n, i32 0
+  ret i32 0
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%x = extractelement <2 x i32> %v, i32 0"));
+    assert!(printed.contains("%v = insertelement <2 x i32> zeroinitializer, i32 %n, i32 0"));
+}

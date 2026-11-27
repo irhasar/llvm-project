@@ -280,6 +280,9 @@ impl TypeTable {
 
     /// Resolves the type reached by indexing an aggregate.
     pub fn aggregate_indexed(&self, mut ty: TypeId, indices: &[u32]) -> Option<TypeId> {
+        if indices.is_empty() {
+            return None;
+        }
         for &index in indices {
             ty = match self.get(ty) {
                 Type::Array { elem, len } if u64::from(index) < *len => *elem,
@@ -460,6 +463,24 @@ mod tests {
         assert!(types.is_defined(node));
         assert_eq!(types.display(node).to_string(), "%node");
         assert!(types.define_named("node", vec![ptr], false).is_err());
+    }
+
+    #[test]
+    fn aggregate_indexed_rejects_empty_and_invalid_paths() {
+        let mut types = TypeTable::new();
+        let i32_ty = types.int(32);
+        let i8_ty = types.int(8);
+        let arr = types.array(i8_ty, 2);
+        let st = types.intern(Type::Struct {
+            fields: vec![i32_ty, arr],
+            packed: false,
+            name: None,
+        });
+        assert_eq!(types.aggregate_indexed(st, &[]), None);
+        assert_eq!(types.aggregate_indexed(st, &[0]), Some(i32_ty));
+        assert_eq!(types.aggregate_indexed(st, &[1, 1]), Some(i8_ty));
+        assert_eq!(types.aggregate_indexed(st, &[2]), None);
+        assert_eq!(types.aggregate_indexed(st, &[1, 2]), None);
     }
 
     #[test]

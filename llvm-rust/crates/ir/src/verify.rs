@@ -169,6 +169,7 @@ fn verify_instruction(
     ret: crate::ty::TypeId,
     errors: &mut Vec<VerifyError>,
 ) {
+    let result_ty = inst.result.map(|local| function.local_type(local));
     match &inst.kind {
         InstKind::Binary { lhs, rhs, .. } | InstKind::ICmp { lhs, rhs, .. } => {
             check_operand(module, function, *lhs, errors, "operand");
@@ -317,14 +318,14 @@ fn verify_instruction(
                 errors,
                 "extractvalue aggregate",
             );
-            if module
-                .types
-                .aggregate_indexed(aggregate.ty, indices)
-                .is_none()
-            {
-                errors.push(Error::verify(
+            match module.types.aggregate_indexed(aggregate.ty, indices) {
+                Some(expected) if result_ty == Some(expected) => {}
+                Some(_) => errors.push(Error::verify(
+                    "extractvalue result type does not match the indexed element",
+                )),
+                None => errors.push(Error::verify(
                     "extractvalue indices do not match the aggregate",
-                ));
+                )),
             }
         }
         InstKind::InsertValue {
@@ -349,12 +350,21 @@ fn verify_instruction(
                     "insertvalue indices do not match the aggregate",
                 )),
             }
+            if result_ty != Some(aggregate.ty) {
+                errors.push(Error::verify(
+                    "insertvalue result type does not match the aggregate",
+                ));
+            }
         }
         InstKind::ExtractElement { vector, index } => {
             check_operand(module, function, *vector, errors, "extractelement vector");
             check_operand(module, function, *index, errors, "extractelement index");
-            if module.types.vector_element(vector.ty).is_none() {
-                errors.push(Error::verify("extractelement operand is not a vector"));
+            match module.types.vector_element(vector.ty) {
+                Some(expected) if result_ty == Some(expected) => {}
+                Some(_) => errors.push(Error::verify(
+                    "extractelement result type does not match the vector element",
+                )),
+                None => errors.push(Error::verify("extractelement operand is not a vector")),
             }
             if !matches!(module.types.get(index.ty), Type::Int(_)) {
                 errors.push(Error::verify("extractelement index is not an integer"));
@@ -377,6 +387,11 @@ fn verify_instruction(
             }
             if !matches!(module.types.get(index.ty), Type::Int(_)) {
                 errors.push(Error::verify("insertelement index is not an integer"));
+            }
+            if result_ty != Some(vector.ty) {
+                errors.push(Error::verify(
+                    "insertelement result type does not match the vector",
+                ));
             }
         }
         InstKind::Unreachable => {}

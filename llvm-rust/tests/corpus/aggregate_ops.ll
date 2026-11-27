@@ -20,3 +20,15 @@ entry:
   %r = extractelement <4 x i32> %n, i32 0
   ret i32 %r
 }
+
+define i32 @literal_extract() {
+entry:
+  %x = extractvalue { i32, i32 } { i32 7, i32 8 }, 1
+  ret i32 %x
+}
+
+define { i32, i32 } @literal_insert() {
+entry:
+  %x = insertvalue { i32, i32 } { i32 7, i32 8 }, i32 9, 0
+  ret { i32, i32 } %x
+}

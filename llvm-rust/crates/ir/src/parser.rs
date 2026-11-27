@@ -1303,6 +1303,13 @@ impl<'a> Parser<'a> {
                         if !function.local(existing).is_param
                             && function.local(existing).def.is_none() =>
                     {
+                        let previous = function.local(existing).ty;
+                        if previous != INVALID_TYPE && previous != ty {
+                            return Err(self.error(format!(
+                                "forward reference type mismatch for %{}",
+                                self.module.name(symbol)
+                            )));
+                        }
                         function.define_local(existing, ty, inst_id);
                         existing
                     }
@@ -1662,6 +1669,28 @@ impl<'a> Parser<'a> {
                 let id = self.parse_constant(ty)?;
                 Ok(Operand::constant(ty, id))
             }
+        }
+    }
+
+    fn parse_value_forward(&mut self, function: &mut Function, ty: TypeId) -> Result<Operand> {
+        match self.peek_kind().clone() {
+            TokenKind::Local(name) => {
+                self.advance();
+                let symbol = self.module.intern(&name);
+                let local = match self.local_names.get(&symbol).copied() {
+                    Some(local) => local,
+                    None => {
+                        let local = function.forward_local(symbol, ty);
+                        self.local_names.insert(symbol, local);
+                        local
+                    }
+                };
+                if function.local_type(local) == INVALID_TYPE {
+                    function.locals[local as usize].ty = ty;
+                }
+                Ok(Operand::local(function.local_type(local), local))
+            }
+            _ => self.parse_value(function, ty),
         }
     }
 
@@ -2033,7 +2062,9 @@ impl<'a> Parser<'a> {
             "extractvalue" => {
                 self.advance();
                 let aggregate_ty = self.parse_type()?;
-                let aggregate = self.parse_value(function, aggregate_ty)?;
+                let aggregate = self.parse_value_forward(function, aggregate_ty)?;
+                let aggregate_ty =
+                    self.require_operand_type(aggregate, aggregate_ty, "extractvalue aggregate")?;
                 let indices = self.parse_aggregate_indices()?;
                 let result_ty = self
                     .module
@@ -2048,10 +2079,13 @@ impl<'a> Parser<'a> {
             "insertvalue" => {
                 self.advance();
                 let aggregate_ty = self.parse_type()?;
-                let aggregate = self.parse_value(function, aggregate_ty)?;
+                let aggregate = self.parse_value_forward(function, aggregate_ty)?;
+                let aggregate_ty =
+                    self.require_operand_type(aggregate, aggregate_ty, "insertvalue aggregate")?;
                 self.expect_punct(',')?;
                 let value_ty = self.parse_type()?;
-                let value = self.parse_value(function, value_ty)?;
+                let value = self.parse_value_forward(function, value_ty)?;
+                let value_ty = self.require_operand_type(value, value_ty, "insertvalue value")?;
                 let indices = self.parse_aggregate_indices()?;
                 let expected = self
                     .module
@@ -2073,10 +2107,17 @@ impl<'a> Parser<'a> {
             "extractelement" => {
                 self.advance();
                 let vector_ty = self.parse_type()?;
-                let vector = self.parse_value(function, vector_ty)?;
+                let vector = self.parse_value_forward(function, vector_ty)?;
+                let vector_ty =
+                    self.require_operand_type(vector, vector_ty, "extractelement vector")?;
                 self.expect_punct(',')?;
                 let index_ty = self.parse_type()?;
-                let index = self.parse_value(function, index_ty)?;
+                let index = self.parse_value_forward(function, index_ty)?;
+                let index_ty =
+                    self.require_operand_type(index, index_ty, "extractelement index")?;
+                if !matches!(self.module.types.get(index_ty), Type::Int(_)) {
+                    return Err(self.error("extractelement index is not an integer"));
+                }
                 let result_ty = self
                     .module
                     .types
@@ -2087,13 +2128,20 @@ impl<'a> Parser<'a> {
             "insertelement" => {
                 self.advance();
                 let vector_ty = self.parse_type()?;
-                let vector = self.parse_value(function, vector_ty)?;
+                let vector = self.parse_value_forward(function, vector_ty)?;
+                let vector_ty =
+                    self.require_operand_type(vector, vector_ty, "insertelement vector")?;
                 self.expect_punct(',')?;
                 let value_ty = self.parse_type()?;
-                let value = self.parse_value(function, value_ty)?;
+                let value = self.parse_value_forward(function, value_ty)?;
+                let value_ty = self.require_operand_type(value, value_ty, "insertelement value")?;
                 self.expect_punct(',')?;
                 let index_ty = self.parse_type()?;
-                let index = self.parse_value(function, index_ty)?;
+                let index = self.parse_value_forward(function, index_ty)?;
+                let index_ty = self.require_operand_type(index, index_ty, "insertelement index")?;
+                if !matches!(self.module.types.get(index_ty), Type::Int(_)) {
+                    return Err(self.error("insertelement index is not an integer"));
+                }
                 if self.module.types.vector_element(vector_ty) != Some(value_ty) {
                     return Err(self.error("insertelement value type does not match the vector"));
                 }
@@ -2125,9 +2173,34 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn resolved_operand_type(&mut self, operand: Operand) -> TypeId {
+        match operand.kind {
+            OperandKind::Global(_) | OperandKind::Function(_) => self.module.types.pointer(),
+            _ => operand.ty,
+        }
+    }
+
+    fn require_operand_type(
+        &mut self,
+        operand: Operand,
+        written: TypeId,
+        what: &str,
+    ) -> Result<TypeId> {
+        let actual = self.resolved_operand_type(operand);
+        if actual != written {
+            return Err(self.error(format!("{what} type does not match the operand")));
+        }
+        Ok(actual)
+    }
+
     fn parse_aggregate_indices(&mut self) -> Result<Vec<u32>> {
         let mut indices = Vec::new();
-        while self.eat_punct(',') {
+        loop {
+            self.skip_eol();
+            if !self.eat_punct(',') {
+                break;
+            }
+            self.skip_eol();
             let index = self.expect_int()?;
             indices.push(
                 u32::try_from(index).map_err(|_| self.error("aggregate index is out of range"))?,

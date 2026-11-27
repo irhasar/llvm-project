@@ -408,3 +408,60 @@ fn collapse_alignments_ignores_quoted_strings() {
         "declare void @f() align 32"
     );
 }
+
+#[test]
+fn round_trips_function_local_aggregate_constants() {
+    let source = r#"
+define i32 @literal_extract() {
+entry:
+  %x = extractvalue { i32, i32 } { i32 7, i32 8 }, 1
+  ret i32 %x
+}
+
+define { i32, i32 } @literal_insert() {
+entry:
+  %x = insertvalue { i32, i32 } { i32 7, i32 8 }, i32 9, 0
+  ret { i32, i32 } %x
+}
+"#;
+    let mut module = parse_module(source).expect("parse local aggregate constants");
+    let bytes = write_bitcode(&mut module).expect("write local aggregate constants");
+    let read = read_bitcode(&bytes).expect("read local aggregate constants");
+    let text = print_module(&read);
+    assert!(
+        text.contains("%x = extractvalue { i32, i32 } { i32 7, i32 8 }, 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("%x = insertvalue { i32, i32 } { i32 7, i32 8 }, i32 9, 0"),
+        "{text}"
+    );
+}
+
+#[test]
+fn round_trips_forward_element_operands() {
+    let source = r#"
+define i32 @f(i32 %n) {
+entry:
+  br label %def
+use:
+  %x = extractelement <2 x i32> %v, i32 0
+  ret i32 %x
+def:
+  %v = insertelement <2 x i32> zeroinitializer, i32 %n, i32 0
+  ret i32 0
+}
+"#;
+    let mut module = parse_module(source).expect("parse forward element operand");
+    let bytes = write_bitcode(&mut module).expect("write forward element operand");
+    let read = read_bitcode(&bytes).expect("read forward element operand");
+    let text = print_module(&read);
+    assert!(
+        text.contains("%x = extractelement <2 x i32> %v, i32 0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("%v = insertelement <2 x i32> zeroinitializer, i32 %n, i32 0"),
+        "{text}"
+    );
+}

@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use llvm_rust_ir::ty::INVALID_TYPE;
 use llvm_rust_ir::{
     Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath, FcmpPred, FuncId,
     Function, Global, GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand,
@@ -572,7 +573,49 @@ impl Reader {
         Ok(ids)
     }
 
+    /// Reads a function-local constants block.
+    ///
+    /// LLVM emits local constants in the function value namespace, and an
+    /// aggregate may reference a later constant. Reserve the local slots
+    /// before decoding so forward references resolve to stable handles.
+    fn read_function_constants(&mut self, block: &Block, local_base: u32) -> Result<Vec<ConstId>> {
+        let mut current_ty = None;
+        let mut records = Vec::new();
+        for record in block.records() {
+            if record.code == CST_SETTYPE {
+                current_ty = Some(self.type_at(record.operands.first().copied().unwrap_or(0))?);
+                continue;
+            }
+            let ty = current_ty.ok_or_else(|| Error::bitcode("constant without a type"))?;
+            records.push((record.code, ty, record.clone()));
+        }
+        let ids: Vec<ConstId> = records
+            .iter()
+            .map(|(_, ty, _)| {
+                self.module
+                    .add_constant(Constant::new(*ty, ConstKind::Null))
+            })
+            .collect();
+        for (index, (code, ty, record)) in records.iter().enumerate() {
+            let kind =
+                self.read_constant_kind_with_locals(*code, *ty, record, Some(&ids), local_base)?;
+            self.module.constants[ids[index]] = Constant::new(*ty, kind);
+        }
+        Ok(ids)
+    }
+
     fn read_constant_kind(&mut self, code: u64, ty: TypeId, record: &Record) -> Result<ConstKind> {
+        self.read_constant_kind_with_locals(code, ty, record, None, 0)
+    }
+
+    fn read_constant_kind_with_locals(
+        &mut self,
+        code: u64,
+        ty: TypeId,
+        record: &Record,
+        locals: Option<&[ConstId]>,
+        local_base: u32,
+    ) -> Result<ConstKind> {
         Ok(match code {
             CST_NULL => match self.module.types.get(ty) {
                 Type::Int(_) => ConstKind::Int(0),
@@ -640,7 +683,7 @@ impl Reader {
             CST_AGGREGATE => {
                 let mut elements = Vec::new();
                 for operand in &record.operands {
-                    elements.push(self.resolve_const(*operand as u32)?);
+                    elements.push(self.resolve_const_in(*operand as u32, locals, local_base)?);
                 }
                 ConstKind::Aggregate(elements)
             }
@@ -674,6 +717,24 @@ impl Reader {
             self.module.globals.get_mut(global).init = Some(init);
         }
         Ok(())
+    }
+
+    fn resolve_const_in(
+        &mut self,
+        value: u32,
+        locals: Option<&[ConstId]>,
+        local_base: u32,
+    ) -> Result<ConstId> {
+        if let Some(locals) = locals
+            && value >= local_base
+        {
+            let index = (value - local_base) as usize;
+            return locals
+                .get(index)
+                .copied()
+                .ok_or_else(|| Error::bitcode(format!("unknown local constant value {value}")));
+        }
+        self.resolve_const(value)
     }
 
     fn resolve_const(&mut self, value: u32) -> Result<ConstId> {
@@ -761,7 +822,8 @@ impl Reader {
                 }
                 Item::Block(child) => match child.id {
                     CONSTANTS_BLOCK => {
-                        let ids = self.read_constants(&child, false)?;
+                        let local_base = state.next_value;
+                        let ids = self.read_function_constants(&child, local_base)?;
                         state.next_value = state
                             .next_value
                             .checked_add(ids.len() as u32)
@@ -775,7 +837,7 @@ impl Reader {
         }
         let deferred = std::mem::take(&mut state.deferred_phis);
         for (inst, record, value_id, ty) in deferred {
-            let (kind, result_ty) = self.decode_instruction(&record, value_id, &state)?;
+            let (kind, result_ty) = self.decode_instruction(&record, value_id, &mut state)?;
             if result_ty != Some(ty) {
                 return Err(Error::bitcode("phi result type mismatch"));
             }
@@ -873,7 +935,7 @@ impl Reader {
         Ok(())
     }
 
-    fn resolve_value(&mut self, state: &FuncState, value: u32) -> Result<Operand> {
+    fn resolve_value(&mut self, state: &mut FuncState, value: u32) -> Result<Operand> {
         if (value as usize) < self.values.len() {
             return Ok(match self.values[value as usize] {
                 ValueRef::Global(id) => {
@@ -891,6 +953,13 @@ impl Reader {
             });
         }
         let index = (value - state.base) as usize;
+        if index >= state.locals.len() {
+            let function = &mut self.module.functions[state.id];
+            while state.locals.len() <= index {
+                let local = function.reserve_local(None, INVALID_TYPE);
+                state.locals.push(LocalRef::Local(local));
+            }
+        }
         let local = *state
             .locals
             .get(index)
@@ -912,11 +981,32 @@ impl Reader {
         record: &Record,
         index: usize,
         inst_id: u32,
-        state: &FuncState,
+        state: &mut FuncState,
     ) -> Result<(Operand, usize)> {
-        let relative = record.operands[index];
+        let relative = *record
+            .operands
+            .get(index)
+            .ok_or_else(|| Error::bitcode(format!("missing instruction operand {index}")))?;
         let value = inst_id.wrapping_sub(relative as u32);
         Ok((self.resolve_value(state, value)?, index + 1))
+    }
+
+    fn decode_value_as(
+        &mut self,
+        record: &Record,
+        index: usize,
+        inst_id: u32,
+        state: &mut FuncState,
+        expected: TypeId,
+    ) -> Result<(Operand, usize)> {
+        let (mut operand, next) = self.decode_value(record, index, inst_id, state)?;
+        if operand.ty == INVALID_TYPE {
+            operand.ty = expected;
+            if let OperandKind::Local(id) = operand.kind {
+                self.module.functions[state.id].locals[id as usize].ty = expected;
+            }
+        }
+        Ok((operand, next))
     }
 
     fn decode_typed_value(
@@ -924,14 +1014,24 @@ impl Reader {
         record: &Record,
         index: usize,
         inst_id: u32,
-        state: &FuncState,
+        state: &mut FuncState,
     ) -> Result<(Operand, usize)> {
-        let relative = record.operands[index];
+        let relative = *record
+            .operands
+            .get(index)
+            .ok_or_else(|| Error::bitcode(format!("missing instruction operand {index}")))?;
         let value = inst_id.wrapping_sub(relative as u32);
         let mut operand = self.resolve_value(state, value)?;
         let mut next = index + 1;
         if relative as u32 > inst_id {
-            operand.ty = self.type_at(record.operands[next])?;
+            let type_index = *record
+                .operands
+                .get(next)
+                .ok_or_else(|| Error::bitcode("missing instruction operand type"))?;
+            operand.ty = self.type_at(type_index)?;
+            if let OperandKind::Local(id) = operand.kind {
+                self.module.functions[state.id].locals[id as usize].ty = operand.ty;
+            }
             next += 1;
         }
         Ok((operand, next))
@@ -1022,7 +1122,7 @@ impl Reader {
         &mut self,
         record: &Record,
         inst_id: u32,
-        state: &FuncState,
+        state: &mut FuncState,
     ) -> Result<(InstKind, Option<TypeId>)> {
         match record.code {
             FUNC_INST_BINOP => {
@@ -1167,7 +1267,7 @@ impl Reader {
         code: u64,
         record: &Record,
         inst_id: u32,
-        state: &FuncState,
+        state: &mut FuncState,
     ) -> Result<(InstKind, Option<TypeId>)> {
         match code {
             FUNC_INST_GEP => {
@@ -1426,9 +1526,15 @@ impl Reader {
             }
             FUNC_INST_INSERTELT => {
                 let (vector, index) = self.decode_typed_value(record, 0, inst_id, state)?;
-                let (value, index) = self.decode_value(record, index, inst_id, state)?;
+                let element_ty = self
+                    .module
+                    .types
+                    .vector_element(vector.ty)
+                    .ok_or_else(|| Error::bitcode("insertelement requires a vector operand"))?;
+                let (value, index) =
+                    self.decode_value_as(record, index, inst_id, state, element_ty)?;
                 let (index, _) = self.decode_typed_value(record, index, inst_id, state)?;
-                if self.module.types.vector_element(vector.ty) != Some(value.ty) {
+                if value.ty != element_ty {
                     return Err(Error::bitcode(
                         "insertelement value type does not match the vector",
                     ));
@@ -1752,5 +1858,47 @@ mod tests {
         let second = reader.attribute_list(2).expect("second list");
         assert_eq!(second.len(), 1);
         assert!(Arc::ptr_eq(&second[0].1, &reader.attr_groups[&3].1));
+    }
+
+    #[test]
+    fn short_element_records_return_errors() {
+        let mut reader = test_reader(Vec::new());
+        let mut state = FuncState {
+            id: FuncId::from_raw(0),
+            base: 0,
+            next_value: 1,
+            locals: Vec::new(),
+            blocks: Vec::new(),
+            current_block: 0,
+            deferred_phis: Vec::new(),
+        };
+        for code in [
+            FUNC_INST_EXTRACTVAL,
+            FUNC_INST_INSERTVAL,
+            FUNC_INST_EXTRACTELT,
+            FUNC_INST_INSERTELT,
+        ] {
+            let record = Record {
+                code,
+                operands: Vec::new(),
+                blob: None,
+            };
+            let error = reader
+                .decode_instruction(&record, 1, &mut state)
+                .expect_err("short record must fail");
+            assert!(
+                error.message.contains("missing instruction operand"),
+                "{code}: {error}"
+            );
+        }
+        let record = Record {
+            code: FUNC_INST_EXTRACTVAL,
+            operands: vec![0],
+            blob: None,
+        };
+        let error = reader
+            .decode_aggregate_indices(&record, 1)
+            .expect_err("empty aggregate path must fail");
+        assert!(error.message.contains("at least one index"), "{error}");
     }
 }

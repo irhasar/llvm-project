@@ -134,9 +134,10 @@ bitcode layer now covers function, return, parameter, and call-site attributes,
 including `#N` groups, common enum/integer/string attributes, and the legacy
 memory attributes. This is not an M2 parity claim: the upstream `llvm/test`
 suite is still not vendored. Type attributes (`byval`, `sret`,
-`elementtype`) and aggregate/vector element extraction and insertion are
-covered, but metadata, constant expressions, atomics, vector shuffles, and
-vector arithmetic are not.
+`elementtype`) and aggregate/vector element extraction and insertion,
+including function-local aggregate constants and forward local element
+operands, are covered, but metadata, constant expressions, atomics, vector
+shuffles, and vector arithmetic are not.
 
 ## Gates and kill criteria
 

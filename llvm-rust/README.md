@@ -205,7 +205,8 @@ default and target access, duplicate attribute groups in a checked-in bitcode
 fixture that is read and reassembled with both Rust tools, unnamed
 value/block numbering, exact shift/divide flags, `phi` self references, and
 aggregate/vector element extraction and insertion (`extractvalue`,
-`insertvalue`, `extractelement`, and `insertelement`).
+`insertvalue`, `extractelement`, and `insertelement`), including
+function-local aggregate constants and forward local element operands.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -222,15 +223,15 @@ four aggregate/vector element operations, and one attributed call each
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 47.3 ms | 46.5-48.9 ms | 58.4 MiB |
-| `llvm-as-rust` | 37.2 ms | 36.8-37.9 ms | 22.5 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 38.5 ms | 38.1-40.1 ms | 56.0 MiB |
-| `llvm-dis-rust` on C++ bitcode | 28.1 ms | 27.9-29.4 ms | 15.4 MiB |
+| `llvm-as` (C++) | 47.1 ms | 46.5-54.3 ms | 58.1 MiB |
+| `llvm-as-rust` | 39.4 ms | 38.4-39.8 ms | 22.5 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 39.9 ms | 39.6-40.3 ms | 56.2 MiB |
+| `llvm-dis-rust` on C++ bitcode | 30.3 ms | 29.7-30.5 ms | 15.2 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer-only
-corpus, Rust throughput was about 1.3x the C++ assembler and 1.4x the C++
-disassembler, and peak RSS was about 2.6x and 3.6x lower respectively. Each
+corpus, Rust throughput was about 1.2x the C++ assembler and 1.3x the C++
+disassembler, and peak RSS was about 2.6x and 3.7x lower respectively. Each
 tool gets one discarded warmup run before the five measured runs. These are
 throughput and memory measurements, not a generated-code performance claim.
 The Rust binaries are 5.6 MiB (`llvm-as-rust`) and 4.6 MiB (`llvm-dis-rust`);
