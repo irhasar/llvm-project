@@ -157,6 +157,10 @@ else()
   set_source_files_properties(UnicodeCaseFoldRust.cpp PROPERTIES HEADER_FILE_ONLY TRUE)
 endif()
 
+if(NOT LLVM_ENABLE_RUST_STRINGEXTRAS)
+  set_source_files_properties(StringExtrasRust.cpp PROPERTIES HEADER_FILE_ONLY TRUE)
+endif()
+
 add_llvm_component_library(LLVMSupport
   ABIBreak.cpp
   AMDGPUMetadata.cpp
@@ -276,6 +280,7 @@ add_llvm_component_library(LLVMSupport
   SpecialCaseList.cpp
   Statistic.cpp
   StringExtras.cpp
+  StringExtrasRust.cpp
   StringMap.cpp
   StringSaver.cpp
   StringRef.cpp
@@ -791,6 +796,68 @@ if(LLVM_ENABLE_RUST_STRINGEXTRAS)
     COMMAND llvm-stringextras-stable
     DEPENDS llvm-rust-stringextras-differential llvm-stringextras-stable
     USES_TERMINAL)
+
+  # Debug assertions and overflow checks make the Rust object reference
+  # core's panic providers.
+  # Link this archive without LLVMSupport so the check proves that the
+  # StringExtras backend can supply its own weak personality routine.
+  if(NOT MSVC)
+    set(stringextras_debug_dir
+      "${CMAKE_CURRENT_BINARY_DIR}/rust-stringextras-debug")
+    set(stringextras_debug_archive
+      "${stringextras_debug_dir}/release/${CMAKE_STATIC_LIBRARY_PREFIX}llvm_stringextras${CMAKE_STATIC_LIBRARY_SUFFIX}")
+    set(stringextras_debug_staged
+      "${stringextras_debug_dir}/release/libllvm_stringextras.pruned.a")
+    set(stringextras_debug_flags
+      "${CMAKE_CURRENT_BINARY_DIR}/rust-stringextras-debug-flags.txt")
+    file(GENERATE OUTPUT "${stringextras_debug_flags}"
+      CONTENT "${LLVM_RUST_FLAGS}\n")
+    file(GLOB_RECURSE stringextras_debug_sources CONFIGURE_DEPENDS
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/stringextras/src/*.rs"
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/stringextras/Cargo.lock")
+    list(APPEND stringextras_debug_sources
+      "${CMAKE_CURRENT_SOURCE_DIR}/rust/stringextras/Cargo.toml"
+      "${stringextras_debug_flags}")
+    add_custom_command(OUTPUT "${stringextras_debug_archive}"
+      COMMAND "${CMAKE_COMMAND}" -E env
+              "RUSTFLAGS=${LLVM_RUST_FLAGS} -Cdebug-assertions=yes -Coverflow-checks=yes"
+              "${LLVM_RUST_CARGO_EXECUTABLE}" build --release --locked
+              --manifest-path
+              "${CMAKE_CURRENT_SOURCE_DIR}/rust/stringextras/Cargo.toml"
+              --target-dir "${stringextras_debug_dir}"
+      DEPENDS ${stringextras_debug_sources}
+      COMMENT "Building StringExtras crate with debug assertions")
+    add_custom_command(OUTPUT "${stringextras_debug_staged}"
+      COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+              "${stringextras_debug_archive}" "${stringextras_debug_staged}"
+      COMMAND "${CMAKE_COMMAND}"
+              "-DARCHIVE=${stringextras_debug_staged}" "-DCRATE=llvm_stringextras"
+              "-DAR=${CMAKE_AR}" "-DNM=${CMAKE_NM}"
+              -P "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/modules/RustPruneArchive.cmake"
+      DEPENDS "${stringextras_debug_archive}"
+              "${CMAKE_CURRENT_SOURCE_DIR}/../../cmake/modules/RustPruneArchive.cmake"
+      COMMENT "Pruning debug-assertion StringExtras archive")
+    add_custom_target(llvm-rust-stringextras-debug-archive
+      DEPENDS "${stringextras_debug_staged}")
+    add_executable(llvm-rust-stringextras-debug-stable EXCLUDE_FROM_ALL
+      rust/stringextras/test/stable.cpp
+      StringExtrasRust.cpp
+      ABIBreak.cpp)
+    add_dependencies(llvm-rust-stringextras-debug-stable
+      llvm-rust-stringextras-debug-archive)
+    target_include_directories(llvm-rust-stringextras-debug-stable PRIVATE
+      ${LLVM_MAIN_INCLUDE_DIR}
+      ${LLVM_BINARY_DIR}/include)
+    target_link_libraries(llvm-rust-stringextras-debug-stable PRIVATE
+      "${stringextras_debug_staged}" ${CMAKE_DL_LIBS})
+    if(UNIX)
+      target_link_libraries(llvm-rust-stringextras-debug-stable PRIVATE m pthread)
+    endif()
+    add_custom_target(check-llvm-rust-stringextras-debug
+      COMMAND llvm-rust-stringextras-debug-stable
+      DEPENDS llvm-rust-stringextras-debug-stable
+      USES_TERMINAL)
+  endif()
 endif()
 
 add_executable(llvm-stringextras-stable EXCLUDE_FROM_ALL

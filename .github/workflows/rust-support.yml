@@ -21,6 +21,8 @@ on:
       - 'llvm/lib/Support/DJB.cpp'
       - 'llvm/lib/Support/VersionTuple.cpp'
       - 'llvm/lib/Support/OptionStrCmp.cpp'
+      - 'llvm/lib/Support/StringExtras.cpp'
+      - 'llvm/lib/Support/StringExtrasRust.cpp'
       - 'llvm/lib/Support/CMakeLists.txt'
       - 'llvm/lib/Demangle/**'
       - 'llvm/CMakeLists.txt'
@@ -53,7 +55,7 @@ jobs:
           rustc "+${{ matrix.toolchain }}" --version
       - name: fmt, clippy and unit tests
         run: |
-          for crate in siphash crc md5 sha1 sha256 base64 convertutf convertebcdic xxhash djb versiontuple optionstrcmp nativeformatting; do
+          for crate in siphash crc md5 sha1 sha256 base64 convertutf convertebcdic xxhash djb versiontuple optionstrcmp nativeformatting stringextras; do
             echo "::group::$crate"
             (cd "llvm/lib/Support/rust/$crate" \
               && cargo "+${{ matrix.toolchain }}" fmt --check \
@@ -162,8 +164,8 @@ jobs:
             check-llvm-rust-convertebcdic check-llvm-rust-xxhash \
             check-llvm-rust-djb check-llvm-rust-versiontuple \
             check-llvm-rust-optionstrcmp check-llvm-rust-nativeformatting \
-            check-llvm-rust-stringextras check-llvm-rust-rustdemangle \
-            check-llvm-rust-dlang
+            check-llvm-rust-stringextras check-llvm-rust-stringextras-debug \
+            check-llvm-rust-rustdemangle check-llvm-rust-dlang
 
   codegen-lea:
     name: LEA fold (llc)

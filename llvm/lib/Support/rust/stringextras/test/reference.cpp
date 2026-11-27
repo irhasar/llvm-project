@@ -9,7 +9,6 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/STLExtras.h"
 
-#include <cctype>
 #include <string>
 
 using namespace llvm;
@@ -22,14 +21,16 @@ std::string referenceSnake(StringRef input) {
 
   std::string snakeCase;
   snakeCase.reserve(input.size());
-  auto check = [&input](size_t j, function_ref<bool(int)> predicate) {
+  // LLVM's C-locale helpers are defined for every char value; <cctype> is not
+  // defined for negative values other than EOF on signed-char targets.
+  auto check = [&input](size_t j, function_ref<bool(char)> predicate) {
     return j < input.size() && predicate(input[j]);
   };
   for (size_t i = 0; i < input.size(); ++i) {
-    snakeCase.push_back(tolower(input[i]));
-    if (check(i, isupper) && check(i + 1, isupper) && check(i + 2, islower))
+    snakeCase.push_back(toLower(input[i]));
+    if (check(i, isUpper) && check(i + 1, isUpper) && check(i + 2, isLower))
       snakeCase.push_back('_');
-    if ((check(i, islower) || check(i, isdigit)) && check(i + 1, isupper))
+    if ((check(i, isLower) || check(i, isDigit)) && check(i + 1, isUpper))
       snakeCase.push_back('_');
   }
   return snakeCase;
@@ -42,13 +43,13 @@ std::string referenceCamel(StringRef input, bool capitalizeFirst) {
   std::string output;
   output.reserve(input.size());
 
-  if (capitalizeFirst && std::islower(input.front()))
+  if (capitalizeFirst && isLower(input.front()))
     output.push_back(toUpper(input.front()));
   else
     output.push_back(input.front());
 
   for (size_t pos = 1, e = input.size(); pos < e; ++pos) {
-    if (input[pos] == '_' && pos != (e - 1) && std::islower(input[pos + 1]))
+    if (input[pos] == '_' && pos != (e - 1) && isLower(input[pos + 1]))
       output.push_back(toUpper(input[++pos]));
     else
       output.push_back(input[pos]);

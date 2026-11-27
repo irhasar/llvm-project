@@ -18,7 +18,6 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 opt-level = 3
-# These short string walks do not benefit from cross-crate LTO, and LTO is the
-# peak-RSS bottleneck for tiny crates.
-lto = false
+# Release staticlibs follow the migration policy: fat LTO, one codegen unit.
+lto = "fat"
 codegen-units = 1
