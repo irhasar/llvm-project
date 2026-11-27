@@ -71,10 +71,27 @@ const IBM1047_TO_ISO88591: [u8; 256] = [
 
 /// Converts UTF-8 (only the two-byte subset accepted by the C++ code) to
 /// EBCDIC-1047. Returns `(status, bytes_written)`.
+#[inline(never)]
 unsafe fn to_ebcdic(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32, usize) {
     let mut i = 0;
     let mut written = 0;
     if cap >= len {
+        while i + 8 <= len {
+            let word = u64::from_le(core::ptr::read_unaligned(src.add(i).cast::<u64>()));
+            if word & 0x8080_8080_8080_8080 != 0 {
+                break;
+            }
+            let mut out = 0u64;
+            let mut j = 0;
+            while j < 8 {
+                let ch = ISO88591_TO_IBM1047[((word >> (j * 8)) & 0xff) as usize];
+                out |= (ch as u64) << (j * 8);
+                j += 1;
+            }
+            core::ptr::write_unaligned(dst.add(written).cast::<u64>(), out.to_le());
+            i += 8;
+            written += 8;
+        }
         while i < len {
             let mut ch = *src.add(i);
             i += 1;
@@ -128,6 +145,7 @@ unsafe fn to_ebcdic(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i3
 /// failure is insufficient output space. Returns `(status, bytes_written,
 /// bytes_consumed)`; on `OUTPUT_TOO_SMALL` the caller can resume at
 /// `bytes_consumed` instead of restarting the conversion.
+#[inline(never)]
 unsafe fn to_utf8(src: *const u8, len: usize, dst: *mut u8, cap: usize) -> (i32, usize, usize) {
     let mut written = 0;
     let mut i = 0;
