@@ -97,6 +97,7 @@ const FUNC_INST_INSERTELT: u64 = 7;
 const FUNC_INST_SHUFFLEVEC: u64 = 8;
 const FUNC_INST_FENCE: u64 = 36;
 const FUNC_INST_FREEZE: u64 = 58;
+const FUNC_INST_VAARG: u64 = 23;
 const FUNC_INST_EXTRACTVAL: u64 = 26;
 const FUNC_INST_INSERTVAL: u64 = 27;
 
@@ -1847,6 +1848,18 @@ impl Reader {
                     None,
                 ))
             }
+            FUNC_INST_VAARG => {
+                if record.operands.len() != 3 {
+                    return Err(Error::bitcode("invalid va_arg record"));
+                }
+                let list_ty = self.type_at(record.operands[0])?;
+                let (list, index) = self.decode_value_as(record, 1, inst_id, state, list_ty)?;
+                if index != 2 {
+                    return Err(Error::bitcode("invalid va_arg record"));
+                }
+                let ty = self.type_at(record.operands[2])?;
+                Ok((InstKind::VaArg { list, ty }, Some(ty)))
+            }
             FUNC_INST_UNREACHABLE => Ok((InstKind::Unreachable, None)),
             other => Err(Error::bitcode(format!(
                 "unsupported instruction code {other}"
@@ -2247,6 +2260,29 @@ mod tests {
                 .expect_err("malformed constant expression must fail");
             assert!(error.message.contains(needle), "{code}: {error}");
         }
+    }
+
+    #[test]
+    fn malformed_va_arg_record_returns_error() {
+        let mut reader = test_reader(Vec::new());
+        let mut state = FuncState {
+            id: FuncId::from_raw(0),
+            base: 0,
+            next_value: 1,
+            locals: Vec::new(),
+            blocks: Vec::new(),
+            current_block: 0,
+            deferred_phis: Vec::new(),
+        };
+        let record = Record {
+            code: FUNC_INST_VAARG,
+            operands: vec![0, 1].into(),
+            blob: None,
+        };
+        let error = reader
+            .decode_instruction(&record, 1, &mut state)
+            .expect_err("short va_arg record must fail");
+        assert!(error.message.contains("invalid va_arg record"), "{error}");
     }
 
     #[test]

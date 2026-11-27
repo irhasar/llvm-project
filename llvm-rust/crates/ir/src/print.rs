@@ -698,6 +698,12 @@ fn write_instruction(
             }
             out.push_str(ordering.as_str());
         }
+        InstKind::VaArg { list, ty } => {
+            out.push_str("va_arg ");
+            write_operand(module, function, *list, out);
+            out.push_str(", ");
+            let _ = write!(out, "{}", module.display_type(*ty));
+        }
         InstKind::Unreachable => out.push_str("unreachable"),
     }
 }

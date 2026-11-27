@@ -2439,6 +2439,17 @@ impl<'a> Parser<'a> {
                     None,
                 ))
             }
+            "va_arg" => {
+                self.advance();
+                let list_ty = self.parse_type()?;
+                let list = self.parse_value(function, list_ty)?;
+                if !matches!(self.module.types.get(list_ty), Type::Pointer) {
+                    return Err(self.error("va_arg list is not a pointer"));
+                }
+                self.expect_punct(',')?;
+                let ty = self.parse_type()?;
+                Ok((InstKind::VaArg { list, ty }, Some(ty)))
+            }
             "unreachable" => {
                 self.advance();
                 Ok((InstKind::Unreachable, None))

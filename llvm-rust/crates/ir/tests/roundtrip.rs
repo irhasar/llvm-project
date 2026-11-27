@@ -611,6 +611,37 @@ entry:
 }
 
 #[test]
+fn va_arg_roundtrip() {
+    let source = r#"
+%struct.S = type { i32, i64 }
+
+define void @f(ptr %ap) {
+entry:
+  %a = va_arg ptr %ap, i32
+  %b = va_arg ptr %ap, <4 x i32>
+  %c = va_arg ptr %ap, %struct.S
+  ret void
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%a = va_arg ptr %ap, i32"));
+    assert!(printed.contains("%b = va_arg ptr %ap, <4 x i32>"));
+    assert!(printed.contains("%c = va_arg ptr %ap, %struct.S"));
+}
+
+#[test]
+fn parser_rejects_invalid_va_arg_list() {
+    let source = r#"
+define void @f(i32 %not_a_pointer) {
+entry:
+  %v = va_arg i32 %not_a_pointer, i32
+  ret void
+}
+"#;
+    parse_module(source).expect_err("va_arg list must be a pointer");
+}
+
+#[test]
 fn parser_rejects_invalid_constant_gep() {
     let cases = [
         r#"

@@ -439,6 +439,28 @@ entry:
 }
 
 #[test]
+fn round_trips_va_arg() {
+    let source = r#"
+%struct.S = type { i32, i64 }
+
+define void @f(ptr %ap) {
+entry:
+  %a = va_arg ptr %ap, i32
+  %b = va_arg ptr %ap, <4 x i32>
+  %c = va_arg ptr %ap, %struct.S
+  ret void
+}
+"#;
+    let mut module = parse_module(source).expect("parse va_arg");
+    let bytes = write_bitcode(&mut module).expect("write va_arg");
+    let read = read_bitcode(&bytes).expect("read va_arg");
+    let text = print_module(&read);
+    assert!(text.contains("%a = va_arg ptr %ap, i32"), "{text}");
+    assert!(text.contains("%b = va_arg ptr %ap, <4 x i32>"), "{text}");
+    assert!(text.contains("%c = va_arg ptr %ap, %struct.S"), "{text}");
+}
+
+#[test]
 fn round_trips_forward_element_operands() {
     let source = r#"
 define i32 @f(i32 %n) {

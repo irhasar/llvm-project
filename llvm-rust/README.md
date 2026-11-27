@@ -48,8 +48,8 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   comparisons, `icmp`/`fcmp`, `alloca`, `load`, `store`, `getelementptr`,
   `call`, `phi`, vector `select`, `shufflevector`, `freeze`, `fence` with
   system and single-thread sync scopes, atomic `load`/`store` with orderings
-  and sync scopes, `atomicrmw` and `cmpxchg`, casts, `ret`, `br`, `condbr`,
-  `switch`, `unreachable`.
+  and sync scopes, `atomicrmw`, `cmpxchg`, and `va_arg`, casts, `ret`, `br`,
+  `condbr`, `switch`, `unreachable`.
   Unnamed values and blocks share one
   numbering sequence, and `phi` accepts forward and self references.
   `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
@@ -130,8 +130,8 @@ This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
 debug info, constant expressions other than GEPs and casts,
-`invoke`/`landingpad`, scalable vector shuffles, sync scopes beyond system
-and single-thread, or
+`invoke`/`landingpad`/`indirectbr`/`callbr`, scalable vector shuffles, sync
+scopes beyond system and single-thread, or
 `fp128`/`x86_fp80`/`ppc_fp128` constants (wide float records are rejected).
 MC, object, X86, and codegen are still out of scope.
 
@@ -223,7 +223,8 @@ including shrinking masks and `undef` masks canonicalized to `poison`,
 `freeze` on scalar, vector, and floating-point values, `fence` orderings and
 `syncscope("singlethread")`, atomic `load`/`store` with all valid orderings,
 volatile forms, and single-thread scope, `atomicrmw` integer and floating-point
-operations, `cmpxchg` success/failure orderings, weak/volatile forms, and
+operations, `cmpxchg` success/failure orderings, weak/volatile forms,
+`va_arg` with scalar, pointer, vector, and struct result types, and
 function-local aggregate constants and forward local element operands.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
@@ -237,25 +238,24 @@ function-local aggregate constants and forward local element operands.
 
 Benchmark on a synthetic corpus of 1000 functions, 10 arithmetic instructions,
 four aggregate/vector element operations, vector arithmetic, comparison,
-select, shufflevector, one atomic load, one atomic store, and one attributed
-call each (1,104,987 bytes), LLVM 19.1.7, `taskset -c 0`, 11 runs after 3
-warmups:
+select, shufflevector, one atomic load, one atomic store, one `va_arg`, and
+one attributed call each (1,170,987 bytes), LLVM 19.1.7, `taskset -c 0`, 11
+runs after 3 warmups:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 63.4 ms | 61.8-73.9 ms | 60.5 MiB |
-| `llvm-as-rust` | 24.4 ms | 24.0-25.1 ms | 14.8 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 51.8 ms | 50.1-52.1 ms | 58.3 MiB |
-| `llvm-dis-rust` on C++ bitcode | 25.2 ms | 24.9-26.0 ms | 19.2 MiB |
+| `llvm-as` (C++) | 66.5 ms | 64.3-69.2 ms | 60.8 MiB |
+| `llvm-as-rust` | 26.7 ms | 26.1-27.6 ms | 15.0 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 54.0 ms | 52.8-62.7 ms | 58.5 MiB |
+| `llvm-dis-rust` on C++ bitcode | 27.4 ms | 26.9-28.8 ms | 21.2 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer/bitcode
-corpus, Rust throughput was about 2.6x the C++ assembler and 2.1x the C++
-disassembler, and peak RSS was about 4.1x and 3.0x lower respectively. A
-post-constant-expression spot check measured 62.9 ms C++ / 25.1 ms Rust
-assembly and 51.1 ms / 25.1 ms disassembly, with peak RSS 60.6/14.8 MiB and
-58.3/19.5 MiB, all within noise of the table. These are throughput and memory
-measurements, not a generated-code performance claim. The Rust binaries are
+corpus, Rust throughput was about 2.5x the C++ assembler and 2.0x the C++
+disassembler, and peak RSS was about 4.1x and 2.8x lower respectively. The
+`va_arg` arm adds one instruction per function, so absolute times rose with the
+larger corpus while the ratios stayed in the same range. These are throughput
+and memory measurements, not a generated-code performance claim. The Rust binaries are
 5.5 MiB (`llvm-as-rust`) and 4.6 MiB (`llvm-dis-rust`); the C++ tools need the
 124 MiB `libLLVM.so.19.1`.
 

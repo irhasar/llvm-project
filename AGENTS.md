@@ -164,6 +164,10 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   the bitcode `CAST_*` values, not the instruction enum values. Resolve
   nested forward global/function references inside constant expressions
   before verification and bitcode emission.
+- `va_arg` uses `FUNC_CODE_INST_VAARG = 23` with the fixed record
+  `[valistty, valist, instty]`. The value is a plain relative value, not a
+  `pushValueAndType` pair, because its type is already in slot 0. The list
+  operand must be a pointer; the result type is `instty`.
 - Consume parser tokens with `take` when the current token is always advanced.
   Do not clone `TokenKind` in type or constant parsing; `CStr` payloads are
   heap vectors and cloning them is avoidable.
@@ -212,6 +216,12 @@ arms did not move throughput or memory.
 Post-constant-expression spot check: assembly was 62.9 ms C++ / 25.1 ms Rust
 and disassembly 51.1 ms / 25.1 ms, with peak RSS 60.6/14.8 MiB and
 58.3/19.5 MiB. Also within noise.
+
+Post-`va_arg` spot check on the 1,170,987-byte corpus with one `va_arg` per
+function: assembly was 66.5 ms C++ / 26.7 ms Rust and disassembly 54.0 ms /
+27.4 ms, with peak RSS 60.8/15.0 MiB and 58.5/21.2 MiB. The larger corpus
+raises absolute times; the assembly ratio stayed at 2.5x and disassembly at
+2.0x.
 
 Performance lesson: a full-file `Vec<Token>` retained 354k tokens at 48 bytes
 each (552k capacity) and dominated peak RSS and page-fault time. The parser now

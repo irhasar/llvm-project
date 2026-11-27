@@ -805,6 +805,10 @@ pub enum InstKind {
         ordering: AtomicOrdering,
         syncscope: SyncScope,
     },
+    VaArg {
+        list: Operand,
+        ty: TypeId,
+    },
     Unreachable,
 }
 

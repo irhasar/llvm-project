@@ -50,7 +50,7 @@ def main():
             out.write("%pair = type { i32, [2 x i8] }\n\n")
             for index in range(args.functions):
                 out.write(
-                    f"define i32 @f{index}(i32 %a, i32 %b, %pair %p, <4 x i32> %vec) {{\nentry:\n"
+                    f"define i32 @f{index}(i32 %a, i32 %b, %pair %p, <4 x i32> %vec, ptr %ap) {{\nentry:\n"
                 )
                 out.write("  %v0 = add i32 %a, %b\n")
                 for step in range(1, 10):
@@ -76,9 +76,11 @@ def main():
                 out.write("  %sum3 = add i32 %sum2, %vr\n")
                 out.write("  %av = load atomic i32, ptr @slot seq_cst, align 4\n")
                 out.write("  %sum4 = add i32 %sum3, %av\n")
-                out.write("  store atomic i32 %sum4, ptr @slot release, align 4\n")
-                out.write("  call void @use(ptr align 8 @slot, i32 noundef %sum4)\n")
-                out.write("  ret i32 %sum4\n}\n\n")
+                out.write("  %va = va_arg ptr %ap, i32\n")
+                out.write("  %sum5 = add i32 %sum4, %va\n")
+                out.write("  store atomic i32 %sum5, ptr @slot release, align 4\n")
+                out.write("  call void @use(ptr align 8 @slot, i32 noundef %sum5)\n")
+                out.write("  ret i32 %sum5\n}\n\n")
 
         prefix = ["taskset", "-c", "0"]
         cpp_as = [*prefix, os.path.join(args.llvm_bin, "llvm-as"), source, "-o", cpp_bc]

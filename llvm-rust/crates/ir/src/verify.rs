@@ -592,6 +592,22 @@ fn verify_instruction(
                 ));
             }
         }
+        InstKind::VaArg { list, ty } => {
+            check_operand(module, function, *list, errors, "va_arg list");
+            if module.types.is_valid(list.ty) && !matches!(module.types.get(list.ty), Type::Pointer)
+            {
+                errors.push(Error::verify("va_arg list is not a pointer"));
+            }
+            if !module.types.is_valid(*ty) {
+                errors.push(Error::verify("va_arg result type is invalid"));
+            } else if let Some(result_ty) = result_ty
+                && result_ty != *ty
+            {
+                errors.push(Error::verify(
+                    "va_arg result type does not match its declared type",
+                ));
+            }
+        }
         InstKind::Unreachable => {}
     }
 }
