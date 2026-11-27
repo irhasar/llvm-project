@@ -6,6 +6,7 @@
 //! info, and constant expressions are later milestones.
 
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use llvm_rust_support::{Error, FastHashMap, Result, Span, Symbol};
@@ -27,9 +28,12 @@ pub type ParseError = Error;
 
 /// Parses one textual IR module.
 pub fn parse_module(source: &str) -> core::result::Result<Module, ParseError> {
-    let tokens = Lexer::new(source).tokenize()?;
-    let mut parser = Parser::new(source, tokens);
+    let mut parser = Parser::new(Lexer::new(source));
+    parser.ensure(2);
     parser.parse_top_level()?;
+    if let Some(error) = parser.lex_error {
+        return Err(error);
+    }
     parser.module.resolve_forward_references();
     parser.module.resolve_forward_operands();
     parser.module.assign_unnamed_slots();
@@ -64,7 +68,6 @@ struct Lexer<'a> {
     source: &'a str,
     bytes: &'a [u8],
     pos: usize,
-    tokens: Vec<Token<'a>>,
 }
 
 impl<'a> Lexer<'a> {
@@ -73,11 +76,20 @@ impl<'a> Lexer<'a> {
             source,
             bytes: source.as_bytes(),
             pos: 0,
-            tokens: Vec::with_capacity(source.len() / 8),
         }
     }
 
+    #[cfg(test)]
     fn tokenize(mut self) -> Result<Vec<Token<'a>>> {
+        let mut tokens = Vec::with_capacity(self.bytes.len() / 8);
+        while let Some(token) = self.next_token()? {
+            tokens.push(token);
+        }
+        tokens.push(self.eof_token());
+        Ok(tokens)
+    }
+
+    fn next_token(&mut self) -> Result<Option<Token<'a>>> {
         while self.pos < self.bytes.len() {
             let start = self.pos;
             let byte = self.bytes[self.pos];
@@ -85,7 +97,7 @@ impl<'a> Lexer<'a> {
                 b' ' | b'\t' | b'\r' => self.pos += 1,
                 b'\n' => {
                     self.pos += 1;
-                    self.push(TokenKind::Eol, start);
+                    return Ok(Some(self.token(TokenKind::Eol, start)));
                 }
                 b';' => {
                     while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
@@ -100,16 +112,15 @@ impl<'a> Lexer<'a> {
                     } else {
                         TokenKind::Global(name)
                     };
-                    self.push(kind, start);
+                    return Ok(Some(self.token(kind, start)));
                 }
                 b'!' => {
                     self.pos += 1;
                     if self.peek_byte() == Some(b'{') {
-                        self.push(TokenKind::Punct('!'), start);
-                    } else {
-                        let name = self.read_sigil_name(start)?;
-                        self.push(TokenKind::Meta(name), start);
+                        return Ok(Some(self.token(TokenKind::Punct('!'), start)));
                     }
+                    let name = self.read_sigil_name(start)?;
+                    return Ok(Some(self.token(TokenKind::Meta(name), start)));
                 }
                 b'#' => {
                     self.pos += 1;
@@ -120,33 +131,33 @@ impl<'a> Lexer<'a> {
                             Span::new(start, self.pos),
                         )
                     })?;
-                    self.push(TokenKind::AttrGroup(value), start);
+                    return Ok(Some(self.token(TokenKind::AttrGroup(value), start)));
                 }
                 b'"' => {
                     let bytes = self.read_quoted(start)?;
-                    self.push(TokenKind::Str(bytes), start);
+                    return Ok(Some(self.token(TokenKind::Str(bytes), start)));
                 }
                 b'c' if self.peek_byte_at(1) == Some(b'"') => {
                     self.pos += 1;
                     let bytes = self.read_quoted(start)?;
-                    self.push(TokenKind::CStr(bytes), start);
+                    return Ok(Some(self.token(TokenKind::CStr(bytes), start)));
                 }
                 b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'<' | b'>' | b',' | b'=' | b':'
                 | b'*' => {
                     self.pos += 1;
-                    self.push(TokenKind::Punct(byte as char), start);
+                    return Ok(Some(self.token(TokenKind::Punct(byte as char), start)));
                 }
                 b'.' if self.bytes[self.pos..].starts_with(b"...") => {
                     self.pos += 3;
-                    self.push(TokenKind::Ellipsis, start);
+                    return Ok(Some(self.token(TokenKind::Ellipsis, start)));
                 }
                 b'-' if self.peek_byte_at(1).is_some_and(|b| b.is_ascii_digit()) => {
-                    self.read_number(start)?;
+                    return Ok(Some(self.read_number(start)?));
                 }
-                b'0'..=b'9' => self.read_number(start)?,
+                b'0'..=b'9' => return Ok(Some(self.read_number(start)?)),
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' | b'.' | b'-' => {
                     let ident = Cow::Borrowed(self.read_while(is_ident_char));
-                    self.push(TokenKind::Ident(ident), start);
+                    return Ok(Some(self.token(TokenKind::Ident(ident), start)));
                 }
                 _ => {
                     return Err(Error::parse_at(
@@ -156,19 +167,25 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        let end = self.bytes.len();
-        self.push(TokenKind::Eof, end);
-        Ok(self.tokens)
+        Ok(None)
     }
 
-    fn push(&mut self, kind: TokenKind<'a>, start: usize) {
+    fn token(&self, kind: TokenKind<'a>, start: usize) -> Token<'a> {
         let quoted = matches!(kind, TokenKind::Global(_) | TokenKind::Local(_))
             && self.bytes.get(start + 1) == Some(&b'"');
-        self.tokens.push(Token {
+        Token {
             kind,
             span: Span::new(start, self.pos),
             quoted,
-        });
+        }
+    }
+
+    fn eof_token(&self) -> Token<'a> {
+        Token {
+            kind: TokenKind::Eof,
+            span: Span::point(self.bytes.len()),
+            quoted: false,
+        }
     }
 
     fn peek_byte(&self) -> Option<u8> {
@@ -240,7 +257,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn read_number(&mut self, start: usize) -> Result<()> {
+    fn read_number(&mut self, start: usize) -> Result<Token<'a>> {
         let text = self.read_while(|byte| {
             !matches!(
                 byte,
@@ -273,8 +290,7 @@ impl<'a> Lexer<'a> {
             })?;
             TokenKind::Int(value)
         };
-        self.push(kind, start);
-        Ok(())
+        Ok(self.token(kind, start))
     }
 }
 
@@ -625,9 +641,10 @@ fn is_attr_keyword(text: &str) -> bool {
 }
 
 struct Parser<'a> {
-    _source: &'a str,
-    tokens: Vec<Token<'a>>,
-    pos: usize,
+    lexer: Lexer<'a>,
+    tokens: VecDeque<Token<'a>>,
+    lex_error: Option<Error>,
+    finished: bool,
     module: Module,
     local_names: FastHashMap<Symbol, LocalId>,
     next_value: u32,
@@ -636,16 +653,34 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(source: &'a str, tokens: Vec<Token<'a>>) -> Self {
+    fn new(lexer: Lexer<'a>) -> Self {
         Self {
-            _source: source,
-            tokens,
-            pos: 0,
+            lexer,
+            tokens: VecDeque::with_capacity(2),
+            lex_error: None,
+            finished: false,
             module: Module::new(),
             local_names: FastHashMap::with_capacity_and_hasher(64, Default::default()),
             next_value: 0,
             next_unnamed: 0,
             unnamed_symbols: FastHashMap::default(),
+        }
+    }
+
+    fn ensure(&mut self, lookahead: usize) {
+        while self.tokens.len() < lookahead && !self.finished {
+            match self.lexer.next_token() {
+                Ok(Some(token)) => self.tokens.push_back(token),
+                Ok(None) => {
+                    self.tokens.push_back(self.lexer.eof_token());
+                    self.finished = true;
+                }
+                Err(error) => {
+                    self.lex_error = Some(error);
+                    self.tokens.push_back(self.lexer.eof_token());
+                    self.finished = true;
+                }
+            }
         }
     }
 
@@ -1208,8 +1243,7 @@ impl<'a> Parser<'a> {
             if self.at_eof() {
                 return Err(self.error("unterminated attribute argument list"));
             }
-            let token = self.tokens[self.pos].clone();
-            self.pos += 1;
+            let token = self.take();
             match token.kind {
                 TokenKind::Punct('(') => {
                     depth += 1;
@@ -2496,38 +2530,44 @@ impl<'a> Parser<'a> {
     }
 
     fn peek(&self) -> &Token<'a> {
-        &self.tokens[self.pos]
+        self.tokens.front().expect("parser always keeps a token")
     }
 
     fn peek_kind(&self) -> &TokenKind<'a> {
-        &self.tokens[self.pos].kind
+        &self.peek().kind
     }
 
     fn peek_kind_at(&self, offset: usize) -> &TokenKind<'a> {
-        self.tokens
-            .get(self.pos + offset)
-            .map(|token| &token.kind)
-            .unwrap_or(&self.tokens[self.tokens.len() - 1].kind)
-    }
-
-    fn advance(&mut self) {
-        if self.pos + 1 < self.tokens.len() {
-            self.pos += 1;
+        match self.tokens.get(offset) {
+            Some(token) => &token.kind,
+            None => {
+                &self
+                    .tokens
+                    .back()
+                    .expect("parser always keeps a token")
+                    .kind
+            }
         }
     }
 
+    fn advance(&mut self) {
+        if self.tokens.len() > 1 {
+            self.tokens.pop_front();
+        }
+        self.ensure(2);
+    }
+
     fn take(&mut self) -> Token<'a> {
-        let span = self.peek().span;
-        let token = core::mem::replace(
-            &mut self.tokens[self.pos],
-            Token {
-                kind: TokenKind::Eof,
-                span,
-                quoted: false,
-            },
-        );
-        self.advance();
-        token
+        if self.tokens.len() > 1 {
+            let token = self
+                .tokens
+                .pop_front()
+                .expect("parser always keeps a token");
+            self.ensure(2);
+            token
+        } else {
+            self.peek().clone()
+        }
     }
 
     fn at_eol(&self) -> bool {

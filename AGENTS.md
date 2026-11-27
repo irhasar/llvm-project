@@ -164,26 +164,35 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   them as such. A full performance claim still needs generated-code quality
   once codegen exists; never turn M1 numbers into an LLVM parity claim.
 
-### M1 performance baseline (2026-11-26)
+### M1 performance baseline (2026-11-27)
 
-Corpus: 1000 functions, 664,987 bytes, LLVM 19.1.7, `taskset -c 0`, 11 runs
+Corpus: 1000 functions, 1,104,987 bytes, LLVM 19.1.7, `taskset -c 0`, 11 runs
 after 3 warmups.
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 64.7 ms | 62.4-74.4 ms | 60.6 MiB |
-| `llvm-as-rust` | 33.5 ms | 33.0-35.5 ms | 26.0 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 53.0 ms | 51.3-74.2 ms | 58.1 MiB |
-| `llvm-dis-rust` on C++ bitcode | 26.1 ms | 25.9-27.5 ms | 19.2 MiB |
+| `llvm-as` (C++) | 63.4 ms | 61.8-73.9 ms | 60.5 MiB |
+| `llvm-as-rust` | 24.4 ms | 24.0-25.1 ms | 14.8 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 51.8 ms | 50.1-52.1 ms | 58.3 MiB |
+| `llvm-dis-rust` on C++ bitcode | 25.2 ms | 24.9-26.0 ms | 19.2 MiB |
 
-In-process component medians: parse 11.18 ms, print 3.59 ms, bitcode write
-3.62 ms, bitcode read 8.51 ms, assemble 15.62 ms, disassemble 12.00 ms, verify
-11.62 ms. The optimization audit reduced parse from 8.48 ms, read from 6.66 ms,
+In-process component medians: parse 12.21 ms, print 3.59 ms, bitcode write
+4.26 ms, bitcode read 8.57 ms, assemble 15.56 ms, disassemble 12.20 ms, verify
+12.25 ms. The optimization audit reduced parse from 8.48 ms, read from 6.66 ms,
 print from 2.35 ms, and disassemble from 8.98 ms on the earlier corpus; the
 current corpus adds vector operations and atomic load/store, so its absolute
-component times are larger. Regression target: do not
-regress these medians beyond noise; investigate any consistent slowdown before
-adding features.
+component times are larger. Regression target: do not regress these medians
+beyond noise; investigate any consistent slowdown before adding features.
+
+Performance lesson: a full-file `Vec<Token>` retained 354k tokens at 48 bytes
+each (552k capacity) and dominated peak RSS and page-fault time. The parser now
+lexes through a two-token streaming window. Internal parse CPU rose about 1 ms,
+but process assembly fell from 33.5 ms to 24.4 ms and peak RSS from 26.0 MiB
+to 14.8 MiB. Compare on the same corpus before calling a ratio change a
+regression: adding atomic load/store made the corpus 13.8% larger, which moved
+the ratio while per-byte work improved. A naive 64-bit load fast path in
+`BitReader::read_bits` was measured slower than the byte loop; do not replace
+the loop without a component-level win.
 
 Before merging a performance change: capture the component baseline, make the
 change, run `cargo test --workspace` and `tests/differential.sh`, rerun the

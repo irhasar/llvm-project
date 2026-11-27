@@ -235,25 +235,35 @@ warmups:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 64.7 ms | 62.4-74.4 ms | 60.6 MiB |
-| `llvm-as-rust` | 33.5 ms | 33.0-35.5 ms | 26.0 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 53.0 ms | 51.3-74.2 ms | 58.1 MiB |
-| `llvm-dis-rust` on C++ bitcode | 26.1 ms | 25.9-27.5 ms | 19.2 MiB |
+| `llvm-as` (C++) | 63.4 ms | 61.8-73.9 ms | 60.5 MiB |
+| `llvm-as-rust` | 24.4 ms | 24.0-25.1 ms | 14.8 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 51.8 ms | 50.1-52.1 ms | 58.3 MiB |
+| `llvm-dis-rust` on C++ bitcode | 25.2 ms | 24.9-26.0 ms | 19.2 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer/bitcode
-corpus, Rust throughput was about 1.9x the C++ assembler and 2.0x the C++
-disassembler, and peak RSS was about 2.3x and 3.0x lower respectively. These
+corpus, Rust throughput was about 2.6x the C++ assembler and 2.1x the C++
+disassembler, and peak RSS was about 4.1x and 3.0x lower respectively. These
 are throughput and memory measurements, not a generated-code performance
-claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.6 MiB
+claim. The Rust binaries are 5.5 MiB (`llvm-as-rust`) and 4.6 MiB
 (`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
+A same-corpus A/B check against the pre-atomic commit showed no atomic
+regression: assembly was 30.81 ms before and 30.28 ms after on the vector
+corpus, and disassembly stayed within noise. The earlier ratio dip came from
+adding atomic load/store to a larger corpus, not from slower code. The larger
+gain here is the streaming lexer: the old design held all 354k tokens for this
+corpus, while the parser now keeps a two-token window and lexes on demand.
+That cut `llvm-as-rust` from 33.5 ms to 24.4 ms and peak RSS from 26.0 MiB to
+14.8 MiB on the same input.
+
 In-process component timings on the same corpus (50 iterations, no process
-startup or file I/O) are 11.18 ms parse, 3.59 ms print, 3.62 ms bitcode write,
-8.51 ms bitcode read, 15.62 ms assemble (parse plus write), and 12.00 ms
+startup or file I/O) are 12.21 ms parse, 3.59 ms print, 4.26 ms bitcode write,
+8.57 ms bitcode read, 15.56 ms assemble (parse plus write), and 12.20 ms
 disassemble (read plus print). The performance pass keeps token text borrowed
-from the source, caches primitive and named types, consumes tokens instead of
-cloning them, uses FNV maps and vector-backed ID tables for IR and bitcode
+from the source, streams tokens through a two-token window instead of retaining
+the whole file, caches primitive and named types, uses FNV maps and
+vector-backed ID tables for IR and bitcode
 lookups, keeps small bitcode records and instruction operands inline, shares
 abbreviation tables across blocks, moves decoded instruction kinds instead of
 cloning them, and streams printer names and escaped bytes directly. The CLI
