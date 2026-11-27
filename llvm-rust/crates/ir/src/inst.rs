@@ -479,6 +479,24 @@ pub enum InstKind {
         default: BlockId,
         cases: Vec<(ConstId, BlockId)>,
     },
+    ExtractValue {
+        aggregate: Operand,
+        indices: Vec<u32>,
+    },
+    InsertValue {
+        aggregate: Operand,
+        value: Operand,
+        indices: Vec<u32>,
+    },
+    ExtractElement {
+        vector: Operand,
+        index: Operand,
+    },
+    InsertElement {
+        vector: Operand,
+        value: Operand,
+        index: Operand,
+    },
     Unreachable,
 }
 

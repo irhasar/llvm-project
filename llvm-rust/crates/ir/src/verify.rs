@@ -309,6 +309,76 @@ fn verify_instruction(
                 check_block(function, *block, errors, "switch case target");
             }
         }
+        InstKind::ExtractValue { aggregate, indices } => {
+            check_operand(
+                module,
+                function,
+                *aggregate,
+                errors,
+                "extractvalue aggregate",
+            );
+            if module
+                .types
+                .aggregate_indexed(aggregate.ty, indices)
+                .is_none()
+            {
+                errors.push(Error::verify(
+                    "extractvalue indices do not match the aggregate",
+                ));
+            }
+        }
+        InstKind::InsertValue {
+            aggregate,
+            value,
+            indices,
+        } => {
+            check_operand(
+                module,
+                function,
+                *aggregate,
+                errors,
+                "insertvalue aggregate",
+            );
+            check_operand(module, function, *value, errors, "insertvalue value");
+            match module.types.aggregate_indexed(aggregate.ty, indices) {
+                Some(expected) if expected == value.ty => {}
+                Some(_) => errors.push(Error::verify(
+                    "insertvalue value type does not match the indexed element",
+                )),
+                None => errors.push(Error::verify(
+                    "insertvalue indices do not match the aggregate",
+                )),
+            }
+        }
+        InstKind::ExtractElement { vector, index } => {
+            check_operand(module, function, *vector, errors, "extractelement vector");
+            check_operand(module, function, *index, errors, "extractelement index");
+            if module.types.vector_element(vector.ty).is_none() {
+                errors.push(Error::verify("extractelement operand is not a vector"));
+            }
+            if !matches!(module.types.get(index.ty), Type::Int(_)) {
+                errors.push(Error::verify("extractelement index is not an integer"));
+            }
+        }
+        InstKind::InsertElement {
+            vector,
+            value,
+            index,
+        } => {
+            check_operand(module, function, *vector, errors, "insertelement vector");
+            check_operand(module, function, *value, errors, "insertelement value");
+            check_operand(module, function, *index, errors, "insertelement index");
+            match module.types.vector_element(vector.ty) {
+                Some(element) if element == value.ty => {}
+                Some(_) => errors.push(Error::verify(
+                    "insertelement value type does not match the vector element",
+                )),
+                None => errors.push(Error::verify("insertelement operand is not a vector")),
+            }
+            if !matches!(module.types.get(index.ty), Type::Int(_)) {
+                errors.push(Error::verify("insertelement index is not an integer"));
+            }
+        }
         InstKind::Unreachable => {}
     }
 }

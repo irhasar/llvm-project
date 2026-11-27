@@ -2030,6 +2030,82 @@ impl<'a> Parser<'a> {
                     None,
                 ))
             }
+            "extractvalue" => {
+                self.advance();
+                let aggregate_ty = self.parse_type()?;
+                let aggregate = self.parse_value(function, aggregate_ty)?;
+                let indices = self.parse_aggregate_indices()?;
+                let result_ty = self
+                    .module
+                    .types
+                    .aggregate_indexed(aggregate_ty, &indices)
+                    .ok_or_else(|| self.error("invalid extractvalue indices"))?;
+                Ok((
+                    InstKind::ExtractValue { aggregate, indices },
+                    Some(result_ty),
+                ))
+            }
+            "insertvalue" => {
+                self.advance();
+                let aggregate_ty = self.parse_type()?;
+                let aggregate = self.parse_value(function, aggregate_ty)?;
+                self.expect_punct(',')?;
+                let value_ty = self.parse_type()?;
+                let value = self.parse_value(function, value_ty)?;
+                let indices = self.parse_aggregate_indices()?;
+                let expected = self
+                    .module
+                    .types
+                    .aggregate_indexed(aggregate_ty, &indices)
+                    .ok_or_else(|| self.error("invalid insertvalue indices"))?;
+                if expected != value_ty {
+                    return Err(self.error("insertvalue element type does not match the index"));
+                }
+                Ok((
+                    InstKind::InsertValue {
+                        aggregate,
+                        value,
+                        indices,
+                    },
+                    Some(aggregate_ty),
+                ))
+            }
+            "extractelement" => {
+                self.advance();
+                let vector_ty = self.parse_type()?;
+                let vector = self.parse_value(function, vector_ty)?;
+                self.expect_punct(',')?;
+                let index_ty = self.parse_type()?;
+                let index = self.parse_value(function, index_ty)?;
+                let result_ty = self
+                    .module
+                    .types
+                    .vector_element(vector_ty)
+                    .ok_or_else(|| self.error("extractelement requires a vector operand"))?;
+                Ok((InstKind::ExtractElement { vector, index }, Some(result_ty)))
+            }
+            "insertelement" => {
+                self.advance();
+                let vector_ty = self.parse_type()?;
+                let vector = self.parse_value(function, vector_ty)?;
+                self.expect_punct(',')?;
+                let value_ty = self.parse_type()?;
+                let value = self.parse_value(function, value_ty)?;
+                self.expect_punct(',')?;
+                let index_ty = self.parse_type()?;
+                let index = self.parse_value(function, index_ty)?;
+                if self.module.types.vector_element(vector_ty) != Some(value_ty) {
+                    return Err(self.error("insertelement value type does not match the vector"));
+                }
+                Ok((
+                    InstKind::InsertElement {
+                        vector,
+                        value,
+                        index,
+                    },
+                    Some(vector_ty),
+                ))
+            }
             "unreachable" => {
                 self.advance();
                 Ok((InstKind::Unreachable, None))
@@ -2047,6 +2123,20 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+    }
+
+    fn parse_aggregate_indices(&mut self) -> Result<Vec<u32>> {
+        let mut indices = Vec::new();
+        while self.eat_punct(',') {
+            let index = self.expect_int()?;
+            indices.push(
+                u32::try_from(index).map_err(|_| self.error("aggregate index is out of range"))?,
+            );
+        }
+        if indices.is_empty() {
+            return Err(self.error("aggregate instruction requires at least one index"));
+        }
+        Ok(indices)
     }
 
     fn parse_call(

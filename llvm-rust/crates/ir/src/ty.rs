@@ -278,6 +278,26 @@ impl TypeTable {
         }
     }
 
+    /// Resolves the type reached by indexing an aggregate.
+    pub fn aggregate_indexed(&self, mut ty: TypeId, indices: &[u32]) -> Option<TypeId> {
+        for &index in indices {
+            ty = match self.get(ty) {
+                Type::Array { elem, len } if u64::from(index) < *len => *elem,
+                Type::Struct { fields, .. } => *fields.get(index as usize)?,
+                _ => return None,
+            };
+        }
+        Some(ty)
+    }
+
+    /// Returns the element type of a vector.
+    pub fn vector_element(&self, ty: TypeId) -> Option<TypeId> {
+        match self.get(ty) {
+            Type::Vector { elem, .. } => Some(*elem),
+            _ => None,
+        }
+    }
+
     /// Returns the number of interned types.
     pub fn len(&self) -> usize {
         self.types.len()

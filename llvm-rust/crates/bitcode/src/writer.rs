@@ -84,6 +84,10 @@ const FUNC_INST_CALL: u32 = 34;
 const FUNC_INST_GEP: u32 = 43;
 const FUNC_INST_STORE: u32 = 44;
 const FUNC_INST_UNOP: u32 = 56;
+const FUNC_INST_EXTRACTELT: u32 = 6;
+const FUNC_INST_INSERTELT: u32 = 7;
+const FUNC_INST_EXTRACTVAL: u32 = 26;
+const FUNC_INST_INSERTVAL: u32 = 27;
 
 const VST_ENTRY: u32 = 1;
 const VST_BBENTRY: u32 = 2;
@@ -1130,6 +1134,40 @@ impl<'a> Writer<'a> {
                     operands.push(block_index(function, *block)? as u64);
                 }
                 self.stream.emit_record(FUNC_INST_SWITCH, &operands);
+            }
+            InstKind::ExtractValue { aggregate, indices } => {
+                let mut operands = Vec::new();
+                self.push_value_and_type(&mut operands, aggregate, inst_id)?;
+                operands.extend(indices.iter().map(|index| u64::from(*index)));
+                self.stream.emit_record(FUNC_INST_EXTRACTVAL, &operands);
+            }
+            InstKind::InsertValue {
+                aggregate,
+                value,
+                indices,
+            } => {
+                let mut operands = Vec::new();
+                self.push_value_and_type(&mut operands, aggregate, inst_id)?;
+                self.push_value_and_type(&mut operands, value, inst_id)?;
+                operands.extend(indices.iter().map(|index| u64::from(*index)));
+                self.stream.emit_record(FUNC_INST_INSERTVAL, &operands);
+            }
+            InstKind::ExtractElement { vector, index } => {
+                let mut operands = Vec::new();
+                self.push_value_and_type(&mut operands, vector, inst_id)?;
+                self.push_value_and_type(&mut operands, index, inst_id)?;
+                self.stream.emit_record(FUNC_INST_EXTRACTELT, &operands);
+            }
+            InstKind::InsertElement {
+                vector,
+                value,
+                index,
+            } => {
+                let mut operands = Vec::new();
+                self.push_value_and_type(&mut operands, vector, inst_id)?;
+                self.push_value(&mut operands, value, inst_id)?;
+                self.push_value_and_type(&mut operands, index, inst_id)?;
+                self.stream.emit_record(FUNC_INST_INSERTELT, &operands);
             }
             InstKind::Unreachable => self.stream.emit_record(FUNC_INST_UNREACHABLE, &[]),
         }

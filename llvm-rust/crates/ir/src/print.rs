@@ -528,6 +528,44 @@ fn write_instruction(
             }
             out.push(']');
         }
+        InstKind::ExtractValue { aggregate, indices } => {
+            out.push_str("extractvalue ");
+            write_operand(module, function, *aggregate, out);
+            for index in indices {
+                let _ = write!(out, ", {index}");
+            }
+        }
+        InstKind::InsertValue {
+            aggregate,
+            value,
+            indices,
+        } => {
+            out.push_str("insertvalue ");
+            write_operand(module, function, *aggregate, out);
+            out.push_str(", ");
+            write_operand(module, function, *value, out);
+            for index in indices {
+                let _ = write!(out, ", {index}");
+            }
+        }
+        InstKind::ExtractElement { vector, index } => {
+            out.push_str("extractelement ");
+            write_operand(module, function, *vector, out);
+            out.push_str(", ");
+            write_operand(module, function, *index, out);
+        }
+        InstKind::InsertElement {
+            vector,
+            value,
+            index,
+        } => {
+            out.push_str("insertelement ");
+            write_operand(module, function, *vector, out);
+            out.push_str(", ");
+            write_operand(module, function, *value, out);
+            out.push_str(", ");
+            write_operand(module, function, *index, out);
+        }
         InstKind::Unreachable => out.push_str("unreachable"),
     }
 }

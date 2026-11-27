@@ -84,6 +84,10 @@ const FUNC_INST_CALL: u64 = 34;
 const FUNC_INST_GEP: u64 = 43;
 const FUNC_INST_STORE: u64 = 44;
 const FUNC_INST_UNOP: u64 = 56;
+const FUNC_INST_EXTRACTELT: u64 = 6;
+const FUNC_INST_INSERTELT: u64 = 7;
+const FUNC_INST_EXTRACTVAL: u64 = 26;
+const FUNC_INST_INSERTVAL: u64 = 27;
 
 const VST_ENTRY: u64 = 1;
 const VST_BBENTRY: u64 = 2;
@@ -1378,11 +1382,88 @@ impl Reader {
                     (kind, ty)
                 })
             }
+            FUNC_INST_EXTRACTVAL => {
+                let (aggregate, index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let indices = self.decode_aggregate_indices(record, index)?;
+                let result = self
+                    .module
+                    .types
+                    .aggregate_indexed(aggregate.ty, &indices)
+                    .ok_or_else(|| Error::bitcode("invalid extractvalue indices"))?;
+                Ok((InstKind::ExtractValue { aggregate, indices }, Some(result)))
+            }
+            FUNC_INST_INSERTVAL => {
+                let (aggregate, index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (value, index) = self.decode_typed_value(record, index, inst_id, state)?;
+                let indices = self.decode_aggregate_indices(record, index)?;
+                let expected = self
+                    .module
+                    .types
+                    .aggregate_indexed(aggregate.ty, &indices)
+                    .ok_or_else(|| Error::bitcode("invalid insertvalue indices"))?;
+                if expected != value.ty {
+                    return Err(Error::bitcode(
+                        "insertvalue element type does not match the index",
+                    ));
+                }
+                Ok((
+                    InstKind::InsertValue {
+                        aggregate,
+                        value,
+                        indices,
+                    },
+                    Some(aggregate.ty),
+                ))
+            }
+            FUNC_INST_EXTRACTELT => {
+                let (vector, index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (index, _) = self.decode_typed_value(record, index, inst_id, state)?;
+                let result =
+                    self.module.types.vector_element(vector.ty).ok_or_else(|| {
+                        Error::bitcode("extractelement requires a vector operand")
+                    })?;
+                Ok((InstKind::ExtractElement { vector, index }, Some(result)))
+            }
+            FUNC_INST_INSERTELT => {
+                let (vector, index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (value, index) = self.decode_value(record, index, inst_id, state)?;
+                let (index, _) = self.decode_typed_value(record, index, inst_id, state)?;
+                if self.module.types.vector_element(vector.ty) != Some(value.ty) {
+                    return Err(Error::bitcode(
+                        "insertelement value type does not match the vector",
+                    ));
+                }
+                Ok((
+                    InstKind::InsertElement {
+                        vector,
+                        value,
+                        index,
+                    },
+                    Some(vector.ty),
+                ))
+            }
             FUNC_INST_UNREACHABLE => Ok((InstKind::Unreachable, None)),
             other => Err(Error::bitcode(format!(
                 "unsupported instruction code {other}"
             ))),
         }
+    }
+
+    fn decode_aggregate_indices(&self, record: &Record, mut index: usize) -> Result<Vec<u32>> {
+        let mut indices = Vec::new();
+        while index < record.operands.len() {
+            indices.push(
+                u32::try_from(record.operands[index])
+                    .map_err(|_| Error::bitcode("aggregate index is out of range"))?,
+            );
+            index += 1;
+        }
+        if indices.is_empty() {
+            return Err(Error::bitcode(
+                "aggregate instruction requires at least one index",
+            ));
+        }
+        Ok(indices)
     }
 
     fn resolve_const_state(&mut self, value: u32, state: &FuncState) -> Result<ConstId> {

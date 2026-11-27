@@ -667,6 +667,26 @@ fn for_each_operand_mut(kind: &mut InstKind, mut visit: impl FnMut(&mut Operand)
         }
         InstKind::CondBr { cond, .. } => visit(cond),
         InstKind::Switch { value, .. } => visit(value),
+        InstKind::ExtractValue { aggregate, .. } => visit(aggregate),
+        InstKind::InsertValue {
+            aggregate, value, ..
+        } => {
+            visit(aggregate);
+            visit(value);
+        }
+        InstKind::ExtractElement { vector, index } => {
+            visit(vector);
+            visit(index);
+        }
+        InstKind::InsertElement {
+            vector,
+            value,
+            index,
+        } => {
+            visit(vector);
+            visit(value);
+            visit(index);
+        }
         InstKind::Br { .. } | InstKind::Unreachable => {}
     }
 }

@@ -120,10 +120,9 @@ rejected otherwise instead of being lossily rewritten.
 This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
-debug info, constant expressions, atomics, `invoke`/`landingpad`,
-aggregate/vector instructions, or `fp128`/`x86_fp80`/`ppc_fp128` constants
-(wide float records are rejected). MC, object, X86, and codegen are still out
-of scope.
+debug info, constant expressions, atomics, `invoke`/`landingpad`, vector
+shuffles/arithmetic, or `fp128`/`x86_fp80`/`ppc_fp128` constants (wide float
+records are rejected). MC, object, X86, and codegen are still out of scope.
 
 ## Commands
 
@@ -179,7 +178,7 @@ python3 tests/bench.py --runs 5
 
 ## M1 results
 
-Differential harness: all 30 generic modules in `tests/corpus/` match the
+Differential harness: all 31 generic modules in `tests/corpus/` match the
 selected C++ oracle in both directions after normalizing `source_filename`,
 `ModuleID`, and target-memory spelling. The
 `tests/corpus/aarch64_memory.ll` fixture is checked separately against
@@ -204,7 +203,9 @@ scoped-memory groups, modern `memory(argmem: ...)`/
 version-2 decoding, and disassemble/reassemble preservation of conflicting
 default and target access, duplicate attribute groups in a checked-in bitcode
 fixture that is read and reassembled with both Rust tools, unnamed
-value/block numbering, exact shift/divide flags, and `phi` self references.
+value/block numbering, exact shift/divide flags, `phi` self references, and
+aggregate/vector element extraction and insertion (`extractvalue`,
+`insertvalue`, `extractelement`, and `insertelement`).
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -215,24 +216,25 @@ value/block numbering, exact shift/divide flags, and `phi` self references.
   `LLVM_RUST_DUPLICATE_FIXTURE` is set; the differential harness reads it with
   both disassemblers and canonicalizes the Rust output through C++ `llvm-as`.
 
-Benchmark on a synthetic corpus of 1000 functions, 10 arithmetic instructions
-and one attributed call each (342,956 bytes), LLVM 19.1.7, `taskset -c 0`,
-five runs:
+Benchmark on a synthetic corpus of 1000 functions, 10 arithmetic instructions,
+four aggregate/vector element operations, and one attributed call each
+(664,987 bytes), LLVM 19.1.7, `taskset -c 0`, five runs:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 36.2 ms | 35.9-42.5 ms | 55.6 MiB |
-| `llvm-as-rust` | 23.9 ms | 23.4-26.3 ms | 14.5 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 30.1 ms | 29.9-31.1 ms | 54.6 MiB |
-| `llvm-dis-rust` on C++ bitcode | 19.2 ms | 19.0-19.4 ms | 14.5 MiB |
+| `llvm-as` (C++) | 47.3 ms | 46.5-48.9 ms | 58.4 MiB |
+| `llvm-as-rust` | 37.2 ms | 36.8-37.9 ms | 22.5 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 38.5 ms | 38.1-40.1 ms | 56.0 MiB |
+| `llvm-dis-rust` on C++ bitcode | 28.1 ms | 27.9-29.4 ms | 15.4 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer-only
-corpus, Rust throughput was about 1.5x the C++ assembler and 1.6x the C++
-disassembler, and peak RSS was about 3.8x lower. Each tool gets one discarded
-warmup run before the five measured runs. These are throughput and memory
-measurements, not a generated-code performance claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.3 MiB
-(`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
+corpus, Rust throughput was about 1.3x the C++ assembler and 1.4x the C++
+disassembler, and peak RSS was about 2.6x and 3.6x lower respectively. Each
+tool gets one discarded warmup run before the five measured runs. These are
+throughput and memory measurements, not a generated-code performance claim.
+The Rust binaries are 5.6 MiB (`llvm-as-rust`) and 4.6 MiB (`llvm-dis-rust`);
+the C++ tools need the 124 MiB `libLLVM.so.19.1`.
 
 A clean release build of the two Rust tools, using a separate target
 directory, took 9.6 s wall, 31.4 s user, and 2.0 s system time. This is a

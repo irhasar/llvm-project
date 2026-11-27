@@ -46,14 +46,25 @@ def main():
         rust_bc = os.path.join(tmp, "rust.bc")
         with open(source, "w", encoding="utf-8") as out:
             out.write("declare void @use(ptr align 8, i32 noundef)\n")
-            out.write("@slot = global i32 0\n\n")
+            out.write("@slot = global i32 0\n")
+            out.write("%pair = type { i32, [2 x i8] }\n\n")
             for index in range(args.functions):
-                out.write(f"define i32 @f{index}(i32 %a, i32 %b) {{\nentry:\n")
+                out.write(
+                    f"define i32 @f{index}(i32 %a, i32 %b, %pair %p, <4 x i32> %vec) {{\nentry:\n"
+                )
                 out.write("  %v0 = add i32 %a, %b\n")
                 for step in range(1, 10):
                     out.write(f"  %v{step} = mul i32 %v{step - 1}, {step + 1}\n")
-                out.write("  call void @use(ptr align 8 @slot, i32 noundef %v9)\n")
-                out.write("  ret i32 %v9\n}\n\n")
+                out.write("  %e = extractvalue %pair %p, 1, 0\n")
+                out.write("  %x = sext i8 %e to i32\n")
+                out.write("  %q = insertvalue %pair %p, i8 %e, 1, 1\n")
+                out.write("  %el = extractelement <4 x i32> %vec, i32 0\n")
+                out.write("  %n = insertelement <4 x i32> %vec, i32 %el, i32 0\n")
+                out.write("  %r = extractelement <4 x i32> %n, i32 0\n")
+                out.write("  %sum = add i32 %v9, %x\n")
+                out.write("  %sum2 = add i32 %sum, %r\n")
+                out.write("  call void @use(ptr align 8 @slot, i32 noundef %sum2)\n")
+                out.write("  ret i32 %sum2\n}\n\n")
 
         prefix = ["taskset", "-c", "0"]
         cpp_as = [*prefix, os.path.join(args.llvm_bin, "llvm-as"), source, "-o", cpp_bc]
