@@ -143,10 +143,10 @@ an M2 parity claim: the upstream `llvm/test` suite is still not vendored. Type
 attributes (`byval`, `sret`, `elementtype`), aggregate/vector element
 extraction and insertion, vector integer and floating-point arithmetic,
 vector comparisons and `select`, `shufflevector`, `freeze`, `fence`, and
-atomic `load`/`store` with system and single-thread sync scopes are covered,
-including function-local aggregate constants and forward local element
-operands. The slice still does not cover metadata, constant expressions,
-`atomicrmw`/`cmpxchg`, scalable-vector shuffles, or other sync scopes.
+atomic `load`/`store` with system and single-thread sync scopes, `atomicrmw`,
+and `cmpxchg` are covered, including function-local aggregate constants and
+forward local element operands. The slice still does not cover metadata,
+constant expressions, scalable-vector shuffles, or other sync scopes.
 
 ## Gates and kill criteria
 

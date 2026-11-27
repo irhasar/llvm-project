@@ -242,6 +242,72 @@ fn verify_instruction(
                 }
             }
         }
+        InstKind::AtomicRmw {
+            op,
+            ptr,
+            value,
+            align,
+            ordering,
+            ..
+        } => {
+            check_operand(module, function, *ptr, errors, "atomicrmw pointer");
+            check_operand(module, function, *value, errors, "atomicrmw value");
+            if align.is_none() {
+                errors.push(Error::verify("atomicrmw requires an explicit alignment"));
+            }
+            if !ordering.is_rmw_valid() {
+                errors.push(Error::verify("invalid atomicrmw ordering"));
+            }
+            if op.is_float() != matches!(module.types.get(value.ty), Type::Float(_)) {
+                errors.push(Error::verify(
+                    "atomicrmw operation does not match the value type",
+                ));
+            }
+            match result_ty {
+                Some(result_ty) if result_ty == value.ty => {}
+                Some(_) => errors.push(Error::verify(
+                    "atomicrmw result type does not match the value type",
+                )),
+                None => errors.push(Error::verify("atomicrmw requires a result")),
+            }
+        }
+        InstKind::CmpXchg {
+            ptr,
+            cmp,
+            new,
+            align,
+            success,
+            failure,
+            ..
+        } => {
+            check_operand(module, function, *ptr, errors, "cmpxchg pointer");
+            check_operand(module, function, *cmp, errors, "cmpxchg compare value");
+            check_operand(module, function, *new, errors, "cmpxchg new value");
+            if align.is_none() {
+                errors.push(Error::verify("cmpxchg requires an explicit alignment"));
+            }
+            if !success.is_cmpxchg_success_valid() {
+                errors.push(Error::verify("invalid cmpxchg success ordering"));
+            }
+            if !failure.is_cmpxchg_failure_valid() {
+                errors.push(Error::verify("invalid cmpxchg failure ordering"));
+            }
+            if cmp.ty != new.ty {
+                errors.push(Error::verify(
+                    "cmpxchg compare and new values have different types",
+                ));
+            }
+            let result_ok =
+                result_ty.is_some_and(|result_ty| match module.types.struct_body(result_ty) {
+                    Some((fields, false)) if fields.len() == 2 => {
+                        fields[0] == cmp.ty && matches!(module.types.get(fields[1]), Type::Int(1))
+                    }
+                    _ => false,
+                });
+            if !result_ok {
+                errors.push(Error::verify("cmpxchg result type must be { value, i1 }"));
+            }
+        }
         InstKind::Gep {
             source_ty,
             ptr,

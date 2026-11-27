@@ -48,7 +48,8 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   comparisons, `icmp`/`fcmp`, `alloca`, `load`, `store`, `getelementptr`,
   `call`, `phi`, vector `select`, `shufflevector`, `freeze`, `fence` with
   system and single-thread sync scopes, atomic `load`/`store` with orderings
-  and sync scopes, casts, `ret`, `br`, `condbr`, `switch`, `unreachable`.
+  and sync scopes, `atomicrmw` and `cmpxchg`, casts, `ret`, `br`, `condbr`,
+  `switch`, `unreachable`.
   Unnamed values and blocks share one
   numbering sequence, and `phi` accepts forward and self references.
   `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
@@ -123,8 +124,8 @@ rejected otherwise instead of being lossily rewritten.
 This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
-debug info, constant expressions, `atomicrmw`/`cmpxchg`, `invoke`/`landingpad`,
-scalable vector shuffles, sync scopes beyond system and single-thread, or
+debug info, constant expressions, `invoke`/`landingpad`, scalable vector
+shuffles, sync scopes beyond system and single-thread, or
 `fp128`/`x86_fp80`/`ppc_fp128` constants (wide float records are rejected).
 MC, object, X86, and codegen are still out of scope.
 
@@ -183,7 +184,7 @@ python3 tests/bench.py --runs 11 --warmup 3
 
 ## M1 results
 
-Differential harness: all 34 generic modules in `tests/corpus/` match the
+Differential harness: all 35 generic modules in `tests/corpus/` match the
 selected C++ oracle in both directions after normalizing `source_filename`,
 `ModuleID`, and target-memory spelling. The
 `tests/corpus/aarch64_memory.ll` fixture is checked separately against
@@ -215,8 +216,9 @@ floating-point arithmetic, vector comparisons and `select`, `shufflevector`
 including shrinking masks and `undef` masks canonicalized to `poison`,
 `freeze` on scalar, vector, and floating-point values, `fence` orderings and
 `syncscope("singlethread")`, atomic `load`/`store` with all valid orderings,
-volatile forms, and single-thread scope, and function-local aggregate
-constants and forward local element operands.
+volatile forms, and single-thread scope, `atomicrmw` integer and floating-point
+operations, `cmpxchg` success/failure orderings, weak/volatile forms, and
+function-local aggregate constants and forward local element operands.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that

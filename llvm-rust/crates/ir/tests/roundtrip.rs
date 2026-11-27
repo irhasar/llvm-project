@@ -332,6 +332,70 @@ entry:
 }
 
 #[test]
+fn atomic_rmw_and_cmpxchg() {
+    let source = r#"
+define i32 @rmw(ptr %p, i32 %v) {
+entry:
+  %a = atomicrmw add ptr %p, i32 %v seq_cst, align 4
+  %b = atomicrmw volatile xchg ptr %p, i32 %v syncscope("singlethread") acquire, align 4
+  %c = atomicrmw fadd ptr %p, float 1.000000e+00 release, align 4
+  ret i32 %a
+}
+
+define {i32, i1} @cx(ptr %p, i32 %c, i32 %n) {
+entry:
+  %r = cmpxchg ptr %p, i32 %c, i32 %n seq_cst seq_cst, align 4
+  %r2 = cmpxchg weak volatile ptr %p, i32 %c, i32 %n acquire monotonic, align 4
+  ret {i32, i1} %r
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%a = atomicrmw add ptr %p, i32 %v seq_cst, align 4"));
+    assert!(printed.contains(
+        "%b = atomicrmw volatile xchg ptr %p, i32 %v syncscope(\"singlethread\") acquire, align 4"
+    ));
+    assert!(
+        printed.contains("%c = atomicrmw fadd ptr %p, float 0x3FF0000000000000 release, align 4")
+    );
+    assert!(printed.contains("%r = cmpxchg ptr %p, i32 %c, i32 %n seq_cst seq_cst, align 4"));
+    assert!(
+        printed.contains(
+            "%r2 = cmpxchg weak volatile ptr %p, i32 %c, i32 %n acquire monotonic, align 4"
+        )
+    );
+}
+
+#[test]
+fn rejects_invalid_atomic_rmw_and_cmpxchg() {
+    let rmw_unordered = r#"
+define i32 @bad(ptr %p, i32 %v) {
+entry:
+  %a = atomicrmw add ptr %p, i32 %v unordered, align 4
+  ret i32 %a
+}
+"#;
+    assert!(parse_module(rmw_unordered).is_err());
+
+    let cmpxchg_bad_failure = r#"
+define {i32, i1} @bad(ptr %p, i32 %c, i32 %n) {
+entry:
+  %r = cmpxchg ptr %p, i32 %c, i32 %n seq_cst release, align 4
+  ret {i32, i1} %r
+}
+"#;
+    assert!(parse_module(cmpxchg_bad_failure).is_err());
+
+    let rmw_no_align = r#"
+define i32 @bad(ptr %p, i32 %v) {
+entry:
+  %a = atomicrmw add ptr %p, i32 %v seq_cst
+  ret i32 %a
+}
+"#;
+    assert!(parse_module(rmw_no_align).is_err());
+}
+
+#[test]
 fn rejects_invalid_atomic_load_store() {
     let load_release = r#"
 define i32 @bad(ptr %p) {

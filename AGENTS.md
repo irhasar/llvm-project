@@ -144,6 +144,18 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   Atomic loads reject `release`/`acq_rel`; atomic stores reject
   `acquire`/`acq_rel`; both require an explicit alignment. Encode them with
   bitcode codes 41/45 and keep the non-atomic 20/44 paths unchanged.
+- `atomicrmw` syntax is `atomicrmw [volatile] <op> <ptrty> <ptr>, <valty>
+  <val> [syncscope(...)] <ordering>, align N`; it rejects `unordered`,
+  `not_atomic`, and missing alignment. Bitcode code 59 is `[ptr, val, op,
+  volatile, ordering, syncscope, align]` with LLVM's variable `pushValueAndType`
+  encoding; operation codes are LLVM 19 `RMW_*` values 0..16.
+- `cmpxchg` syntax is `cmpxchg [weak] [volatile] <ptrty> <ptr>, <ty> <cmp>,
+  <ty> <new> [syncscope(...)] <success> <failure>, align N`; success rejects
+  `unordered`/`not_atomic`, failure allows only `monotonic`, `acquire`, or
+  `seq_cst`. Its result is a literal `{ ty, i1 }` struct. Bitcode code 46 is
+  `[ptr, cmp, new, volatile, success, syncscope, failure, weak, align]`.
+  LLVM 19 accepts a failure ordering stronger than success, so do not add a
+  strength comparison that the oracle does not enforce.
 - Consume parser tokens with `take` when the current token is always advanced.
   Do not clone `TokenKind` in type or constant parsing; `CStr` payloads are
   heap vectors and cloning them is avoidable.

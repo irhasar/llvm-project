@@ -386,6 +386,67 @@ fn write_instruction(
                 let _ = write!(out, ", align {align}");
             }
         }
+        InstKind::AtomicRmw {
+            op,
+            ptr,
+            value,
+            align,
+            volatile,
+            ordering,
+            syncscope,
+        } => {
+            out.push_str("atomicrmw ");
+            if *volatile {
+                out.push_str("volatile ");
+            }
+            out.push_str(op.as_str());
+            out.push(' ');
+            write_operand(module, function, *ptr, out);
+            out.push_str(", ");
+            write_operand(module, function, *value, out);
+            out.push(' ');
+            if *syncscope == crate::inst::SyncScope::SingleThread {
+                out.push_str("syncscope(\"singlethread\") ");
+            }
+            out.push_str(ordering.as_str());
+            if let Some(align) = align {
+                let _ = write!(out, ", align {align}");
+            }
+        }
+        InstKind::CmpXchg {
+            ptr,
+            cmp,
+            new,
+            align,
+            volatile,
+            success,
+            failure,
+            syncscope,
+            weak,
+        } => {
+            out.push_str("cmpxchg ");
+            if *weak {
+                out.push_str("weak ");
+            }
+            if *volatile {
+                out.push_str("volatile ");
+            }
+            write_operand(module, function, *ptr, out);
+            out.push_str(", ");
+            write_operand(module, function, *cmp, out);
+            out.push_str(", ");
+            write_operand(module, function, *new, out);
+            out.push(' ');
+            if *syncscope == crate::inst::SyncScope::SingleThread {
+                out.push_str("syncscope(\"singlethread\") ");
+            }
+            out.push_str(success.as_str());
+            out.push(' ');
+            out.push_str(failure.as_str());
+            if let Some(align) = align {
+                let _ = write!(out, ", align {align}");
+            }
+        }
         InstKind::Gep {
             inbounds,
             source_ty,

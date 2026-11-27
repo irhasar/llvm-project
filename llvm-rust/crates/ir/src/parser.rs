@@ -14,8 +14,8 @@ use llvm_rust_support::{Error, FastHashMap, Result, Span, Symbol};
 use crate::constant::{ConstId, ConstKind, Constant};
 use crate::function::{BlockId, Function, LocalId};
 use crate::inst::{
-    AtomicOrdering, Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred, InstKind,
-    Instruction, IntFlags, SyncScope, TailKind,
+    AtomicOrdering, AtomicRmwOp, Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred,
+    InstKind, Instruction, IntFlags, SyncScope, TailKind,
 };
 use crate::linkage::{Linkage, Visibility};
 use crate::module::{Global, Module, ThreadLocal};
@@ -1972,6 +1972,91 @@ impl<'a> Parser<'a> {
                         syncscope,
                     },
                     None,
+                ))
+            }
+            "atomicrmw" => {
+                self.advance();
+                let volatile = self.eat_ident("volatile");
+                let op_text = self.expect_ident()?;
+                let op = AtomicRmwOp::parse(&op_text).ok_or_else(|| {
+                    self.error(format!("unknown atomicrmw operation `{op_text}`"))
+                })?;
+                let ptr_ty = self.parse_type()?;
+                let ptr = self.parse_value(function, ptr_ty)?;
+                self.expect_punct(',')?;
+                let ty = self.parse_type()?;
+                let value = self.parse_value(function, ty)?;
+                let syncscope = self.parse_syncscope()?;
+                let ordering = self.parse_atomic_ordering()?;
+                if !ordering.is_rmw_valid() {
+                    return Err(self.error("invalid atomicrmw ordering"));
+                }
+                let align = self.parse_optional_align()?;
+                if align.is_none() {
+                    return Err(self.error("atomicrmw requires an explicit alignment"));
+                }
+                Ok((
+                    InstKind::AtomicRmw {
+                        op,
+                        ptr,
+                        value,
+                        align,
+                        volatile,
+                        ordering,
+                        syncscope,
+                    },
+                    Some(ty),
+                ))
+            }
+            "cmpxchg" => {
+                self.advance();
+                let weak = self.eat_ident("weak");
+                let volatile = self.eat_ident("volatile");
+                let ptr_ty = self.parse_type()?;
+                let ptr = self.parse_value(function, ptr_ty)?;
+                self.expect_punct(',')?;
+                let ty = self.parse_type()?;
+                let cmp = self.parse_value(function, ty)?;
+                self.expect_punct(',')?;
+                let new_ty = self.parse_type()?;
+                if new_ty != ty {
+                    return Err(
+                        self.error("cmpxchg compare and new values must have the same type")
+                    );
+                }
+                let new = self.parse_value(function, new_ty)?;
+                let syncscope = self.parse_syncscope()?;
+                let success = self.parse_atomic_ordering()?;
+                let failure = self.parse_atomic_ordering()?;
+                if !success.is_cmpxchg_success_valid() {
+                    return Err(self.error("invalid cmpxchg success ordering"));
+                }
+                if !failure.is_cmpxchg_failure_valid() {
+                    return Err(self.error("invalid cmpxchg failure ordering"));
+                }
+                let align = self.parse_optional_align()?;
+                if align.is_none() {
+                    return Err(self.error("cmpxchg requires an explicit alignment"));
+                }
+                let i1 = self.module.types.int(1);
+                let result_ty = self.module.types.intern(Type::Struct {
+                    name: None,
+                    fields: vec![ty, i1],
+                    packed: false,
+                });
+                Ok((
+                    InstKind::CmpXchg {
+                        ptr,
+                        cmp,
+                        new,
+                        align,
+                        volatile,
+                        success,
+                        failure,
+                        syncscope,
+                        weak,
+                    },
+                    Some(result_ty),
                 ))
             }
             "getelementptr" => {

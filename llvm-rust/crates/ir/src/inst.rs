@@ -463,6 +463,31 @@ impl AtomicOrdering {
         )
     }
 
+    /// Returns true when the ordering is valid on an atomicrmw.
+    pub const fn is_rmw_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Monotonic
+                | Self::Acquire
+                | Self::Release
+                | Self::AcquireRelease
+                | Self::SequentiallyConsistent
+        )
+    }
+
+    /// Returns true when the ordering is valid as a cmpxchg success ordering.
+    pub const fn is_cmpxchg_success_valid(self) -> bool {
+        self.is_rmw_valid()
+    }
+
+    /// Returns true when the ordering is valid as a cmpxchg failure ordering.
+    pub const fn is_cmpxchg_failure_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Monotonic | Self::Acquire | Self::SequentiallyConsistent
+        )
+    }
+
     /// Returns true when the operation is atomic.
     pub const fn is_atomic(self) -> bool {
         !matches!(self, Self::NotAtomic)
@@ -491,6 +516,129 @@ impl SyncScope {
         Some(match code {
             0 => Self::SingleThread,
             1 => Self::System,
+            _ => return None,
+        })
+    }
+}
+
+/// Operations supported by `atomicrmw`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomicRmwOp {
+    Xchg,
+    Add,
+    Sub,
+    And,
+    Nand,
+    Or,
+    Xor,
+    Max,
+    Min,
+    UMax,
+    UMin,
+    FAdd,
+    FSub,
+    FMax,
+    FMin,
+    UIncWrap,
+    UDecWrap,
+}
+
+impl AtomicRmwOp {
+    /// Returns the textual spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Xchg => "xchg",
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::And => "and",
+            Self::Nand => "nand",
+            Self::Or => "or",
+            Self::Xor => "xor",
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::UMax => "umax",
+            Self::UMin => "umin",
+            Self::FAdd => "fadd",
+            Self::FSub => "fsub",
+            Self::FMax => "fmax",
+            Self::FMin => "fmin",
+            Self::UIncWrap => "uinc_wrap",
+            Self::UDecWrap => "udec_wrap",
+        }
+    }
+
+    /// Returns true when the operation works on floating-point values.
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::FAdd | Self::FSub | Self::FMax | Self::FMin)
+    }
+
+    /// Parses an atomicrmw operation.
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "xchg" => Self::Xchg,
+            "add" => Self::Add,
+            "sub" => Self::Sub,
+            "and" => Self::And,
+            "nand" => Self::Nand,
+            "or" => Self::Or,
+            "xor" => Self::Xor,
+            "max" => Self::Max,
+            "min" => Self::Min,
+            "umax" => Self::UMax,
+            "umin" => Self::UMin,
+            "fadd" => Self::FAdd,
+            "fsub" => Self::FSub,
+            "fmax" => Self::FMax,
+            "fmin" => Self::FMin,
+            "uinc_wrap" => Self::UIncWrap,
+            "udec_wrap" => Self::UDecWrap,
+            _ => return None,
+        })
+    }
+
+    /// Returns the bitcode encoding.
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::Xchg => 0,
+            Self::Add => 1,
+            Self::Sub => 2,
+            Self::And => 3,
+            Self::Nand => 4,
+            Self::Or => 5,
+            Self::Xor => 6,
+            Self::Max => 7,
+            Self::Min => 8,
+            Self::UMax => 9,
+            Self::UMin => 10,
+            Self::FAdd => 11,
+            Self::FSub => 12,
+            Self::FMax => 13,
+            Self::FMin => 14,
+            Self::UIncWrap => 15,
+            Self::UDecWrap => 16,
+        }
+    }
+
+    /// Decodes a bitcode operation.
+    pub const fn from_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => Self::Xchg,
+            1 => Self::Add,
+            2 => Self::Sub,
+            3 => Self::And,
+            4 => Self::Nand,
+            5 => Self::Or,
+            6 => Self::Xor,
+            7 => Self::Max,
+            8 => Self::Min,
+            9 => Self::UMax,
+            10 => Self::UMin,
+            11 => Self::FAdd,
+            12 => Self::FSub,
+            13 => Self::FMax,
+            14 => Self::FMin,
+            15 => Self::UIncWrap,
+            16 => Self::UDecWrap,
             _ => return None,
         })
     }
@@ -559,6 +707,26 @@ pub enum InstKind {
         volatile: bool,
         ordering: AtomicOrdering,
         syncscope: SyncScope,
+    },
+    AtomicRmw {
+        op: AtomicRmwOp,
+        ptr: Operand,
+        value: Operand,
+        align: Option<u64>,
+        volatile: bool,
+        ordering: AtomicOrdering,
+        syncscope: SyncScope,
+    },
+    CmpXchg {
+        ptr: Operand,
+        cmp: Operand,
+        new: Operand,
+        align: Option<u64>,
+        volatile: bool,
+        success: AtomicOrdering,
+        failure: AtomicOrdering,
+        syncscope: SyncScope,
+        weak: bool,
     },
     Gep {
         inbounds: bool,

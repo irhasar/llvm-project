@@ -646,6 +646,15 @@ fn for_each_operand_mut(kind: &mut InstKind, mut visit: impl FnMut(&mut Operand)
             visit(value);
             visit(ptr);
         }
+        InstKind::AtomicRmw { ptr, value, .. } => {
+            visit(ptr);
+            visit(value);
+        }
+        InstKind::CmpXchg { ptr, cmp, new, .. } => {
+            visit(ptr);
+            visit(cmp);
+            visit(new);
+        }
         InstKind::Gep { ptr, .. } => visit(ptr),
         InstKind::Call { callee, args, .. } => {
             visit(callee);

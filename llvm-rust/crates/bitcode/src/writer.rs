@@ -83,6 +83,8 @@ const FUNC_INST_CALL: u32 = 34;
 const FUNC_INST_GEP: u32 = 43;
 const FUNC_INST_STORE: u32 = 44;
 const FUNC_INST_STOREATOMIC: u32 = 45;
+const FUNC_INST_CMPXCHG: u32 = 46;
+const FUNC_INST_ATOMICRMW: u32 = 59;
 const FUNC_INST_UNOP: u32 = 56;
 const FUNC_INST_EXTRACTELT: u32 = 6;
 const FUNC_INST_INSERTELT: u32 = 7;
@@ -1066,6 +1068,57 @@ impl<'a> Writer<'a> {
                     FUNC_INST_STORE
                 };
                 self.stream.emit_record(code, &operands);
+            }
+            InstKind::AtomicRmw {
+                op,
+                ptr,
+                value,
+                align,
+                volatile,
+                ordering,
+                syncscope,
+            } => {
+                if align.is_none() || !ordering.is_rmw_valid() {
+                    return Err(Error::bitcode("invalid atomicrmw"));
+                }
+                let mut operands = Operands::new();
+                self.push_value_and_type(&mut operands, ptr, inst_id)?;
+                self.push_value_and_type(&mut operands, value, inst_id)?;
+                operands.push(op.code());
+                operands.push(*volatile as u64);
+                operands.push(ordering.code());
+                operands.push(syncscope.code());
+                operands.push(encode_align(*align) as u64);
+                self.stream.emit_record(FUNC_INST_ATOMICRMW, &operands);
+            }
+            InstKind::CmpXchg {
+                ptr,
+                cmp,
+                new,
+                align,
+                volatile,
+                success,
+                failure,
+                syncscope,
+                weak,
+            } => {
+                if align.is_none()
+                    || !success.is_cmpxchg_success_valid()
+                    || !failure.is_cmpxchg_failure_valid()
+                {
+                    return Err(Error::bitcode("invalid cmpxchg"));
+                }
+                let mut operands = Operands::new();
+                self.push_value_and_type(&mut operands, ptr, inst_id)?;
+                self.push_value_and_type(&mut operands, cmp, inst_id)?;
+                self.push_value(&mut operands, new, inst_id)?;
+                operands.push(*volatile as u64);
+                operands.push(success.code());
+                operands.push(syncscope.code());
+                operands.push(failure.code());
+                operands.push(*weak as u64);
+                operands.push(encode_align(*align) as u64);
+                self.stream.emit_record(FUNC_INST_CMPXCHG, &operands);
             }
             InstKind::Gep {
                 inbounds,

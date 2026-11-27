@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use llvm_rust_ir::ty::INVALID_TYPE;
 use llvm_rust_ir::{
-    AtomicOrdering, Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath,
-    FcmpPred, FuncId, Function, Global, GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage,
-    Module, Operand, OperandKind, SyncScope, TailKind, ThreadLocal, Type, TypeId, Visibility,
+    AtomicOrdering, AtomicRmwOp, Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant,
+    FastMath, FcmpPred, FuncId, Function, Global, GlobalId, IcmpPred, InstId, InstKind, IntFlags,
+    Linkage, Module, Operand, OperandKind, SyncScope, TailKind, ThreadLocal, Type, TypeId,
+    Visibility,
 };
 use llvm_rust_support::{Error, FastHashMap, Result};
 
@@ -86,6 +87,8 @@ const FUNC_INST_CALL: u64 = 34;
 const FUNC_INST_GEP: u64 = 43;
 const FUNC_INST_STORE: u64 = 44;
 const FUNC_INST_STOREATOMIC: u64 = 45;
+const FUNC_INST_CMPXCHG: u64 = 46;
+const FUNC_INST_ATOMICRMW: u64 = 59;
 const FUNC_INST_UNOP: u64 = 56;
 const FUNC_INST_EXTRACTELT: u64 = 6;
 const FUNC_INST_INSERTELT: u64 = 7;
@@ -1344,6 +1347,97 @@ impl Reader {
         state: &mut FuncState,
     ) -> Result<(InstKind, Option<TypeId>)> {
         match code {
+            FUNC_INST_ATOMICRMW => {
+                let (ptr, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (value, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                if record.operands.len() != index + 5 {
+                    return Err(Error::bitcode("invalid atomicrmw record"));
+                }
+                let op = AtomicRmwOp::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("unsupported atomicrmw operation"))?;
+                index += 1;
+                let volatile = record.operands[index] != 0;
+                index += 1;
+                let ordering = AtomicOrdering::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("invalid atomicrmw ordering"))?;
+                index += 1;
+                let syncscope = SyncScope::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("unsupported atomicrmw syncscope"))?;
+                index += 1;
+                let align = decode_align(record.operands[index]);
+                if align.is_none() || !ordering.is_rmw_valid() {
+                    return Err(Error::bitcode("invalid atomicrmw"));
+                }
+                Ok((
+                    InstKind::AtomicRmw {
+                        op,
+                        ptr,
+                        value,
+                        align,
+                        volatile,
+                        ordering,
+                        syncscope,
+                    },
+                    Some(value.ty),
+                ))
+            }
+            FUNC_INST_CMPXCHG => {
+                let (ptr, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (cmp, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                let (mut new, next) = self.decode_value(record, index, inst_id, state)?;
+                index = next;
+                if new.ty == INVALID_TYPE {
+                    new.ty = cmp.ty;
+                    if let OperandKind::Local(id) = new.kind {
+                        self.module.functions[state.id].locals[id as usize].ty = cmp.ty;
+                    }
+                }
+                if record.operands.len() != index + 6 {
+                    return Err(Error::bitcode("invalid cmpxchg record"));
+                }
+                let volatile = record.operands[index] != 0;
+                index += 1;
+                let success = AtomicOrdering::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("invalid cmpxchg success ordering"))?;
+                index += 1;
+                let syncscope = SyncScope::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("unsupported cmpxchg syncscope"))?;
+                index += 1;
+                let failure = AtomicOrdering::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("invalid cmpxchg failure ordering"))?;
+                index += 1;
+                let weak = record.operands[index] != 0;
+                index += 1;
+                let align = decode_align(record.operands[index]);
+                if align.is_none()
+                    || !success.is_cmpxchg_success_valid()
+                    || !failure.is_cmpxchg_failure_valid()
+                {
+                    return Err(Error::bitcode("invalid cmpxchg"));
+                }
+                let i1 = self.module.types.int(1);
+                let result_ty = self.module.types.intern(Type::Struct {
+                    name: None,
+                    fields: vec![cmp.ty, i1],
+                    packed: false,
+                });
+                Ok((
+                    InstKind::CmpXchg {
+                        ptr,
+                        cmp,
+                        new,
+                        align,
+                        volatile,
+                        success,
+                        failure,
+                        syncscope,
+                        weak,
+                    },
+                    Some(result_ty),
+                ))
+            }
             FUNC_INST_GEP => {
                 let inbounds = record.operands.first().copied().unwrap_or(0) & 1 != 0;
                 let source_ty = self.type_at(record.operands[1])?;
@@ -2047,6 +2141,8 @@ mod tests {
             FUNC_INST_FREEZE,
             FUNC_INST_LOADATOMIC,
             FUNC_INST_STOREATOMIC,
+            FUNC_INST_ATOMICRMW,
+            FUNC_INST_CMPXCHG,
         ] {
             let record = Record {
                 code,
