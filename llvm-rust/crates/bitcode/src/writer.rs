@@ -85,6 +85,8 @@ const FUNC_INST_UNOP: u32 = 56;
 const FUNC_INST_EXTRACTELT: u32 = 6;
 const FUNC_INST_INSERTELT: u32 = 7;
 const FUNC_INST_SHUFFLEVEC: u32 = 8;
+const FUNC_INST_FENCE: u32 = 36;
+const FUNC_INST_FREEZE: u32 = 58;
 const FUNC_INST_EXTRACTVAL: u32 = 26;
 const FUNC_INST_INSERTVAL: u32 = 27;
 
@@ -1219,6 +1221,18 @@ impl<'a> Writer<'a> {
                 self.push_value(&mut operands, second, inst_id)?;
                 self.push_value(&mut operands, mask, inst_id)?;
                 self.stream.emit_record(FUNC_INST_SHUFFLEVEC, &operands);
+            }
+            InstKind::Freeze { value } => {
+                let mut operands = Operands::new();
+                self.push_value_and_type(&mut operands, value, inst_id)?;
+                self.stream.emit_record(FUNC_INST_FREEZE, &operands);
+            }
+            InstKind::Fence {
+                ordering,
+                syncscope,
+            } => {
+                self.stream
+                    .emit_record(FUNC_INST_FENCE, &[ordering.code(), syncscope.code()]);
             }
             InstKind::Unreachable => self.stream.emit_record(FUNC_INST_UNREACHABLE, &[]),
         }

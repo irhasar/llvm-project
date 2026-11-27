@@ -372,6 +372,109 @@ impl TailKind {
     }
 }
 
+/// Atomic ordering used by fences.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomicOrdering {
+    NotAtomic,
+    Unordered,
+    Monotonic,
+    Acquire,
+    Release,
+    AcquireRelease,
+    SequentiallyConsistent,
+}
+
+impl AtomicOrdering {
+    /// Returns the textual spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAtomic => "not_atomic",
+            Self::Unordered => "unordered",
+            Self::Monotonic => "monotonic",
+            Self::Acquire => "acquire",
+            Self::Release => "release",
+            Self::AcquireRelease => "acq_rel",
+            Self::SequentiallyConsistent => "seq_cst",
+        }
+    }
+
+    /// Parses an atomic ordering.
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "not_atomic" => Self::NotAtomic,
+            "unordered" => Self::Unordered,
+            "monotonic" => Self::Monotonic,
+            "acquire" => Self::Acquire,
+            "release" => Self::Release,
+            "acq_rel" => Self::AcquireRelease,
+            "seq_cst" => Self::SequentiallyConsistent,
+            _ => return None,
+        })
+    }
+
+    /// Returns the bitcode encoding.
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::NotAtomic => 0,
+            Self::Unordered => 1,
+            Self::Monotonic => 2,
+            Self::Acquire => 3,
+            Self::Release => 4,
+            Self::AcquireRelease => 5,
+            Self::SequentiallyConsistent => 6,
+        }
+    }
+
+    /// Decodes a bitcode ordering.
+    pub const fn from_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => Self::NotAtomic,
+            1 => Self::Unordered,
+            2 => Self::Monotonic,
+            3 => Self::Acquire,
+            4 => Self::Release,
+            5 => Self::AcquireRelease,
+            6 => Self::SequentiallyConsistent,
+            _ => return None,
+        })
+    }
+
+    /// Returns true when the ordering is valid on a fence.
+    pub const fn is_fence_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Acquire | Self::Release | Self::AcquireRelease | Self::SequentiallyConsistent
+        )
+    }
+}
+
+/// Synchronization scope used by fences.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SyncScope {
+    #[default]
+    System,
+    SingleThread,
+}
+
+impl SyncScope {
+    /// Returns the bitcode encoding.
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::SingleThread => 0,
+            Self::System => 1,
+        }
+    }
+
+    /// Decodes a bitcode synchronization scope.
+    pub const fn from_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => Self::SingleThread,
+            1 => Self::System,
+            _ => return None,
+        })
+    }
+}
+
 /// Raw attribute text. Track B preserves attribute spellings instead of
 /// reimplementing every LLVM attribute kind in the first slice.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -501,6 +604,13 @@ pub enum InstKind {
         first: Operand,
         second: Operand,
         mask: Operand,
+    },
+    Freeze {
+        value: Operand,
+    },
+    Fence {
+        ordering: AtomicOrdering,
+        syncscope: SyncScope,
     },
     Unreachable,
 }

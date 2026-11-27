@@ -704,6 +704,7 @@ fn for_each_operand_mut(kind: &mut InstKind, mut visit: impl FnMut(&mut Operand)
             visit(second);
             visit(mask);
         }
-        InstKind::Br { .. } | InstKind::Unreachable => {}
+        InstKind::Freeze { value } => visit(value),
+        InstKind::Fence { .. } | InstKind::Br { .. } | InstKind::Unreachable => {}
     }
 }

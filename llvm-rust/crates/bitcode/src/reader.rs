@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use llvm_rust_ir::ty::INVALID_TYPE;
 use llvm_rust_ir::{
-    Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath, FcmpPred, FuncId,
-    Function, Global, GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand,
-    OperandKind, TailKind, ThreadLocal, Type, TypeId, Visibility,
+    AtomicOrdering, Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath,
+    FcmpPred, FuncId, Function, Global, GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage,
+    Module, Operand, OperandKind, SyncScope, TailKind, ThreadLocal, Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, FastHashMap, Result};
 
@@ -88,6 +88,8 @@ const FUNC_INST_UNOP: u64 = 56;
 const FUNC_INST_EXTRACTELT: u64 = 6;
 const FUNC_INST_INSERTELT: u64 = 7;
 const FUNC_INST_SHUFFLEVEC: u64 = 8;
+const FUNC_INST_FENCE: u64 = 36;
+const FUNC_INST_FREEZE: u64 = 58;
 const FUNC_INST_EXTRACTVAL: u64 = 26;
 const FUNC_INST_INSERTVAL: u64 = 27;
 
@@ -1598,6 +1600,32 @@ impl Reader {
                     Some(result),
                 ))
             }
+            FUNC_INST_FREEZE => {
+                let (value, index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                if index != record.operands.len() {
+                    return Err(Error::bitcode("invalid freeze record"));
+                }
+                Ok((InstKind::Freeze { value }, Some(value.ty)))
+            }
+            FUNC_INST_FENCE => {
+                if record.operands.len() != 2 {
+                    return Err(Error::bitcode("invalid fence record"));
+                }
+                let ordering = AtomicOrdering::from_code(record.operands[0])
+                    .ok_or_else(|| Error::bitcode("invalid fence ordering"))?;
+                if !ordering.is_fence_valid() {
+                    return Err(Error::bitcode("invalid fence ordering"));
+                }
+                let syncscope = SyncScope::from_code(record.operands[1])
+                    .ok_or_else(|| Error::bitcode("unsupported fence syncscope"))?;
+                Ok((
+                    InstKind::Fence {
+                        ordering,
+                        syncscope,
+                    },
+                    None,
+                ))
+            }
             FUNC_INST_UNREACHABLE => Ok((InstKind::Unreachable, None)),
             other => Err(Error::bitcode(format!(
                 "unsupported instruction code {other}"
@@ -1948,6 +1976,7 @@ mod tests {
             FUNC_INST_EXTRACTELT,
             FUNC_INST_INSERTELT,
             FUNC_INST_SHUFFLEVEC,
+            FUNC_INST_FREEZE,
         ] {
             let record = Record {
                 code,
@@ -1971,5 +2000,15 @@ mod tests {
             .decode_aggregate_indices(&record, 1)
             .expect_err("empty aggregate path must fail");
         assert!(error.message.contains("at least one index"), "{error}");
+
+        let record = Record {
+            code: FUNC_INST_FENCE,
+            operands: Vec::new().into(),
+            blob: None,
+        };
+        let error = reader
+            .decode_instruction(&record, 1, &mut state)
+            .expect_err("short fence record must fail");
+        assert!(error.message.contains("invalid fence record"), "{error}");
     }
 }

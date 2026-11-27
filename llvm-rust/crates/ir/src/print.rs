@@ -599,6 +599,20 @@ fn write_instruction(
             out.push_str(", ");
             write_operand(module, function, *mask, out);
         }
+        InstKind::Freeze { value } => {
+            out.push_str("freeze ");
+            write_operand(module, function, *value, out);
+        }
+        InstKind::Fence {
+            ordering,
+            syncscope,
+        } => {
+            out.push_str("fence ");
+            if *syncscope == crate::inst::SyncScope::SingleThread {
+                out.push_str("syncscope(\"singlethread\") ");
+            }
+            out.push_str(ordering.as_str());
+        }
         InstKind::Unreachable => out.push_str("unreachable"),
     }
 }

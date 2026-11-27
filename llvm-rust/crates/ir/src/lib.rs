@@ -20,8 +20,8 @@ pub mod verify;
 pub use constant::{ConstId, ConstKind, Constant};
 pub use function::{Block, BlockId, FuncId, Function, Local, LocalId, Param};
 pub use inst::{
-    Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred, InstId, InstKind,
-    Instruction, IntFlags, TailKind, UnOp,
+    AtomicOrdering, Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred, InstId,
+    InstKind, Instruction, IntFlags, SyncScope, TailKind, UnOp,
 };
 pub use linkage::{Linkage, Visibility};
 pub use module::{Global, GlobalId, Module, ThreadLocal};

@@ -135,6 +135,10 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   level: floating-point vector binops decode as FP ops, vector comparisons
   return a vector of `i1`, and vector `select` conditions are vector `i1`.
   Keep textual, verifier, reader, and writer paths in agreement.
+- LLVM sync-scope IDs are `SingleThread = 0` and `System = 1`; a default
+  `fence` uses `System` and prints without a `syncscope(...)` prefix. Do not
+  write zero for the default, and reject unknown scope IDs instead of
+  silently changing their meaning.
 - Consume parser tokens with `take` when the current token is always advanced.
   Do not clone `TokenKind` in type or constant parsing; `CStr` payloads are
   heap vectors and cloning them is avoidable.

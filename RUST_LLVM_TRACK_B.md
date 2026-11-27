@@ -140,10 +140,11 @@ enum/integer/string attributes, and the legacy memory attributes. This is not
 an M2 parity claim: the upstream `llvm/test` suite is still not vendored. Type
 attributes (`byval`, `sret`, `elementtype`), aggregate/vector element
 extraction and insertion, vector integer and floating-point arithmetic,
-vector comparisons and `select`, and `shufflevector` are covered, including
-function-local aggregate constants and forward local element operands. The
-slice still does not cover metadata, constant expressions, atomics, or
-scalable-vector shuffles.
+vector comparisons and `select`, `shufflevector`, `freeze`, and `fence` with
+system and single-thread sync scopes are covered, including function-local
+aggregate constants and forward local element operands. The slice still does
+not cover metadata, constant expressions, atomic load/store,
+`atomicrmw`/`cmpxchg`, scalable-vector shuffles, or other fence sync scopes.
 
 ## Gates and kill criteria
 

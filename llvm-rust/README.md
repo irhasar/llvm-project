@@ -46,8 +46,9 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   TLS models, sections, function alignment, wide integers, and per-kind
   floating-point hex literals; binary/unary, vector arithmetic and vector
   comparisons, `icmp`/`fcmp`, `alloca`, `load`, `store`, `getelementptr`,
-  `call`, `phi`, vector `select`, `shufflevector`, casts, `ret`, `br`,
-  `condbr`, `switch`, `unreachable`. Unnamed values and blocks share one
+  `call`, `phi`, vector `select`, `shufflevector`, `freeze`, `fence` with
+  system and single-thread sync scopes, casts, `ret`, `br`, `condbr`,
+  `switch`, `unreachable`. Unnamed values and blocks share one
   numbering sequence, and `phi` accepts forward and self references.
   `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
   functions. Forward global/function constants and instruction operands are
@@ -121,9 +122,11 @@ rejected otherwise instead of being lossily rewritten.
 This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
-debug info, constant expressions, atomics, `invoke`/`landingpad`, scalable
-vector shuffles, or `fp128`/`x86_fp80`/`ppc_fp128` constants (wide float
-records are rejected). MC, object, X86, and codegen are still out of scope.
+debug info, constant expressions, atomic load/store, `atomicrmw`/`cmpxchg`,
+`invoke`/`landingpad`, scalable vector shuffles, fence sync scopes beyond
+system and single-thread, or `fp128`/`x86_fp80`/`ppc_fp128` constants (wide
+float records are rejected). MC, object, X86, and codegen are still out of
+scope.
 
 ## Commands
 
@@ -180,7 +183,7 @@ python3 tests/bench.py --runs 11 --warmup 3
 
 ## M1 results
 
-Differential harness: all 32 generic modules in `tests/corpus/` match the
+Differential harness: all 33 generic modules in `tests/corpus/` match the
 selected C++ oracle in both directions after normalizing `source_filename`,
 `ModuleID`, and target-memory spelling. The
 `tests/corpus/aarch64_memory.ll` fixture is checked separately against
@@ -209,8 +212,10 @@ value/block numbering, exact shift/divide flags, `phi` self references, and
 aggregate/vector element extraction and insertion (`extractvalue`,
 `insertvalue`, `extractelement`, and `insertelement`), vector integer and
 floating-point arithmetic, vector comparisons and `select`, `shufflevector`
-including shrinking masks and `undef` masks canonicalized to `poison`, and
-function-local aggregate constants and forward local element operands.
+including shrinking masks and `undef` masks canonicalized to `poison`,
+`freeze` on scalar, vector, and floating-point values, `fence` orderings, and
+`syncscope("singlethread")`, and function-local aggregate constants and
+forward local element operands.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that

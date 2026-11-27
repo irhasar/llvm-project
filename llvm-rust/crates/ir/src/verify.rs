@@ -476,6 +476,23 @@ fn verify_instruction(
                 None => errors.push(Error::verify("shufflevector first operand is not a vector")),
             }
         }
+        InstKind::Freeze { value } => {
+            check_operand(module, function, *value, errors, "freeze value");
+            if let Some(result_ty) = result_ty
+                && result_ty != value.ty
+            {
+                errors.push(Error::verify(
+                    "freeze result type does not match its operand",
+                ));
+            }
+        }
+        InstKind::Fence { ordering, .. } => {
+            if !ordering.is_fence_valid() {
+                errors.push(Error::verify(
+                    "fence ordering must be acquire, release, acq_rel, or seq_cst",
+                ));
+            }
+        }
         InstKind::Unreachable => {}
     }
 }

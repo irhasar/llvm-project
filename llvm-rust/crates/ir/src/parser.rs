@@ -13,8 +13,8 @@ use llvm_rust_support::{Error, FastHashMap, Result, Span, Symbol};
 use crate::constant::{ConstId, ConstKind, Constant};
 use crate::function::{BlockId, Function, LocalId};
 use crate::inst::{
-    Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred, InstKind, Instruction,
-    IntFlags, TailKind,
+    AtomicOrdering, Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred, InstKind,
+    Instruction, IntFlags, SyncScope, TailKind,
 };
 use crate::linkage::{Linkage, Visibility};
 use crate::module::{Global, Module, ThreadLocal};
@@ -2191,6 +2191,28 @@ impl<'a> Parser<'a> {
                     Some(result_ty),
                 ))
             }
+            "freeze" => {
+                self.advance();
+                let ty = self.parse_type()?;
+                let value = self.parse_value_forward(function, ty)?;
+                let ty = self.require_operand_type(value, ty, "freeze value")?;
+                Ok((InstKind::Freeze { value }, Some(ty)))
+            }
+            "fence" => {
+                self.advance();
+                let syncscope = self.parse_syncscope()?;
+                let ordering = self.parse_atomic_ordering()?;
+                if !ordering.is_fence_valid() {
+                    return Err(self.error("fence requires acquire, release, acq_rel, or seq_cst"));
+                }
+                Ok((
+                    InstKind::Fence {
+                        ordering,
+                        syncscope,
+                    },
+                    None,
+                ))
+            }
             "unreachable" => {
                 self.advance();
                 Ok((InstKind::Unreachable, None))
@@ -2250,6 +2272,26 @@ impl<'a> Parser<'a> {
             Some((len, scalable)) => self.module.types.vector(i1, len, scalable),
             None => i1,
         }
+    }
+
+    fn parse_syncscope(&mut self) -> Result<SyncScope> {
+        if !self.eat_ident("syncscope") {
+            return Ok(SyncScope::System);
+        }
+        self.expect_punct('(')?;
+        let name = self.expect_string()?;
+        self.expect_punct(')')?;
+        match name.as_str() {
+            "system" => Ok(SyncScope::System),
+            "singlethread" => Ok(SyncScope::SingleThread),
+            _ => Err(self.error(format!("unsupported syncscope `{name}`"))),
+        }
+    }
+
+    fn parse_atomic_ordering(&mut self) -> Result<AtomicOrdering> {
+        let text = self.expect_ident()?;
+        AtomicOrdering::parse(&text)
+            .ok_or_else(|| self.error(format!("unknown atomic ordering `{text}`")))
     }
 
     fn resolved_operand_type(&mut self, operand: Operand) -> TypeId {
