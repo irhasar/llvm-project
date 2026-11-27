@@ -366,7 +366,7 @@ use LLVM's C-locale ASCII helpers; the differential runs in the C locale. The
 wrapper also supplies a weak `rust_eh_personality` for debug-assertion
 archives.
 The crate uses `PRUNE_ARCHIVE` and `STRIP_DEBUG`, so the staged archive is
-1,900 bytes. The archive is installed with `LLVMSupport`, and
+2,764 bytes. The archive is installed with `LLVMSupport`, and
 `llvm-config --system-libs support` emits `-lllvm_stringextras`.
 
 ```sh
@@ -386,14 +386,20 @@ random strings; `test/stable.cpp` is built with the option on and off.
 `CARGO_ENCODED_RUSTFLAGS`, so Cargo cannot ignore the checks. Its staging uses
 the normal build/content/staged stamp scripts, so Make does not repeat staging
 after a byte-identical Cargo rebuild. Five pinned runs
-on this Zen 4 host: camel-to-snake is 1.33x faster (96.44 ns -> 72.36 ns),
-snake-to-camel is 1.10x faster (26.65 ns -> 24.31 ns). The Rust stable binary
-is 17,424 bytes versus 1,558,560 bytes for the C++ fallback (-1,541,136
-bytes); the staged archive is 1,900 bytes. The option-off object and stable
+on this Zen 4 host: camel-to-snake is 3.02x faster (95.11 ns -> 31.47 ns),
+snake-to-camel is 1.50x faster (26.51 ns -> 17.66 ns). The Rust stable binary
+is 17,920 bytes versus 1,558,560 bytes for the C++ fallback (-1,540,640
+bytes); the staged archive is 2,764 bytes. The option-off object and stable
 binary are byte-identical to the baseline. The compile rows include the
 `StringExtras.cpp` object that is still built with Rust on; the actual
-incremental Ninja build is 842 ms for Rust versus 880 ms for C++ (0.96x), and
-peak RSS is 113.94 MiB versus 116.23 MiB (-2.0%). The option stays opt-in.
+incremental Ninja build is 860 ms for Rust versus 880 ms for C++ (0.98x), and
+peak RSS is 113.8 MiB versus 116.23 MiB (-2.1%). The option stays opt-in.
+
+The Rust snake loop uses a packed lower-case/class table, a rolling three-byte
+window, an unchecked interior loop, and a branchless underscore store. The
+wrapper writes short snake results into a stack buffer instead of zero-filling
+a `2 * size` string, and handles underscore-free camel input without a Rust
+call. Both wrappers use branchless ASCII upper-casing.
 
 ## Demangler port
 
