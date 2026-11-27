@@ -6,7 +6,7 @@
 
 use core::fmt;
 use core::fmt::Write as _;
-use std::collections::HashMap;
+use llvm_rust_support::FastHashMap;
 use std::rc::Rc;
 
 use crate::names::write_name;
@@ -160,7 +160,7 @@ pub struct TypeTable {
     types: Vec<Type>,
     defined: Vec<bool>,
     opaque: Vec<bool>,
-    map: HashMap<TypeKey, TypeId>,
+    map: FastHashMap<TypeKey, TypeId>,
 }
 
 impl TypeTable {

@@ -7,13 +7,23 @@ use crate::function::{BlockId, FuncId, Function};
 use crate::inst::{Attribute, FastMath, InstKind, Instruction, IntFlags};
 use crate::linkage::{Linkage, Visibility};
 use crate::module::{Global, GlobalId, Module};
-use crate::names::{quote_bytes, quote_name};
+use crate::names::{quote_bytes, quote_name, write_name};
 use crate::ty::{FloatKind, Type, TypeId};
 use crate::value::{Operand, OperandKind};
 
 /// Prints a module in canonical textual form.
 pub fn print_module(module: &Module) -> String {
-    let mut out = String::new();
+    let instruction_count: usize = module
+        .functions
+        .iter()
+        .map(|(_, function)| function.insts.len())
+        .sum();
+    let mut out = String::with_capacity(
+        instruction_count.saturating_mul(48)
+            + module.globals.len().saturating_mul(64)
+            + module.named_types.len().saturating_mul(32)
+            + 4096,
+    );
     if let Some(value) = &module.source_filename {
         let _ = writeln!(out, "source_filename = {}", quote_bytes(value.as_bytes()));
     }
@@ -195,7 +205,8 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
             let _ = write!(out, " {attr}");
         }
         if let Some(name) = param.name {
-            let _ = write!(out, " %{}", quote_name(module.name(name)));
+            out.push_str(" %");
+            let _ = write_name(out, module.name(name));
         }
     }
     if varargs {
@@ -223,7 +234,8 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
     out.push_str(" {\n");
     for (block_id, block) in function.blocks_in_order() {
         let label = block.name.map(|name| module.name(name)).unwrap_or("0");
-        let _ = writeln!(out, "{}:", quote_name(label));
+        let _ = write_name(out, label);
+        out.push_str(":\n");
         for &inst_id in &block.insts {
             out.push_str("  ");
             let inst = &function.insts[inst_id];
@@ -232,7 +244,9 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
                     .local_name(result)
                     .map(|name| module.name(name))
                     .unwrap_or("0");
-                let _ = write!(out, "%{} = ", quote_name(name));
+                out.push('%');
+                let _ = write_name(out, name);
+                out.push_str(" = ");
             }
             write_instruction(module, function, inst, block_id, out);
             out.push('\n');
@@ -424,7 +438,9 @@ fn write_instruction(
                     .name
                     .map(|name| module.name(name))
                     .unwrap_or("0");
-                let _ = write!(out, ", %{} ]", quote_name(label));
+                out.push_str(", %");
+                let _ = write_name(out, label);
+                out.push_str(" ]");
             }
         }
         InstKind::Select {
@@ -462,7 +478,8 @@ fn write_instruction(
                 .name
                 .map(|name| module.name(name))
                 .unwrap_or("0");
-            let _ = write!(out, "br label %{}", quote_name(label));
+            out.push_str("br label %");
+            let _ = write_name(out, label);
         }
         InstKind::CondBr {
             cond,
@@ -484,12 +501,10 @@ fn write_instruction(
                 .name
                 .map(|name| module.name(name))
                 .unwrap_or("0");
-            let _ = write!(
-                out,
-                "label %{}, label %{}",
-                quote_name(then_label),
-                quote_name(else_label)
-            );
+            out.push_str("label %");
+            let _ = write_name(out, then_label);
+            out.push_str(", label %");
+            let _ = write_name(out, else_label);
         }
         InstKind::Switch {
             value,
@@ -504,7 +519,9 @@ fn write_instruction(
                 .name
                 .map(|name| module.name(name))
                 .unwrap_or("0");
-            let _ = write!(out, ", label %{} [", quote_name(default_label));
+            out.push_str(", label %");
+            let _ = write_name(out, default_label);
+            out.push_str(" [");
             if !cases.is_empty() {
                 out.push(' ');
             }
@@ -521,7 +538,8 @@ fn write_instruction(
                     .name
                     .map(|name| module.name(name))
                     .unwrap_or("0");
-                let _ = write!(out, ", label %{}", quote_name(label));
+                out.push_str(", label %");
+                let _ = write_name(out, label);
             }
             if !cases.is_empty() {
                 out.push(' ');
@@ -583,7 +601,8 @@ fn write_callee(module: &Module, function: &Function, operand: Operand, out: &mu
                 .local_name(id)
                 .map(|name| module.name(name))
                 .unwrap_or("0");
-            let _ = write!(out, "%{}", quote_name(name));
+            out.push('%');
+            let _ = write_name(out, name);
         }
         OperandKind::Const(id) => write_constant(module, id, out),
     }
@@ -601,7 +620,8 @@ fn write_value(module: &Module, function: &Function, operand: Operand, out: &mut
                 .local_name(id)
                 .map(|name| module.name(name))
                 .unwrap_or("0");
-            let _ = write!(out, "%{}", quote_name(name));
+            out.push('%');
+            let _ = write_name(out, name);
         }
         OperandKind::Const(id) => write_constant(module, id, out),
         OperandKind::Global(id) => {

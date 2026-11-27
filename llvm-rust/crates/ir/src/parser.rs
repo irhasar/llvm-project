@@ -5,10 +5,10 @@
 //! and raw attribute spellings. Metadata is accepted and skipped; MC, debug
 //! info, and constant expressions are later milestones.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
 use std::sync::Arc;
 
-use llvm_rust_support::{Error, Result, Span, Symbol};
+use llvm_rust_support::{Error, FastHashMap, Result, Span, Symbol};
 
 use crate::constant::{ConstId, ConstKind, Constant};
 use crate::function::{BlockId, Function, LocalId};
@@ -37,14 +37,14 @@ pub fn parse_module(source: &str) -> core::result::Result<Module, ParseError> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum TokenKind {
-    Local(String),
-    Global(String),
-    Meta(String),
+enum TokenKind<'a> {
+    Local(Cow<'a, str>),
+    Global(Cow<'a, str>),
+    Meta(Cow<'a, str>),
     AttrGroup(u32),
-    Ident(String),
+    Ident(Cow<'a, str>),
     Int(u128),
-    Float(String),
+    Float(Cow<'a, str>),
     Str(Vec<u8>),
     CStr(Vec<u8>),
     Punct(char),
@@ -54,8 +54,8 @@ enum TokenKind {
 }
 
 #[derive(Clone, Debug)]
-struct Token {
-    kind: TokenKind,
+struct Token<'a> {
+    kind: TokenKind<'a>,
     span: Span,
     quoted: bool,
 }
@@ -64,7 +64,7 @@ struct Lexer<'a> {
     source: &'a str,
     bytes: &'a [u8],
     pos: usize,
-    tokens: Vec<Token>,
+    tokens: Vec<Token<'a>>,
 }
 
 impl<'a> Lexer<'a> {
@@ -73,11 +73,11 @@ impl<'a> Lexer<'a> {
             source,
             bytes: source.as_bytes(),
             pos: 0,
-            tokens: Vec::new(),
+            tokens: Vec::with_capacity(source.len() / 8),
         }
     }
 
-    fn tokenize(mut self) -> Result<Vec<Token>> {
+    fn tokenize(mut self) -> Result<Vec<Token<'a>>> {
         while self.pos < self.bytes.len() {
             let start = self.pos;
             let byte = self.bytes[self.pos];
@@ -145,7 +145,7 @@ impl<'a> Lexer<'a> {
                 }
                 b'0'..=b'9' => self.read_number(start)?,
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' | b'.' | b'-' => {
-                    let ident = self.read_while(is_ident_char);
+                    let ident = Cow::Borrowed(self.read_while(is_ident_char));
                     self.push(TokenKind::Ident(ident), start);
                 }
                 _ => {
@@ -161,7 +161,7 @@ impl<'a> Lexer<'a> {
         Ok(self.tokens)
     }
 
-    fn push(&mut self, kind: TokenKind, start: usize) {
+    fn push(&mut self, kind: TokenKind<'a>, start: usize) {
         let quoted = matches!(kind, TokenKind::Global(_) | TokenKind::Local(_))
             && self.bytes.get(start + 1) == Some(&b'"');
         self.tokens.push(Token {
@@ -179,18 +179,18 @@ impl<'a> Lexer<'a> {
         self.bytes.get(self.pos + offset).copied()
     }
 
-    fn read_while(&mut self, predicate: impl Fn(u8) -> bool) -> String {
+    fn read_while(&mut self, predicate: impl Fn(u8) -> bool) -> &'a str {
         let start = self.pos;
         while self.pos < self.bytes.len() && predicate(self.bytes[self.pos]) {
             self.pos += 1;
         }
-        self.source[start..self.pos].to_string()
+        &self.source[start..self.pos]
     }
 
-    fn read_sigil_name(&mut self, start: usize) -> Result<String> {
+    fn read_sigil_name(&mut self, start: usize) -> Result<Cow<'a, str>> {
         if self.peek_byte() == Some(b'"') {
             let bytes = self.read_quoted(start)?;
-            return String::from_utf8(bytes).map_err(|_| {
+            return String::from_utf8(bytes).map(Cow::Owned).map_err(|_| {
                 Error::parse_at("name is not valid UTF-8", Span::new(start, self.pos))
             });
         }
@@ -201,7 +201,7 @@ impl<'a> Lexer<'a> {
                 Span::new(start, self.pos),
             ));
         }
-        Ok(name)
+        Ok(Cow::Borrowed(name))
     }
 
     fn read_quoted(&mut self, start: usize) -> Result<Vec<u8>> {
@@ -262,10 +262,10 @@ impl<'a> Lexer<'a> {
                     | b'!'
             )
         });
-        let kind = if is_float_literal(&text) {
-            TokenKind::Float(text)
+        let kind = if is_float_literal(text) {
+            TokenKind::Float(Cow::Borrowed(text))
         } else {
-            let value = parse_int_literal(&text).ok_or_else(|| {
+            let value = parse_int_literal(text).ok_or_else(|| {
                 Error::parse_at(
                     format!("invalid integer literal `{text}`"),
                     Span::new(start, self.pos),
@@ -510,15 +510,15 @@ fn normalize_group_attribute(attr: Attribute) -> Attribute {
     Attribute(text)
 }
 
-fn token_text(kind: &TokenKind) -> String {
+fn token_text(kind: &TokenKind<'_>) -> String {
     match kind {
         TokenKind::Local(name) => format!("%{name}"),
         TokenKind::Global(name) => format!("@{name}"),
         TokenKind::Meta(name) => format!("!{name}"),
         TokenKind::AttrGroup(value) => format!("#{value}"),
-        TokenKind::Ident(text) => text.clone(),
+        TokenKind::Ident(text) => text.to_string(),
         TokenKind::Int(value) => value.to_string(),
-        TokenKind::Float(text) => text.clone(),
+        TokenKind::Float(text) => text.to_string(),
         TokenKind::Str(bytes) => quote_bytes(bytes),
         TokenKind::CStr(bytes) => format!("c{}", quote_bytes(bytes)),
         TokenKind::Punct(ch) => ch.to_string(),
@@ -626,26 +626,26 @@ fn is_attr_keyword(text: &str) -> bool {
 
 struct Parser<'a> {
     _source: &'a str,
-    tokens: Vec<Token>,
+    tokens: Vec<Token<'a>>,
     pos: usize,
     module: Module,
-    local_names: HashMap<Symbol, LocalId>,
+    local_names: FastHashMap<Symbol, LocalId>,
     next_value: u32,
     next_unnamed: u64,
-    unnamed_symbols: HashMap<u32, Symbol>,
+    unnamed_symbols: FastHashMap<u32, Symbol>,
 }
 
 impl<'a> Parser<'a> {
-    fn new(source: &'a str, tokens: Vec<Token>) -> Self {
+    fn new(source: &'a str, tokens: Vec<Token<'a>>) -> Self {
         Self {
             _source: source,
             tokens,
             pos: 0,
             module: Module::new(),
-            local_names: HashMap::new(),
+            local_names: FastHashMap::with_capacity_and_hasher(64, Default::default()),
             next_value: 0,
             next_unnamed: 0,
-            unnamed_symbols: HashMap::new(),
+            unnamed_symbols: FastHashMap::default(),
         }
     }
 
@@ -656,7 +656,7 @@ impl<'a> Parser<'a> {
                 return Ok(());
             }
             match self.peek_kind().clone() {
-                TokenKind::Ident(text) => match text.as_str() {
+                TokenKind::Ident(text) => match &*text {
                     "source_filename" => {
                         self.advance();
                         self.expect_punct('=')?;
@@ -795,9 +795,9 @@ impl<'a> Parser<'a> {
                 self.advance();
                 continue;
             }
-            match text.as_str() {
+            match &*text {
                 "dso_local" | "dso_preemptable" => {
-                    dso_local = text == "dso_local";
+                    dso_local = &*text == "dso_local";
                     self.advance();
                 }
                 "thread_local" => {
@@ -937,9 +937,9 @@ impl<'a> Parser<'a> {
                 self.advance();
                 continue;
             }
-            match text.as_str() {
+            match &*text {
                 "dso_local" | "dso_preemptable" => {
-                    dso_local = text == "dso_local";
+                    dso_local = &*text == "dso_local";
                     self.advance();
                 }
                 "unnamed_addr" => {
@@ -1101,7 +1101,7 @@ impl<'a> Parser<'a> {
                     if is_attr_keyword(&text) {
                         attrs.push(self.parse_attribute()?);
                     } else {
-                        match text.as_str() {
+                        match &*text {
                             "section" | "gc" | "prefix" | "prologue" | "personality" => {
                                 let value = self.expect_string()?;
                                 attrs.push(Attribute(format!(
@@ -1114,7 +1114,7 @@ impl<'a> Parser<'a> {
                                 attrs.push(Attribute(format!("align {value}")));
                             }
                             "unnamed_addr" | "local_unnamed_addr" => {
-                                attrs.push(Attribute(text.clone()));
+                                attrs.push(Attribute(text.to_string()));
                                 self.advance();
                             }
                             "comdat" => {
@@ -1236,7 +1236,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn local_symbol(&mut self, name: Option<String>) -> Result<Symbol> {
+    fn local_symbol(&mut self, name: Option<Cow<'a, str>>) -> Result<Symbol> {
         match name {
             Some(name) => {
                 if let Ok(value) = name.parse::<u32>() {
@@ -1334,15 +1334,16 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_label_name(&mut self) -> Result<Symbol> {
-        let name = match self.peek_kind().clone() {
+        let token = self.take();
+        let name = match token.kind {
             TokenKind::Ident(name) | TokenKind::Local(name) => name,
-            TokenKind::Int(value) => value.to_string(),
-            TokenKind::Str(bytes) => {
-                String::from_utf8(bytes).map_err(|_| self.error("label is not valid UTF-8"))?
-            }
-            _ => return Err(self.error("expected a basic block label")),
+            TokenKind::Int(value) => Cow::Owned(value.to_string()),
+            TokenKind::Str(bytes) => Cow::Owned(
+                String::from_utf8(bytes)
+                    .map_err(|_| Error::parse_at("label is not valid UTF-8", token.span))?,
+            ),
+            _ => return Err(Error::parse_at("expected a basic block label", token.span)),
         };
-        self.advance();
         self.expect_punct(':')?;
         if let Ok(value) = name.parse::<u32>() {
             self.next_value = self.next_value.max(value.saturating_add(1));
@@ -1369,7 +1370,7 @@ impl<'a> Parser<'a> {
         let base = match self.peek_kind().clone() {
             TokenKind::Ident(text) => {
                 self.advance();
-                match text.as_str() {
+                match &*text {
                     "void" => self.module.types.void(),
                     "label" => self.module.types.intern(Type::Label),
                     "token" => self.module.types.intern(Type::Token),
@@ -1530,9 +1531,10 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Meta(name) => {
                 self.advance();
-                Ok(self
-                    .module
-                    .add_constant(Constant::new(ty, ConstKind::MetadataString(name))))
+                Ok(self.module.add_constant(Constant::new(
+                    ty,
+                    ConstKind::MetadataString(name.into_owned()),
+                )))
             }
             TokenKind::Global(name) => {
                 let span = self.peek().span;
@@ -1550,7 +1552,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(text) => {
                 self.advance();
-                let kind = match text.as_str() {
+                let kind = match &*text {
                     "true" => ConstKind::Int(1),
                     "false" => ConstKind::Int(0),
                     "null" => ConstKind::Null,
@@ -1643,95 +1645,91 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_value(&mut self, function: &mut Function, ty: TypeId) -> Result<Operand> {
-        match self.peek_kind().clone() {
-            TokenKind::Local(name) => {
-                self.advance();
-                let symbol = self.module.intern(&name);
-                let local = *self
-                    .local_names
-                    .get(&symbol)
-                    .ok_or_else(|| self.error(format!("use of undefined local value %{name}")))?;
-                Ok(Operand::local(function.local_type(local), local))
-            }
-            TokenKind::Global(name) => {
-                let span = self.peek().span;
-                let quoted = self.peek().quoted;
-                self.advance();
-                let symbol = self.reference_symbol(&name, quoted, span)?;
-                if let Some(id) = self.module.function_named(symbol) {
-                    Ok(Operand::function(ty, id))
-                } else {
-                    let id = self.module.global_or_insert(symbol);
-                    Ok(Operand::global(ty, id))
-                }
-            }
-            _ => {
-                let id = self.parse_constant(ty)?;
-                Ok(Operand::constant(ty, id))
-            }
+        if matches!(self.peek_kind(), TokenKind::Local(_)) {
+            let (name, _) = self.expect_local()?;
+            let symbol = self.module.intern(&name);
+            let local = *self
+                .local_names
+                .get(&symbol)
+                .ok_or_else(|| self.error(format!("use of undefined local value %{name}")))?;
+            return Ok(Operand::local(function.local_type(local), local));
         }
+        if matches!(self.peek_kind(), TokenKind::Global(_)) {
+            let (name, span, quoted) = self.expect_global()?;
+            let symbol = self.reference_symbol(&name, quoted, span)?;
+            return Ok(if let Some(id) = self.module.function_named(symbol) {
+                Operand::function(ty, id)
+            } else {
+                let id = self.module.global_or_insert(symbol);
+                Operand::global(ty, id)
+            });
+        }
+        let id = self.parse_constant(ty)?;
+        Ok(Operand::constant(ty, id))
     }
 
     fn parse_value_forward(&mut self, function: &mut Function, ty: TypeId) -> Result<Operand> {
-        match self.peek_kind().clone() {
-            TokenKind::Local(name) => {
-                self.advance();
-                let symbol = self.module.intern(&name);
-                let local = match self.local_names.get(&symbol).copied() {
-                    Some(local) => local,
-                    None => {
-                        let local = function.forward_local(symbol, ty);
-                        self.local_names.insert(symbol, local);
-                        local
-                    }
-                };
-                if function.local_type(local) == INVALID_TYPE {
-                    function.locals[local as usize].ty = ty;
+        if matches!(self.peek_kind(), TokenKind::Local(_)) {
+            let (name, _) = self.expect_local()?;
+            let symbol = self.module.intern(&name);
+            let local = match self.local_names.get(&symbol).copied() {
+                Some(local) => local,
+                None => {
+                    let local = function.forward_local(symbol, ty);
+                    self.local_names.insert(symbol, local);
+                    local
                 }
-                Ok(Operand::local(function.local_type(local), local))
+            };
+            if function.local_type(local) == INVALID_TYPE {
+                function.locals[local as usize].ty = ty;
             }
-            _ => self.parse_value(function, ty),
+            return Ok(Operand::local(function.local_type(local), local));
         }
+        self.parse_value(function, ty)
     }
 
     fn parse_phi_value(&mut self, function: &mut Function, ty: TypeId) -> Result<Operand> {
-        match self.peek_kind().clone() {
-            TokenKind::Local(name) => {
-                self.advance();
-                let symbol = self.module.intern(&name);
-                let local = match self.local_names.get(&symbol).copied() {
-                    Some(local) => local,
-                    None => {
-                        let local = function.forward_local(symbol, ty);
-                        self.local_names.insert(symbol, local);
-                        local
-                    }
-                };
-                Ok(Operand::local(function.local_type(local), local))
-            }
-            _ => self.parse_value(function, ty),
+        if matches!(self.peek_kind(), TokenKind::Local(_)) {
+            let (name, _) = self.expect_local()?;
+            let symbol = self.module.intern(&name);
+            let local = match self.local_names.get(&symbol).copied() {
+                Some(local) => local,
+                None => {
+                    let local = function.forward_local(symbol, ty);
+                    self.local_names.insert(symbol, local);
+                    local
+                }
+            };
+            return Ok(Operand::local(function.local_type(local), local));
         }
+        self.parse_value(function, ty)
     }
 
     fn parse_phi_block(&mut self, function: &mut Function) -> Result<BlockId> {
-        let name = match self.peek_kind().clone() {
-            TokenKind::Local(name) => name,
-            TokenKind::Int(value) => value.to_string(),
-            _ => return Err(self.error("expected a phi predecessor block")),
+        let name = if matches!(self.peek_kind(), TokenKind::Local(_)) {
+            self.expect_local()?.0
+        } else if let TokenKind::Int(value) = self.peek_kind() {
+            let name = Cow::Owned(value.to_string());
+            self.advance();
+            name
+        } else {
+            return Err(self.error("expected a phi predecessor block"));
         };
-        self.advance();
         let symbol = self.module.intern(&name);
         Ok(function.block_or_insert(symbol))
     }
 
     fn parse_block_ref(&mut self, function: &mut Function) -> Result<BlockId> {
         self.expect_ident_is("label")?;
-        let name = match self.peek_kind().clone() {
-            TokenKind::Local(name) => name,
-            TokenKind::Int(value) => value.to_string(),
-            _ => return Err(self.error("expected a basic block reference")),
+        let name = if matches!(self.peek_kind(), TokenKind::Local(_)) {
+            self.expect_local()?.0
+        } else if let TokenKind::Int(value) = self.peek_kind() {
+            let name = Cow::Owned(value.to_string());
+            self.advance();
+            name
+        } else {
+            return Err(self.error("expected a basic block reference"));
         };
-        self.advance();
         let symbol = self.module.intern(&name);
         Ok(function.block_or_insert(symbol))
     }
@@ -1752,8 +1750,8 @@ impl<'a> Parser<'a> {
                     Ok(Operand::function(INVALID_TYPE, id))
                 }
             }
-            TokenKind::Local(name) => {
-                self.advance();
+            TokenKind::Local(_) => {
+                let (name, _) = self.expect_local()?;
                 let symbol = self.module.intern(&name);
                 let local = match self.local_names.get(&symbol).copied() {
                     Some(local) => local,
@@ -1786,15 +1784,15 @@ impl<'a> Parser<'a> {
             } else {
                 loop {
                     match self.peek_kind() {
-                        TokenKind::Ident(text) if text == "nsw" => {
+                        TokenKind::Ident(text) if &**text == "nsw" => {
                             flags.nsw = true;
                             self.advance();
                         }
-                        TokenKind::Ident(text) if text == "nuw" => {
+                        TokenKind::Ident(text) if &**text == "nuw" => {
                             flags.nuw = true;
                             self.advance();
                         }
-                        TokenKind::Ident(text) if text == "exact" => {
+                        TokenKind::Ident(text) if &**text == "exact" => {
                             flags.exact = true;
                             self.advance();
                         }
@@ -1817,7 +1815,7 @@ impl<'a> Parser<'a> {
                 Some(ty),
             ));
         }
-        match mnemonic.as_str() {
+        match &*mnemonic {
             "fneg" => {
                 self.advance();
                 let flags = self.parse_fastmath()?;
@@ -1948,7 +1946,7 @@ impl<'a> Parser<'a> {
             }
             "call" => self.parse_call(function, TailKind::None),
             "tail" | "musttail" | "notail" => {
-                let tail = match mnemonic.as_str() {
+                let tail = match &*mnemonic {
                     "tail" => TailKind::Tail,
                     "musttail" => TailKind::MustTail,
                     _ => TailKind::NoTail,
@@ -2221,15 +2219,15 @@ impl<'a> Parser<'a> {
         let fastmath = self.parse_fastmath()?;
         let mut attrs = Vec::new();
         if let TokenKind::Ident(text) = self.peek_kind() {
-            if text == "cc" {
+            if &**text == "cc" {
                 self.advance();
                 let value = self.expect_int()?;
                 attrs.push(Attribute(format!("cc {value}")));
             } else if matches!(
-                text.as_str(),
+                &**text,
                 "fastcc" | "coldcc" | "swiftcc" | "tailcc" | "preserve_mostcc" | "preserve_allcc"
             ) {
-                attrs.push(Attribute(text.clone()));
+                attrs.push(Attribute(text.to_string()));
                 self.advance();
             }
         }
@@ -2342,15 +2340,15 @@ impl<'a> Parser<'a> {
         Ok(Some(self.expect_int()? as u64))
     }
 
-    fn peek(&self) -> &Token {
+    fn peek(&self) -> &Token<'a> {
         &self.tokens[self.pos]
     }
 
-    fn peek_kind(&self) -> &TokenKind {
+    fn peek_kind(&self) -> &TokenKind<'a> {
         &self.tokens[self.pos].kind
     }
 
-    fn peek_kind_at(&self, offset: usize) -> &TokenKind {
+    fn peek_kind_at(&self, offset: usize) -> &TokenKind<'a> {
         self.tokens
             .get(self.pos + offset)
             .map(|token| &token.kind)
@@ -2363,8 +2361,16 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn take(&mut self) -> Token {
-        let token = self.tokens[self.pos].clone();
+    fn take(&mut self) -> Token<'a> {
+        let span = self.peek().span;
+        let token = core::mem::replace(
+            &mut self.tokens[self.pos],
+            Token {
+                kind: TokenKind::Eof,
+                span,
+                quoted: false,
+            },
+        );
         self.advance();
         token
     }
@@ -2382,7 +2388,7 @@ impl<'a> Parser<'a> {
     }
 
     fn at_ident(&self, text: &str) -> bool {
-        matches!(self.peek_kind(), TokenKind::Ident(found) if found == text)
+        matches!(self.peek_kind(), TokenKind::Ident(found) if &**found == text)
     }
 
     fn eat_punct(&mut self, ch: char) -> bool {
@@ -2421,12 +2427,13 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_ident(&mut self) -> Result<String> {
-        match self.peek_kind().clone() {
-            TokenKind::Ident(text) => {
-                self.advance();
-                Ok(text)
-            }
-            other => Err(self.error(format!("expected an identifier, found {other:?}"))),
+        let token = self.take();
+        match token.kind {
+            TokenKind::Ident(text) => Ok(text.into_owned()),
+            other => Err(Error::parse_at(
+                format!("expected an identifier, found {other:?}"),
+                token.span,
+            )),
         }
     }
 
@@ -2439,14 +2446,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn expect_local(&mut self) -> Result<(String, Span)> {
-        match self.peek_kind().clone() {
-            TokenKind::Local(name) => {
-                let span = self.peek().span;
-                self.advance();
-                Ok((name, span))
-            }
-            other => Err(self.error(format!("expected a local name, found {other:?}"))),
+    fn expect_local(&mut self) -> Result<(Cow<'a, str>, Span)> {
+        let token = self.take();
+        match token.kind {
+            TokenKind::Local(name) => Ok((name, token.span)),
+            other => Err(Error::parse_at(
+                format!("expected a local name, found {other:?}"),
+                token.span,
+            )),
         }
     }
 
@@ -2507,15 +2514,14 @@ impl<'a> Parser<'a> {
         symbol
     }
 
-    fn expect_global(&mut self) -> Result<(String, Span, bool)> {
-        match self.peek_kind().clone() {
-            TokenKind::Global(name) => {
-                let span = self.peek().span;
-                let quoted = self.peek().quoted;
-                self.advance();
-                Ok((name, span, quoted))
-            }
-            other => Err(self.error(format!("expected a global name, found {other:?}"))),
+    fn expect_global(&mut self) -> Result<(Cow<'a, str>, Span, bool)> {
+        let token = self.take();
+        match token.kind {
+            TokenKind::Global(name) => Ok((name, token.span, token.quoted)),
+            other => Err(Error::parse_at(
+                format!("expected a global name, found {other:?}"),
+                token.span,
+            )),
         }
     }
 
@@ -2588,7 +2594,10 @@ mod tests {
         let tokens = Lexer::new("attributes #0 = { nounwind }\n")
             .tokenize()
             .expect("lex");
-        assert_eq!(tokens[0].kind, TokenKind::Ident("attributes".to_string()));
+        assert_eq!(
+            tokens[0].kind,
+            TokenKind::Ident(Cow::Borrowed("attributes"))
+        );
         assert_eq!(tokens[1].kind, TokenKind::AttrGroup(0));
     }
 

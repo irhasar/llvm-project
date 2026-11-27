@@ -58,5 +58,8 @@ fn run() -> Result<()> {
         Some("-") | None => io::stdout().write_all(text.as_bytes())?,
         Some(path) => fs::write(path, text.as_bytes())?,
     }
-    Ok(())
+    io::stdout().flush()?;
+    // The process is exiting; let the kernel reclaim the module and text
+    // allocations instead of walking the arena and every owned string.
+    std::process::exit(0);
 }

@@ -1,19 +1,17 @@
 //! LLVM bitcode writer for the Track B IR subset.
 
-use std::collections::HashMap;
-
 use llvm_rust_ir::{
     Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, FastMath, FcmpPred, FuncId, Function,
-    GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, LocalId, Module, Operand, OperandKind,
+    GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand, OperandKind,
     TailKind, Type, TypeId, Visibility,
 };
-use llvm_rust_support::{Error, Result};
+use llvm_rust_support::{Error, FastHashMap, Result};
 
 use crate::attrs::{
     PARAMATTR_CODE_ENTRY, PARAMATTR_GRP_CODE_ENTRY, encode_attribute, expand_attributes,
     expand_function_attributes, function_attr_index,
 };
-use crate::bitstream::{AbbrevOp, BitWriter};
+use crate::bitstream::{AbbrevOp, BitWriter, Operands};
 
 const MODULE_BLOCK: u32 = 8;
 const PARAMATTR_BLOCK: u32 = 9;
@@ -133,48 +131,77 @@ fn ensure_implicit_alloca(module: &mut Module) {
     }
 }
 
+fn intern_string(
+    strtab: &mut Vec<u8>,
+    str_offsets: &mut FastHashMap<String, u32>,
+    text: &str,
+) -> u32 {
+    if let Some(offset) = str_offsets.get(text) {
+        return *offset;
+    }
+    let offset = strtab.len() as u32;
+    strtab.extend_from_slice(text.as_bytes());
+    strtab.push(0);
+    str_offsets.insert(text.to_string(), offset);
+    offset
+}
+
+fn intern_section(
+    sections: &mut Vec<String>,
+    section_ids: &mut FastHashMap<String, u32>,
+    section: &str,
+) -> u32 {
+    if let Some(id) = section_ids.get(section) {
+        return *id;
+    }
+    let id = sections.len() as u32 + 1;
+    sections.push(section.to_string());
+    section_ids.insert(section.to_string(), id);
+    id
+}
+
 struct Writer<'a> {
-    module: &'a Module,
+    module: &'a mut Module,
     stream: BitWriter,
-    type_ids: HashMap<TypeId, u32>,
+    type_ids: Vec<u32>,
     constants: Vec<ConstId>,
-    const_ids: HashMap<ConstId, u32>,
-    globals: HashMap<GlobalId, u32>,
-    functions: HashMap<FuncId, u32>,
+    const_ids: Vec<u32>,
+    globals: Vec<u32>,
+    functions: Vec<u32>,
     base_local: u32,
     strtab: Vec<u8>,
-    str_offsets: HashMap<String, u32>,
+    str_offsets: FastHashMap<String, u32>,
     i32_one: Option<ConstId>,
     sections: Vec<String>,
-    section_ids: HashMap<String, u32>,
-    function_attr_lists: HashMap<FuncId, u32>,
-    function_aligns: HashMap<FuncId, u64>,
-    call_attr_lists: HashMap<(FuncId, InstId), u32>,
+    section_ids: FastHashMap<String, u32>,
+    function_attr_lists: FastHashMap<FuncId, u32>,
+    function_aligns: FastHashMap<FuncId, u64>,
+    call_attr_lists: FastHashMap<(FuncId, InstId), u32>,
     paramattr_groups: Vec<(u32, Vec<Attribute>)>,
-    paramattr_group_ids: HashMap<(u32, Vec<Attribute>), u64>,
+    paramattr_group_ids: FastHashMap<(u32, Vec<Attribute>), u64>,
     paramattr_lists: Vec<Vec<u64>>,
-    paramattr_list_ids: HashMap<Vec<u64>, u32>,
-    local_values: HashMap<LocalId, u32>,
+    paramattr_list_ids: FastHashMap<Vec<u64>, u32>,
+    local_values: Vec<u32>,
     llvm19_compat: bool,
     #[cfg(test)]
     split_attr_slots: bool,
 }
 
 impl<'a> Writer<'a> {
-    fn new(module: &'a Module, llvm19_compat: bool) -> Self {
-        let mut type_ids = HashMap::new();
+    fn new(module: &'a mut Module, llvm19_compat: bool) -> Self {
+        let mut type_ids = vec![u32::MAX; module.types.len()];
         for (index, (id, _)) in module.types.iter().enumerate() {
-            type_ids.insert(id, index as u32);
+            type_ids[id as usize] = index as u32;
         }
-        let mut globals = HashMap::new();
-        for id in module.ordered_globals() {
-            let index = globals.len() as u32;
-            globals.insert(id, index);
+        let global_ids: Vec<GlobalId> = module.ordered_globals().into_iter().collect();
+        let mut globals = vec![u32::MAX; module.globals.len()];
+        for (index, id) in global_ids.iter().enumerate() {
+            globals[id.index()] = index as u32;
         }
-        let mut functions = HashMap::new();
-        for id in module.ordered_functions() {
-            let index = functions.len() as u32;
-            functions.insert(id, globals.len() as u32 + index);
+        let function_ids: Vec<FuncId> = module.ordered_functions().into_iter().collect();
+        let mut functions = vec![u32::MAX; module.functions.len()];
+        for (index, id) in function_ids.iter().enumerate() {
+            functions[id.index()] = global_ids.len() as u32 + index as u32;
         }
         let mut constants = Vec::new();
         for (id, constant) in module.constants.iter() {
@@ -182,10 +209,10 @@ impl<'a> Writer<'a> {
                 constants.push(id);
             }
         }
-        let mut const_ids = HashMap::new();
-        let base_const = globals.len() as u32 + functions.len() as u32;
+        let base_const = global_ids.len() as u32 + function_ids.len() as u32;
+        let mut const_ids = vec![u32::MAX; module.constants.len()];
         for (index, id) in constants.iter().enumerate() {
-            const_ids.insert(*id, base_const + index as u32);
+            const_ids[id.index()] = base_const + index as u32;
         }
         let base_local = base_const + constants.len() as u32;
         let i32_ty = module.types.iter().find_map(|(id, ty)| match ty {
@@ -199,7 +226,29 @@ impl<'a> Writer<'a> {
                 .find(|(_, constant)| constant.ty == ty && constant.kind == ConstKind::Int(1))
                 .map(|(id, _)| id)
         });
-        let mut writer = Self {
+        let mut strtab = Vec::new();
+        let mut str_offsets = FastHashMap::default();
+        for id in module.ordered_globals() {
+            let global = &module.globals[id];
+            if !module.is_unnamed_global(id) {
+                intern_string(&mut strtab, &mut str_offsets, module.name(global.name));
+            }
+        }
+        for id in module.ordered_functions() {
+            let function = &module.functions[id];
+            if !module.is_unnamed_function(id) {
+                intern_string(&mut strtab, &mut str_offsets, module.name(function.name));
+            }
+        }
+        let mut sections = Vec::new();
+        let mut section_ids = FastHashMap::default();
+        for id in module.ordered_globals() {
+            let global = &module.globals[id];
+            if let Some(section) = &global.section {
+                intern_section(&mut sections, &mut section_ids, section);
+            }
+        }
+        Self {
             module,
             stream: BitWriter::new(),
             type_ids,
@@ -208,63 +257,27 @@ impl<'a> Writer<'a> {
             globals,
             functions,
             base_local,
-            strtab: Vec::new(),
-            str_offsets: HashMap::new(),
+            strtab,
+            str_offsets,
             i32_one,
-            sections: Vec::new(),
-            section_ids: HashMap::new(),
-            function_attr_lists: HashMap::new(),
-            function_aligns: HashMap::new(),
-            call_attr_lists: HashMap::new(),
+            sections,
+            section_ids,
+            function_attr_lists: FastHashMap::default(),
+            function_aligns: FastHashMap::default(),
+            call_attr_lists: FastHashMap::default(),
             paramattr_groups: Vec::new(),
-            paramattr_group_ids: HashMap::new(),
+            paramattr_group_ids: FastHashMap::default(),
             paramattr_lists: Vec::new(),
-            paramattr_list_ids: HashMap::new(),
-            local_values: HashMap::new(),
+            paramattr_list_ids: FastHashMap::default(),
+            local_values: Vec::new(),
             llvm19_compat,
             #[cfg(test)]
             split_attr_slots: false,
-        };
-        for id in module.ordered_globals() {
-            let global = &module.globals[id];
-            if !module.is_unnamed_global(id) {
-                writer.add_string(module.name(global.name));
-            }
         }
-        for id in module.ordered_functions() {
-            let function = &module.functions[id];
-            if !module.is_unnamed_function(id) {
-                writer.add_string(module.name(function.name));
-            }
-        }
-        for id in module.ordered_globals() {
-            let global = &module.globals[id];
-            if let Some(section) = &global.section {
-                writer.section_id(section);
-            }
-        }
-        writer
-    }
-
-    fn section_id(&mut self, section: &str) -> u32 {
-        if let Some(id) = self.section_ids.get(section) {
-            return *id;
-        }
-        let id = self.sections.len() as u32 + 1;
-        self.sections.push(section.to_string());
-        self.section_ids.insert(section.to_string(), id);
-        id
     }
 
     fn add_string(&mut self, text: &str) -> u32 {
-        if let Some(offset) = self.str_offsets.get(text) {
-            return *offset;
-        }
-        let offset = self.strtab.len() as u32;
-        self.strtab.extend_from_slice(text.as_bytes());
-        self.strtab.push(0);
-        self.str_offsets.insert(text.to_string(), offset);
-        offset
+        intern_string(&mut self.strtab, &mut self.str_offsets, text)
     }
 
     fn write(&mut self) -> Result<()> {
@@ -408,80 +421,28 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
+    fn take_function(&mut self, id: FuncId) -> Function {
+        let name = self.module.functions[id].name;
+        std::mem::replace(
+            &mut self.module.functions[id],
+            Function::new(name, llvm_rust_ir::ty::INVALID_TYPE),
+        )
+    }
+
     fn write_attributes(&mut self) -> Result<()> {
-        let functions: Vec<(FuncId, Function)> = self
-            .module
-            .functions
-            .iter()
-            .map(|(id, function)| (id, function.clone()))
-            .collect();
-        for (function_id, function) in &functions {
-            if !self.module.types.is_valid(function.ty) {
+        let functions: Vec<FuncId> = self.module.functions.iter().map(|(id, _)| id).collect();
+        for function_id in functions {
+            if !self
+                .module
+                .types
+                .is_valid(self.module.functions[function_id].ty)
+            {
                 continue;
             }
-            let mut entries = Vec::new();
-            let ret_attrs = expand_attributes(self.module, &function.ret_attrs)?;
-            if !ret_attrs.is_empty() {
-                entries.push((0, ret_attrs));
-            }
-            for (index, param) in function.params.iter().enumerate() {
-                let attrs = expand_attributes(self.module, &param.attrs)?;
-                if !attrs.is_empty() {
-                    entries.push((index as u32 + 1, attrs));
-                }
-            }
-            let mut function_attrs =
-                expand_function_attributes(self.module, &function.attrs, !self.llvm19_compat)?;
-            let mut function_align = None;
-            function_attrs.retain(|attr| {
-                if let Some(value) = parse_align_attribute(&attr.0) {
-                    function_align = Some(value);
-                    false
-                } else {
-                    true
-                }
-            });
-            if let Some(value) = function_align {
-                self.function_aligns.insert(*function_id, value);
-            }
-            if !function_attrs.is_empty() {
-                entries.push((function_attr_index(), function_attrs));
-            }
-            let list = self.add_attr_list(entries);
-            if list != 0 {
-                self.function_attr_lists.insert(*function_id, list);
-            }
-
-            for (inst_id, inst) in function.insts.iter() {
-                let InstKind::Call {
-                    ret_attrs,
-                    attrs,
-                    arg_attrs,
-                    ..
-                } = &inst.kind
-                else {
-                    continue;
-                };
-                let mut entries = Vec::new();
-                let ret_attrs = expand_attributes(self.module, ret_attrs)?;
-                if !ret_attrs.is_empty() {
-                    entries.push((0, ret_attrs));
-                }
-                for (index, attrs) in arg_attrs.iter().enumerate() {
-                    let attrs = expand_attributes(self.module, attrs)?;
-                    if !attrs.is_empty() {
-                        entries.push((index as u32 + 1, attrs));
-                    }
-                }
-                let attrs = expand_function_attributes(self.module, attrs, !self.llvm19_compat)?;
-                if !attrs.is_empty() {
-                    entries.push((function_attr_index(), attrs));
-                }
-                let list = self.add_attr_list(entries);
-                if list != 0 {
-                    self.call_attr_lists.insert((*function_id, inst_id), list);
-                }
-            }
+            let function = self.take_function(function_id);
+            let result = self.write_attributes_for_function(function_id, &function);
+            self.module.functions[function_id] = function;
+            result?;
         }
 
         if self.paramattr_groups.is_empty() {
@@ -602,6 +563,80 @@ impl<'a> Writer<'a> {
         id
     }
 
+    fn write_attributes_for_function(
+        &mut self,
+        function_id: FuncId,
+        function: &Function,
+    ) -> Result<()> {
+        if !self.module.types.is_valid(function.ty) {
+            return Ok(());
+        }
+        let mut entries = Vec::new();
+        let ret_attrs = expand_attributes(self.module, &function.ret_attrs)?;
+        if !ret_attrs.is_empty() {
+            entries.push((0, ret_attrs));
+        }
+        for (index, param) in function.params.iter().enumerate() {
+            let attrs = expand_attributes(self.module, &param.attrs)?;
+            if !attrs.is_empty() {
+                entries.push((index as u32 + 1, attrs));
+            }
+        }
+        let mut function_attrs =
+            expand_function_attributes(self.module, &function.attrs, !self.llvm19_compat)?;
+        let mut function_align = None;
+        function_attrs.retain(|attr| {
+            if let Some(value) = parse_align_attribute(&attr.0) {
+                function_align = Some(value);
+                false
+            } else {
+                true
+            }
+        });
+        if let Some(value) = function_align {
+            self.function_aligns.insert(function_id, value);
+        }
+        if !function_attrs.is_empty() {
+            entries.push((function_attr_index(), function_attrs));
+        }
+        let list = self.add_attr_list(entries);
+        if list != 0 {
+            self.function_attr_lists.insert(function_id, list);
+        }
+
+        for (inst_id, inst) in function.insts.iter() {
+            let InstKind::Call {
+                ret_attrs,
+                attrs,
+                arg_attrs,
+                ..
+            } = &inst.kind
+            else {
+                continue;
+            };
+            let mut entries = Vec::new();
+            let ret_attrs = expand_attributes(self.module, ret_attrs)?;
+            if !ret_attrs.is_empty() {
+                entries.push((0, ret_attrs));
+            }
+            for (index, attrs) in arg_attrs.iter().enumerate() {
+                let attrs = expand_attributes(self.module, attrs)?;
+                if !attrs.is_empty() {
+                    entries.push((index as u32 + 1, attrs));
+                }
+            }
+            let attrs = expand_function_attributes(self.module, attrs, !self.llvm19_compat)?;
+            if !attrs.is_empty() {
+                entries.push((function_attr_index(), attrs));
+            }
+            let list = self.add_attr_list(entries);
+            if list != 0 {
+                self.call_attr_lists.insert((function_id, inst_id), list);
+            }
+        }
+        Ok(())
+    }
+
     fn write_globals(&mut self) -> Result<()> {
         let globals: Vec<(GlobalId, llvm_rust_ir::Global)> = self
             .module
@@ -610,11 +645,11 @@ impl<'a> Writer<'a> {
             .map(|id| (id, self.module.globals[id].clone()))
             .collect();
         for (global_id, global) in globals {
-            let name = self.module.name(global.name);
+            let name = self.module.name(global.name).to_string();
             let (name_offset, name_len) = if self.module.is_unnamed_global(global_id) {
                 (0, 0)
             } else {
-                (self.add_string(name) as u64, name.len() as u64)
+                (self.add_string(&name) as u64, name.len() as u64)
             };
             let type_id = self.type_index(global.ty)? as u64;
             let flags = 2 | global.is_const as u64;
@@ -654,56 +689,58 @@ impl<'a> Writer<'a> {
     }
 
     fn write_functions(&mut self) -> Result<()> {
-        let functions: Vec<(FuncId, Function)> = self
-            .module
-            .ordered_functions()
-            .into_iter()
-            .map(|id| (id, self.module.functions[id].clone()))
-            .collect();
-        for (function_id, function) in functions {
-            let name = self.module.name(function.name);
-            let (name_offset, name_len) = if self.module.is_unnamed_function(function_id) {
-                (0, 0)
-            } else {
-                (self.add_string(name) as u64, name.len() as u64)
-            };
-            let type_id = self.type_index(function.ty)? as u64;
-            let attr_list = self
-                .function_attr_lists
-                .get(&function_id)
-                .copied()
-                .unwrap_or(0) as u64;
-            let operands = vec![
-                name_offset,
-                name_len,
-                type_id,
-                0,
-                function.is_declaration as u64,
-                linkage_code(function.linkage) as u64,
-                attr_list,
-                encode_align(
-                    self.function_aligns
-                        .get(&function_id)
-                        .copied()
-                        .or(function.align),
-                ) as u64,
-                0,
-                visibility_code(function.visibility) as u64,
-                0,
-                unnamed_addr_code(function.unnamed_addr, function.local_unnamed_addr),
-                0,
-                0,
-                0,
-                0,
-                0,
-                function.dso_local as u64,
-                0,
-                0,
-                0,
-                0,
-            ];
-            self.stream.emit_record(MODULE_FUNCTION, &operands);
+        for function_id in self.module.ordered_functions() {
+            let function = self.take_function(function_id);
+            let result = self.write_function_record(function_id, &function);
+            self.module.functions[function_id] = function;
+            result?;
         }
+        Ok(())
+    }
+
+    fn write_function_record(&mut self, function_id: FuncId, function: &Function) -> Result<()> {
+        let name = self.module.name(function.name).to_string();
+        let (name_offset, name_len) = if self.module.is_unnamed_function(function_id) {
+            (0, 0)
+        } else {
+            (self.add_string(&name) as u64, name.len() as u64)
+        };
+        let type_id = self.type_index(function.ty)? as u64;
+        let attr_list = self
+            .function_attr_lists
+            .get(&function_id)
+            .copied()
+            .unwrap_or(0) as u64;
+        let operands = vec![
+            name_offset,
+            name_len,
+            type_id,
+            0,
+            function.is_declaration as u64,
+            linkage_code(function.linkage) as u64,
+            attr_list,
+            encode_align(
+                self.function_aligns
+                    .get(&function_id)
+                    .copied()
+                    .or(function.align),
+            ) as u64,
+            0,
+            visibility_code(function.visibility) as u64,
+            0,
+            unnamed_addr_code(function.unnamed_addr, function.local_unnamed_addr),
+            0,
+            0,
+            0,
+            0,
+            0,
+            function.dso_local as u64,
+            0,
+            0,
+            0,
+            0,
+        ];
+        self.stream.emit_record(MODULE_FUNCTION, &operands);
         Ok(())
     }
 
@@ -793,17 +830,14 @@ impl<'a> Writer<'a> {
     }
 
     fn write_bodies(&mut self) -> Result<()> {
-        let functions: Vec<(FuncId, Function)> = self
-            .module
-            .ordered_functions()
-            .into_iter()
-            .map(|id| (id, self.module.functions[id].clone()))
-            .collect();
-        for (function_id, function) in functions {
-            if function.is_declaration {
+        for function_id in self.module.ordered_functions() {
+            if self.module.functions[function_id].is_declaration {
                 continue;
             }
-            self.write_body(function_id, &function)?;
+            let function = self.take_function(function_id);
+            let result = self.write_body(function_id, &function);
+            self.module.functions[function_id] = function;
+            result?;
         }
         Ok(())
     }
@@ -813,17 +847,16 @@ impl<'a> Writer<'a> {
         self.stream
             .emit_record(FUNC_DECLAREBLOCKS, &[function.blocks.len() as u64]);
         self.local_values.clear();
+        self.local_values.resize(function.locals.len(), u32::MAX);
         let mut next_local = function.params.len() as u32;
         for index in 0..function.params.len() {
-            self.local_values
-                .insert(index as LocalId, self.base_local + index as u32);
+            self.local_values[index] = self.base_local + index as u32;
         }
         for (_, block) in function.blocks_in_order() {
             for inst_id in &block.insts {
                 let inst = function.insts.get(*inst_id);
                 if let Some(local) = inst.result {
-                    self.local_values
-                        .insert(local, self.base_local + next_local);
+                    self.local_values[local as usize] = self.base_local + next_local;
                     next_local += 1;
                 }
             }
@@ -860,12 +893,14 @@ impl<'a> Writer<'a> {
                 }
                 let value = self
                     .local_values
-                    .get(&(local_id as LocalId))
+                    .get(local_id)
                     .copied()
+                    .filter(|value| *value != u32::MAX)
                     .ok_or_else(|| {
                         Error::bitcode("local value is missing from the bitcode value map")
                     })?;
-                let mut operands = vec![value as u64];
+                let mut operands = Operands::new();
+                operands.push(value as u64);
                 operands.extend(self.module.name(name).bytes().map(|b| b as u64));
                 self.stream.emit_record(VST_ENTRY, &operands);
             }
@@ -875,7 +910,8 @@ impl<'a> Writer<'a> {
                 if is_unnamed_slot(self.module.name(name)) {
                     continue;
                 }
-                let mut operands = vec![index as u64];
+                let mut operands = Operands::new();
+                operands.push(index as u64);
                 operands.extend(self.module.name(name).bytes().map(|b| b as u64));
                 self.stream.emit_record(VST_BBENTRY, &operands);
             }
@@ -900,7 +936,7 @@ impl<'a> Writer<'a> {
                 lhs,
                 rhs,
             } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, lhs, inst_id)?;
                 self.push_value(&mut operands, rhs, inst_id)?;
                 operands.push(binop_code(*op) as u64);
@@ -911,7 +947,7 @@ impl<'a> Writer<'a> {
                 self.stream.emit_record(FUNC_INST_BINOP, &operands);
             }
             InstKind::FNeg { flags, value } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, value, inst_id)?;
                 operands.push(0);
                 let flags = fmf_bits(*flags);
@@ -921,7 +957,7 @@ impl<'a> Writer<'a> {
                 self.stream.emit_record(FUNC_INST_UNOP, &operands);
             }
             InstKind::ICmp { pred, lhs, rhs } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, lhs, inst_id)?;
                 self.push_value(&mut operands, rhs, inst_id)?;
                 operands.push(icmp_code(*pred) as u64);
@@ -933,7 +969,7 @@ impl<'a> Writer<'a> {
                 lhs,
                 rhs,
             } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, lhs, inst_id)?;
                 self.push_value(&mut operands, rhs, inst_id)?;
                 operands.push(fcmp_code(*pred) as u64);
@@ -969,12 +1005,11 @@ impl<'a> Writer<'a> {
                 };
                 let align = encode_align(*align) as u64;
                 let packed = (align & 0x1f) | (1 << 6) | ((align >> 5) << 8);
-                let operands = vec![
-                    elem,
-                    self.type_index(size_ty)? as u64,
-                    size_value as u64,
-                    packed,
-                ];
+                let mut operands = Operands::new();
+                operands.push(elem);
+                operands.push(self.type_index(size_ty)? as u64);
+                operands.push(size_value as u64);
+                operands.push(packed);
                 self.stream.emit_record(FUNC_INST_ALLOCA, &operands);
             }
             InstKind::Load {
@@ -983,7 +1018,7 @@ impl<'a> Writer<'a> {
                 align,
                 volatile,
             } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, ptr, inst_id)?;
                 operands.push(self.type_index(*ty)? as u64);
                 operands.push(encode_align(*align) as u64);
@@ -996,7 +1031,7 @@ impl<'a> Writer<'a> {
                 align,
                 volatile,
             } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, ptr, inst_id)?;
                 self.push_value_and_type(&mut operands, value, inst_id)?;
                 operands.push(encode_align(*align) as u64);
@@ -1009,7 +1044,9 @@ impl<'a> Writer<'a> {
                 ptr,
                 indices,
             } => {
-                let mut operands = vec![*inbounds as u64, self.type_index(*source_ty)? as u64];
+                let mut operands = Operands::new();
+                operands.push(*inbounds as u64);
+                operands.push(self.type_index(*source_ty)? as u64);
                 self.push_value_and_type(&mut operands, ptr, inst_id)?;
                 for index in indices {
                     self.push_value_and_type(&mut operands, &index.value, inst_id)?;
@@ -1030,7 +1067,8 @@ impl<'a> Writer<'a> {
                     .get(&(function_id, arena_id))
                     .copied()
                     .unwrap_or(0) as u64;
-                let mut operands = vec![attr_list];
+                let mut operands = Operands::new();
+                operands.push(attr_list);
                 let mut flags = match tail {
                     TailKind::None => 0,
                     TailKind::Tail => 1,
@@ -1066,7 +1104,8 @@ impl<'a> Writer<'a> {
             }
             InstKind::Phi { incoming } => {
                 let ty = result_type(function, inst)?;
-                let mut operands = vec![self.type_index(ty)? as u64];
+                let mut operands = Operands::new();
+                operands.push(self.type_index(ty)? as u64);
                 for (value, block) in incoming {
                     let value_id = self.operand_value_id(value)?;
                     let diff = inst_id as i64 - value_id as i64;
@@ -1081,7 +1120,7 @@ impl<'a> Writer<'a> {
                 on_false,
                 fastmath,
             } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, on_true, inst_id)?;
                 self.push_value(&mut operands, on_false, inst_id)?;
                 self.push_value_and_type(&mut operands, cond, inst_id)?;
@@ -1092,14 +1131,14 @@ impl<'a> Writer<'a> {
                 self.stream.emit_record(FUNC_INST_VSELECT, &operands);
             }
             InstKind::Cast { op, value, to } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, value, inst_id)?;
                 operands.push(self.type_index(*to)? as u64);
                 operands.push(cast_code(*op) as u64);
                 self.stream.emit_record(FUNC_INST_CAST, &operands);
             }
             InstKind::Ret { value } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 if let Some(value) = value {
                     self.push_value_and_type(&mut operands, value, inst_id)?;
                 }
@@ -1114,10 +1153,9 @@ impl<'a> Writer<'a> {
                 then_block,
                 else_block,
             } => {
-                let mut operands = vec![
-                    block_index(function, *then_block)? as u64,
-                    block_index(function, *else_block)? as u64,
-                ];
+                let mut operands = Operands::new();
+                operands.push(block_index(function, *then_block)? as u64);
+                operands.push(block_index(function, *else_block)? as u64);
                 self.push_value(&mut operands, cond, inst_id)?;
                 self.stream.emit_record(FUNC_INST_BR, &operands);
             }
@@ -1126,7 +1164,8 @@ impl<'a> Writer<'a> {
                 default,
                 cases,
             } => {
-                let mut operands = vec![self.type_index(value.ty)? as u64];
+                let mut operands = Operands::new();
+                operands.push(self.type_index(value.ty)? as u64);
                 self.push_value(&mut operands, value, inst_id)?;
                 operands.push(block_index(function, *default)? as u64);
                 for (case, block) in cases {
@@ -1136,7 +1175,7 @@ impl<'a> Writer<'a> {
                 self.stream.emit_record(FUNC_INST_SWITCH, &operands);
             }
             InstKind::ExtractValue { aggregate, indices } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, aggregate, inst_id)?;
                 operands.extend(indices.iter().map(|index| u64::from(*index)));
                 self.stream.emit_record(FUNC_INST_EXTRACTVAL, &operands);
@@ -1146,14 +1185,14 @@ impl<'a> Writer<'a> {
                 value,
                 indices,
             } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, aggregate, inst_id)?;
                 self.push_value_and_type(&mut operands, value, inst_id)?;
                 operands.extend(indices.iter().map(|index| u64::from(*index)));
                 self.stream.emit_record(FUNC_INST_INSERTVAL, &operands);
             }
             InstKind::ExtractElement { vector, index } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, vector, inst_id)?;
                 self.push_value_and_type(&mut operands, index, inst_id)?;
                 self.stream.emit_record(FUNC_INST_EXTRACTELT, &operands);
@@ -1163,7 +1202,7 @@ impl<'a> Writer<'a> {
                 value,
                 index,
             } => {
-                let mut operands = Vec::new();
+                let mut operands = Operands::new();
                 self.push_value_and_type(&mut operands, vector, inst_id)?;
                 self.push_value(&mut operands, value, inst_id)?;
                 self.push_value_and_type(&mut operands, index, inst_id)?;
@@ -1174,7 +1213,7 @@ impl<'a> Writer<'a> {
         Ok(())
     }
 
-    fn push_value(&mut self, operands: &mut Vec<u64>, value: &Operand, inst_id: u32) -> Result<()> {
+    fn push_value(&mut self, operands: &mut Operands, value: &Operand, inst_id: u32) -> Result<()> {
         let value_id = self.operand_value_id(value)?;
         operands.push(inst_id.wrapping_sub(value_id) as u64);
         Ok(())
@@ -1182,7 +1221,7 @@ impl<'a> Writer<'a> {
 
     fn push_value_and_type(
         &mut self,
-        operands: &mut Vec<u64>,
+        operands: &mut Operands,
         value: &Operand,
         inst_id: u32,
     ) -> Result<()> {
@@ -1198,19 +1237,22 @@ impl<'a> Writer<'a> {
         match value.kind {
             OperandKind::Local(id) => self
                 .local_values
-                .get(&id)
+                .get(id as usize)
                 .copied()
+                .filter(|value| *value != u32::MAX)
                 .ok_or_else(|| Error::bitcode("local operand is missing from the value map")),
             OperandKind::Const(id) => self.const_value_id(id),
             OperandKind::Global(id) => self
                 .globals
-                .get(&id)
+                .get(id.index())
                 .copied()
+                .filter(|index| *index != u32::MAX)
                 .ok_or_else(|| Error::bitcode("unknown global operand")),
             OperandKind::Function(id) => self
                 .functions
-                .get(&id)
+                .get(id.index())
                 .copied()
+                .filter(|index| *index != u32::MAX)
                 .ok_or_else(|| Error::bitcode("unknown function operand")),
         }
     }
@@ -1219,26 +1261,30 @@ impl<'a> Writer<'a> {
         match &self.module.constant(id).kind {
             ConstKind::Global(global) => self
                 .globals
-                .get(global)
+                .get(global.index())
                 .copied()
+                .filter(|index| *index != u32::MAX)
                 .ok_or_else(|| Error::bitcode("unknown global constant")),
             ConstKind::Function(function) => self
                 .functions
-                .get(function)
+                .get(function.index())
                 .copied()
+                .filter(|index| *index != u32::MAX)
                 .ok_or_else(|| Error::bitcode("unknown function constant")),
             _ => self
                 .const_ids
-                .get(&id)
+                .get(id.index())
                 .copied()
+                .filter(|index| *index != u32::MAX)
                 .ok_or_else(|| Error::bitcode("unknown constant")),
         }
     }
 
     fn type_index(&self, ty: TypeId) -> Result<u32> {
         self.type_ids
-            .get(&ty)
+            .get(ty as usize)
             .copied()
+            .filter(|index| *index != u32::MAX)
             .ok_or_else(|| Error::bitcode("type missing from bitcode type table"))
     }
 
@@ -1502,7 +1548,7 @@ mod tests {
         let dup2 = module.function_named(dup2_name).expect("dup2");
         module.functions[dup2].params[0].attrs = attrs;
 
-        let mut writer = Writer::new(&module, false);
+        let mut writer = Writer::new(&mut module, false);
         writer.split_attr_slots = true;
         writer.write().expect("write");
         let bytes = writer.finish();

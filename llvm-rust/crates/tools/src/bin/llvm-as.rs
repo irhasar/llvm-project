@@ -67,5 +67,8 @@ fn run() -> Result<()> {
         Some("-") | None => io::stdout().write_all(&bytes)?,
         Some(path) => fs::write(path, &bytes)?,
     }
-    Ok(())
+    io::stdout().flush()?;
+    // The process is exiting; let the kernel reclaim the module and output
+    // allocations instead of walking hundreds of thousands of arena entries.
+    std::process::exit(0);
 }

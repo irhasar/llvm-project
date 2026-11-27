@@ -1,9 +1,8 @@
 //! Functions, parameters, basic blocks, and local value slots.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use llvm_rust_support::{Arena, Idx, Symbol};
+use llvm_rust_support::{Arena, FastHashMap, Idx, Symbol};
 
 use crate::inst::{Attribute, InstId, Instruction};
 use crate::linkage::{Linkage, Visibility};
@@ -62,7 +61,7 @@ pub struct Function {
     pub insts: Arena<Instruction>,
     pub entry: Option<BlockId>,
     block_order: Vec<BlockId>,
-    block_names: HashMap<Symbol, BlockId>,
+    block_names: FastHashMap<Symbol, BlockId>,
 }
 
 impl Function {
@@ -86,7 +85,7 @@ impl Function {
             insts: Arena::new(),
             entry: None,
             block_order: Vec::new(),
-            block_names: HashMap::new(),
+            block_names: FastHashMap::default(),
         }
     }
 

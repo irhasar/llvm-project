@@ -1,6 +1,6 @@
 //! LLVM bitcode reader for the Track B IR subset.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use llvm_rust_ir::ty::INVALID_TYPE;
@@ -9,7 +9,7 @@ use llvm_rust_ir::{
     Function, Global, GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand,
     OperandKind, TailKind, ThreadLocal, Type, TypeId, Visibility,
 };
-use llvm_rust_support::{Error, Result};
+use llvm_rust_support::{Error, FastHashMap, Result};
 
 use crate::attrs::{
     PARAMATTR_CODE_ENTRY, PARAMATTR_GRP_CODE_ENTRY, decode_attribute_group, deduplicate_attributes,
@@ -153,7 +153,7 @@ pub fn read_bitcode_with_options(bytes: &[u8], options: ReadOptions) -> Result<M
         pending_globals: Vec::new(),
         defined_functions: Vec::new(),
         next_body: 0,
-        attr_groups: HashMap::new(),
+        attr_groups: FastHashMap::default(),
         attr_lists: Vec::new(),
         attr_budget: bytes.len().saturating_mul(8).saturating_add(4096),
         next_unnamed: 0,
@@ -174,7 +174,7 @@ struct Reader {
     pending_globals: Vec<(GlobalId, u32)>,
     defined_functions: Vec<FuncId>,
     next_body: usize,
-    attr_groups: HashMap<u64, (u32, Arc<Vec<Attribute>>)>,
+    attr_groups: FastHashMap<u64, (u32, Arc<Vec<Attribute>>)>,
     attr_lists: Vec<Arc<Vec<(u32, Arc<Vec<Attribute>>)>>>,
     attr_budget: usize,
     next_unnamed: u32,
@@ -272,7 +272,7 @@ impl Reader {
                 continue;
             }
             let mut list: Vec<(u32, Arc<Vec<Attribute>>)> = Vec::new();
-            let mut positions: HashMap<u32, usize> = HashMap::new();
+            let mut positions: FastHashMap<u32, usize> = FastHashMap::default();
             let mut merged_slots: HashSet<u32> = HashSet::new();
             for group in &record.operands {
                 let (index, attrs) =
@@ -801,9 +801,8 @@ impl Reader {
             current_block: 0,
             deferred_phis: Vec::new(),
         };
-        let mut items = block.items.clone();
         let mut saw_declare_blocks = false;
-        for item in items.drain(..) {
+        for item in &block.items {
             match item {
                 Item::Record(record) => {
                     if record.code == FUNC_DECLAREBLOCKS {
@@ -818,19 +817,19 @@ impl Reader {
                         function.entry = state.blocks.first().copied();
                         continue;
                     }
-                    self.read_instruction(&record, &mut state)?;
+                    self.read_instruction(record, &mut state)?;
                 }
                 Item::Block(child) => match child.id {
                     CONSTANTS_BLOCK => {
                         let local_base = state.next_value;
-                        let ids = self.read_function_constants(&child, local_base)?;
+                        let ids = self.read_function_constants(child, local_base)?;
                         state.next_value = state
                             .next_value
                             .checked_add(ids.len() as u32)
                             .ok_or_else(|| Error::bitcode("too many function values"))?;
                         state.locals.extend(ids.into_iter().map(LocalRef::Constant));
                     }
-                    VALUE_SYMTAB_BLOCK => self.read_vst(&child, &mut state)?,
+                    VALUE_SYMTAB_BLOCK => self.read_vst(child, &mut state)?,
                     _ => {}
                 },
             }
@@ -1760,7 +1759,7 @@ mod tests {
     use super::*;
 
     fn test_reader(groups: Vec<(u64, u32, Vec<Attribute>)>) -> Reader {
-        let mut attr_groups = HashMap::new();
+        let mut attr_groups = FastHashMap::default();
         for (id, index, attrs) in groups {
             attr_groups.insert(id, (index, Arc::new(attrs)));
         }
@@ -1788,7 +1787,7 @@ mod tests {
     fn attr_list_record(groups: &[u64]) -> Record {
         Record {
             code: PARAMATTR_CODE_ENTRY,
-            operands: groups.to_vec(),
+            operands: groups.to_vec().into(),
             blob: None,
         }
     }
@@ -1800,7 +1799,7 @@ mod tests {
             code_len: 0,
             items: vec![Item::Record(Record {
                 code: PARAMATTR_GRP_CODE_ENTRY,
-                operands: vec![1, u64::from(u32::MAX), 1, 86, (2u64 << 56) | 0x504],
+                operands: vec![1, u64::from(u32::MAX), 1, 86, (2u64 << 56) | 0x504].into(),
                 blob: None,
             })],
         };
@@ -1880,7 +1879,7 @@ mod tests {
         ] {
             let record = Record {
                 code,
-                operands: Vec::new(),
+                operands: Vec::new().into(),
                 blob: None,
             };
             let error = reader
@@ -1893,7 +1892,7 @@ mod tests {
         }
         let record = Record {
             code: FUNC_INST_EXTRACTVAL,
-            operands: vec![0],
+            operands: vec![0].into(),
             blob: None,
         };
         let error = reader

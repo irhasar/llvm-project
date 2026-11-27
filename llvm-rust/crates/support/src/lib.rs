@@ -8,9 +8,11 @@
 pub mod arena;
 pub mod diag;
 pub mod error;
+pub mod fast_hash;
 pub mod symbol;
 
 pub use arena::{Arena, Idx};
 pub use diag::{Diagnostic, Diagnostics, Severity, Span};
 pub use error::{Error, ErrorKind, Result};
+pub use fast_hash::{FastHashMap, FastHasher};
 pub use symbol::{Interner, Symbol};

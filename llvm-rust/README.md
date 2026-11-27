@@ -168,12 +168,13 @@ incomplete or mixed-version candidates are skipped. The harness fails if no
 LLVM 19 oracle is available, so legacy coverage cannot be skipped
 accidentally. The version-2 fixture keeps target-aware output.
 
-Reproducible benchmark (5 runs, `taskset -c 0`, median and min/max):
+Reproducible benchmark (11 runs, 3 warmups, `taskset -c 0`, median and
+min/max):
 
 ```sh
 CARGO_TARGET_DIR=/tmp/llvm-rust-target cargo build --release \
   -p llvm-rust-tools --bin llvm-as-rust --bin llvm-dis-rust
-python3 tests/bench.py --runs 5
+python3 tests/bench.py --runs 11 --warmup 3
 ```
 
 ## M1 results
@@ -219,23 +220,32 @@ function-local aggregate constants and forward local element operands.
 
 Benchmark on a synthetic corpus of 1000 functions, 10 arithmetic instructions,
 four aggregate/vector element operations, and one attributed call each
-(664,987 bytes), LLVM 19.1.7, `taskset -c 0`, five runs:
+(664,987 bytes), LLVM 19.1.7, `taskset -c 0`, 11 runs after 3 warmups:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 47.1 ms | 46.5-54.3 ms | 58.1 MiB |
-| `llvm-as-rust` | 39.4 ms | 38.4-39.8 ms | 22.5 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 39.9 ms | 39.6-40.3 ms | 56.2 MiB |
-| `llvm-dis-rust` on C++ bitcode | 30.3 ms | 29.7-30.5 ms | 15.2 MiB |
+| `llvm-as` (C++) | 47.1 ms | 46.7-49.2 ms | 58.5 MiB |
+| `llvm-as-rust` | 23.5 ms | 23.0-26.5 ms | 19.1 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 39.7 ms | 39.3-42.8 ms | 56.4 MiB |
+| `llvm-dis-rust` on C++ bitcode | 19.5 ms | 19.2-19.8 ms | 15.2 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
-isolates decoder work from writer record layout. On this parser/printer-only
-corpus, Rust throughput was about 1.2x the C++ assembler and 1.3x the C++
-disassembler, and peak RSS was about 2.6x and 3.7x lower respectively. Each
-tool gets one discarded warmup run before the five measured runs. These are
-throughput and memory measurements, not a generated-code performance claim.
-The Rust binaries are 5.6 MiB (`llvm-as-rust`) and 4.6 MiB (`llvm-dis-rust`);
-the C++ tools need the 124 MiB `libLLVM.so.19.1`.
+isolates decoder work from writer record layout. On this parser/printer/bitcode
+corpus, Rust throughput was about 2.0x the C++ assembler and 2.0x the C++
+disassembler, and peak RSS was about 3.1x and 3.7x lower respectively. These
+are throughput and memory measurements, not a generated-code performance
+claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.6 MiB
+(`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
+
+In-process component timings on the same corpus (50 iterations, no process
+startup or file I/O) are 8.48 ms parse, 2.35 ms print, 2.68 ms bitcode write,
+6.66 ms bitcode read, 11.41 ms assemble (parse plus write), and 8.98 ms
+disassemble (read plus print). The performance pass keeps token text borrowed
+from the source, uses FNV maps and vector-backed ID tables for IR and bitcode
+lookups, keeps small bitcode records and instruction operands inline, shares
+abbreviation tables across blocks, and avoids cloning function bodies while
+decoding. The CLI tools also exit without walking their arenas at process
+teardown.
 
 A clean release build of the two Rust tools, using a separate target
 directory, took 9.6 s wall, 31.4 s user, and 2.0 s system time. This is a

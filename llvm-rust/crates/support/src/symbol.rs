@@ -1,8 +1,9 @@
 //! String interning for names that appear many times.
 
 use core::fmt;
-use std::collections::HashMap;
 use std::rc::Rc;
+
+use crate::fast_hash::FastHashMap;
 
 /// A handle to an interned string.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -19,7 +20,7 @@ impl Symbol {
 #[derive(Default)]
 pub struct Interner {
     names: Vec<Rc<str>>,
-    map: HashMap<Rc<str>, Symbol>,
+    map: FastHashMap<Rc<str>, Symbol>,
 }
 
 impl Interner {

@@ -3,11 +3,9 @@
 //! The IR keeps attributes as their textual spelling.  This module translates
 //! the spellings we support to and from the PARAMATTR records used by LLVM.
 
-use std::collections::HashMap;
-
 use llvm_rust_ir::names::{quote_bytes, unescape_bytes};
 use llvm_rust_ir::{Attribute, Module, TypeId, TypeTable};
-use llvm_rust_support::{Error, Result};
+use llvm_rust_support::{Error, FastHashMap, Result};
 
 use crate::bitstream::Record;
 
@@ -196,7 +194,7 @@ fn type_attribute_code(text: &str) -> Option<u64> {
 /// Merges `incoming` into `existing` with LLVM's last-writer-wins rule for
 /// attributes of the same kind or string key.
 pub(crate) fn merge_attributes(existing: &mut Vec<Attribute>, incoming: &[Attribute]) {
-    let mut positions: HashMap<AttributeKey, usize> = existing
+    let mut positions: FastHashMap<AttributeKey, usize> = existing
         .iter()
         .enumerate()
         .map(|(index, attr)| (attribute_key(attr), index))
@@ -215,7 +213,7 @@ pub(crate) fn merge_attributes(existing: &mut Vec<Attribute>, incoming: &[Attrib
 /// Collapses duplicate attributes in one decoded group, keeping the last value
 /// for each kind or string key.
 pub(crate) fn deduplicate_attributes(attrs: &mut Vec<Attribute>) {
-    let mut positions: HashMap<AttributeKey, usize> = HashMap::new();
+    let mut positions: FastHashMap<AttributeKey, usize> = FastHashMap::default();
     let mut write = 0;
     for read in 0..attrs.len() {
         let key = attribute_key(&attrs[read]);
@@ -1055,7 +1053,7 @@ mod tests {
     fn decodes_legacy_function_memory_intersection() {
         let record = Record {
             code: PARAMATTR_GRP_CODE_ENTRY,
-            operands: vec![1, u64::from(u32::MAX), 0, 20, 0, 21, 0, 20],
+            operands: vec![1, u64::from(u32::MAX), 0, 20, 0, 21, 0, 20].into(),
             blob: None,
         };
         let (_, index, attrs) =
@@ -1116,7 +1114,7 @@ mod tests {
     fn decodes_version_two_memory_but_rejects_target_effects() {
         let record = |value| Record {
             code: PARAMATTR_GRP_CODE_ENTRY,
-            operands: vec![1, u64::from(u32::MAX), 1, 86, value],
+            operands: vec![1, u64::from(u32::MAX), 1, 86, value].into(),
             blob: None,
         };
         let (_, _, attrs) = decode_attribute_group(
@@ -1174,7 +1172,7 @@ mod tests {
     fn llvm19_decode_keeps_target_validation() {
         let record = |value: u64| Record {
             code: PARAMATTR_GRP_CODE_ENTRY,
-            operands: vec![1, u64::from(u32::MAX), 1, 86, value],
+            operands: vec![1, u64::from(u32::MAX), 1, 86, value].into(),
             blob: None,
         };
         // arg=read, inaccessible=write, other=read, target0/1=write. Legacy
@@ -1231,7 +1229,7 @@ mod tests {
         assert!(MemoryEffects::from_int(encoded, false).is_err());
         let record = Record {
             code: PARAMATTR_GRP_CODE_ENTRY,
-            operands: vec![1, u64::from(u32::MAX), 1, 86, encoded],
+            operands: vec![1, u64::from(u32::MAX), 1, 86, encoded].into(),
             blob: None,
         };
         let (_, _, attrs) = decode_attribute_group(

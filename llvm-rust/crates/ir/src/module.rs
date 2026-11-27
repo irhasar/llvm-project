@@ -1,8 +1,8 @@
 //! The IR module: types, globals, functions, and constants.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use llvm_rust_support::{Arena, Idx, Interner, Symbol};
+use llvm_rust_support::{Arena, FastHashMap, Idx, Interner, Symbol};
 
 use crate::constant::{ConstId, ConstKind, Constant, ConstantPool};
 use crate::function::{FuncId, Function};
@@ -91,15 +91,15 @@ pub struct Module {
     pub interner: Interner,
     pub named_types: Vec<TypeId>,
     pub attr_groups: Vec<(u32, String)>,
-    global_names: HashMap<Symbol, GlobalId>,
-    function_names: HashMap<Symbol, FuncId>,
-    global_order: HashMap<GlobalId, u32>,
-    function_order: HashMap<FuncId, u32>,
+    global_names: FastHashMap<Symbol, GlobalId>,
+    function_names: FastHashMap<Symbol, FuncId>,
+    global_order: FastHashMap<GlobalId, u32>,
+    function_order: FastHashMap<FuncId, u32>,
     next_order: u32,
     unnamed_globals: HashSet<GlobalId>,
     unnamed_functions: HashSet<FuncId>,
-    unnamed_global_slots: HashMap<GlobalId, u32>,
-    unnamed_function_slots: HashMap<FuncId, u32>,
+    unnamed_global_slots: FastHashMap<GlobalId, u32>,
+    unnamed_function_slots: FastHashMap<FuncId, u32>,
 }
 
 impl Module {
@@ -219,8 +219,8 @@ impl Module {
     /// Retargets instruction operands that named a symbol before its kind was
     /// known, mirroring [`Self::resolve_forward_references`] for constants.
     pub fn resolve_forward_operands(&mut self) {
-        let mut global_to_function = HashMap::new();
-        let mut invalid_globals = HashMap::new();
+        let mut global_to_function = FastHashMap::default();
+        let mut invalid_globals = FastHashMap::default();
         for (id, global) in self.globals.iter() {
             if !self.types.is_valid(global.ty) {
                 invalid_globals.insert(id, global.name);
@@ -229,8 +229,8 @@ impl Module {
                 }
             }
         }
-        let mut function_to_global = HashMap::new();
-        let mut invalid_functions = HashMap::new();
+        let mut function_to_global = FastHashMap::default();
+        let mut invalid_functions = FastHashMap::default();
         for (id, function) in self.functions.iter() {
             if !self.types.is_valid(function.ty) {
                 invalid_functions.insert(id, function.name);
@@ -238,6 +238,9 @@ impl Module {
                     function_to_global.insert(function.name, global);
                 }
             }
+        }
+        if invalid_globals.is_empty() && invalid_functions.is_empty() {
+            return;
         }
         let pointer = self.types.pointer();
         let functions: Vec<FuncId> = self.functions.iter().map(|(id, _)| id).collect();
@@ -354,6 +357,9 @@ impl Module {
     pub fn assign_unnamed_slots(&mut self) {
         self.unnamed_global_slots.clear();
         self.unnamed_function_slots.clear();
+        if self.unnamed_globals.is_empty() && self.unnamed_functions.is_empty() {
+            return;
+        }
         let mut slot = 0;
         for id in self.ordered_globals() {
             if self.is_unnamed_global(id) {
