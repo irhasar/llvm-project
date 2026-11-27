@@ -1576,6 +1576,9 @@ impl<'a> Parser<'a> {
                 if &*text == "getelementptr" {
                     return self.parse_const_gep(ty, span);
                 }
+                if &*text == "blockaddress" {
+                    return self.parse_const_blockaddress(ty, span);
+                }
                 if let Some(op) = CastOp::parse(&text) {
                     return self.parse_const_cast(ty, op, span);
                 }
@@ -1644,6 +1647,27 @@ impl<'a> Parser<'a> {
                 span,
             )),
         }
+    }
+
+    fn parse_const_blockaddress(&mut self, result_ty: TypeId, span: Span) -> Result<ConstId> {
+        if !matches!(self.module.types.get(result_ty), Type::Pointer) {
+            return Err(Error::parse_at("blockaddress must produce a pointer", span));
+        }
+        self.expect_punct('(')?;
+        let (name, name_span, quoted) = self.expect_global()?;
+        let symbol = self.reference_symbol(&name, quoted, name_span)?;
+        let function = self
+            .module
+            .function_named(symbol)
+            .unwrap_or_else(|| self.module.function_or_insert(symbol));
+        self.expect_punct(',')?;
+        let block = self.expect_local()?.0;
+        let block = self.module.intern(&block);
+        self.expect_punct(')')?;
+        Ok(self.module.add_constant(Constant::new(
+            result_ty,
+            ConstKind::BlockAddress { function, block },
+        )))
     }
 
     fn parse_const_gep(&mut self, result_ty: TypeId, span: Span) -> Result<ConstId> {
@@ -2449,6 +2473,33 @@ impl<'a> Parser<'a> {
                 self.expect_punct(',')?;
                 let ty = self.parse_type()?;
                 Ok((InstKind::VaArg { list, ty }, Some(ty)))
+            }
+            "indirectbr" => {
+                self.advance();
+                let address_ty = self.parse_type()?;
+                let address = self.parse_value(function, address_ty)?;
+                if !matches!(self.module.types.get(address_ty), Type::Pointer) {
+                    return Err(self.error("indirectbr address is not a pointer"));
+                }
+                self.expect_punct(',')?;
+                self.expect_punct('[')?;
+                let mut destinations = Vec::new();
+                if !self.eat_punct(']') {
+                    loop {
+                        destinations.push(self.parse_block_ref(function)?);
+                        if !self.eat_punct(',') {
+                            break;
+                        }
+                    }
+                    self.expect_punct(']')?;
+                }
+                Ok((
+                    InstKind::IndirectBr {
+                        address,
+                        destinations,
+                    },
+                    None,
+                ))
             }
             "unreachable" => {
                 self.advance();

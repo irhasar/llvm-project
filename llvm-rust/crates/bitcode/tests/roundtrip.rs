@@ -487,3 +487,54 @@ def:
         "{text}"
     );
 }
+
+#[test]
+fn round_trips_blockaddress_and_indirectbr() {
+    let source = r#"
+@dispatch = global ptr blockaddress(@f, %case_a)
+@dispatch_aligned = global ptr blockaddress(@f, %case_b), align 8
+
+define void @f(i1 %c) {
+entry:
+  br i1 %c, label %case_a, label %case_b
+
+case_a:
+  br label %exit
+
+case_b:
+  br label %exit
+
+exit:
+  %target = phi ptr [ blockaddress(@f, %case_a), %case_a ], [ blockaddress(@f, %case_b), %case_b ]
+  indirectbr ptr %target, [label %case_a, label %case_b]
+}
+
+define void @empty(ptr %target) {
+entry:
+  indirectbr ptr %target, []
+}
+"#;
+    let mut module = parse_module(source).expect("parse blockaddress");
+    let bytes = write_bitcode(&mut module).expect("write blockaddress");
+    let read = read_bitcode(&bytes).expect("read blockaddress");
+    let text = print_module(&read);
+    assert!(
+        text.contains("@dispatch = global ptr blockaddress(@f, %case_a)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("@dispatch_aligned = global ptr blockaddress(@f, %case_b), align 8"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "%target = phi ptr [ blockaddress(@f, %case_a), %case_a ], [ blockaddress(@f, %case_b), %case_b ]"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("indirectbr ptr %target, [label %case_a, label %case_b]"),
+        "{text}"
+    );
+    assert!(text.contains("indirectbr ptr %target, []"), "{text}");
+}

@@ -144,10 +144,11 @@ attributes (`byval`, `sret`, `elementtype`), aggregate/vector element
 extraction and insertion, vector integer and floating-point arithmetic,
 vector comparisons and `select`, `shufflevector`, `freeze`, `fence`, and
 atomic `load`/`store` with system and single-thread sync scopes, `atomicrmw`,
-`cmpxchg`, and `va_arg`, plus `getelementptr` and cast constant expressions,
-are covered, including function-local aggregate constants and forward local
-element operands. The slice still does not cover metadata, other constant
-expressions, scalable-vector shuffles, or other sync scopes.
+`cmpxchg`, `va_arg`, `blockaddress` constants, and `indirectbr`, plus
+`getelementptr` and cast constant expressions, are covered, including
+function-local aggregate constants, cross-function block addresses, and
+forward local element operands. The slice still does not cover metadata, other
+constant expressions, scalable-vector shuffles, or other sync scopes.
 
 ## Gates and kill criteria
 

@@ -47,6 +47,7 @@ def main():
         with open(source, "w", encoding="utf-8") as out:
             out.write("declare void @use(ptr align 8, i32 noundef)\n")
             out.write("@slot = global i32 0\n")
+            out.write("@dispatch = global ptr blockaddress(@f0, %done)\n")
             out.write("%pair = type { i32, [2 x i8] }\n\n")
             for index in range(args.functions):
                 out.write(
@@ -80,6 +81,13 @@ def main():
                 out.write("  %sum5 = add i32 %sum4, %va\n")
                 out.write("  store atomic i32 %sum5, ptr @slot release, align 4\n")
                 out.write("  call void @use(ptr align 8 @slot, i32 noundef %sum5)\n")
+                out.write("  br label %dispatch\n\n")
+                out.write("dispatch:\n")
+                out.write(
+                    f"  %target = phi ptr [ blockaddress(@f{index}, %done), %entry ]\n"
+                )
+                out.write("  indirectbr ptr %target, [label %done]\n\n")
+                out.write("done:\n")
                 out.write("  ret i32 %sum5\n}\n\n")
 
         prefix = ["taskset", "-c", "0"]

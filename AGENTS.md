@@ -168,6 +168,26 @@ correctness-gated by `cargo test --workspace` and `tests/differential.sh`.
   `[valistty, valist, instty]`. The value is a plain relative value, not a
   `pushValueAndType` pair, because its type is already in slot 0. The list
   operand must be a pointer; the result type is `instty`.
+- `blockaddress` uses `CST_CODE_BLOCKADDRESS = 21` with
+  `[function_ty, function_value, block_index]`. It can appear in the
+  module-level constants block or a function-local constants block. Decode
+  module-level constants in one pass: add the constant, then queue its ID for
+  block resolution after all function bodies are read. Only function-local
+  constants preallocate slots, because local aggregates may reference a later
+  local constant. Preallocating every module constant just to support
+  blockaddress cost about 5% on a 50k-global module. The function value must
+  resolve to a `Function`, not a global wrapper.
+- `indirectbr` uses `FUNC_CODE_INST_INDIRECTBR = 31` with
+  `[opty, address, bb0, bb1, ...]`. The address is a relative value; the
+  destinations are absolute basic-block indices, not value IDs. An empty
+  destination list is valid in LLVM 19.
+- `FUNC_CODE_BLOCKADDR_USERS = 60` is a lazy-loading hint emitted after the
+  terminator of a function whose blocks are referenced by `blockaddress`.
+  Ignore it in the function body reader; treating it as an instruction fails
+  with "instruction after the last block".
+- LLVM abbreviations may contain a zero-width `Fixed(0)` field, for example
+  `SimpleGVarAbbrev` when the module has no alignment. `BitReader::read_bits`
+  must return zero for width 0 without consuming bits, not reject the field.
 - Consume parser tokens with `take` when the current token is always advanced.
   Do not clone `TokenKind` in type or constant parsing; `CStr` payloads are
   heap vectors and cloning them is avoidable.
@@ -222,6 +242,23 @@ function: assembly was 66.5 ms C++ / 26.7 ms Rust and disassembly 54.0 ms /
 27.4 ms, with peak RSS 60.8/15.0 MiB and 58.5/21.2 MiB. The larger corpus
 raises absolute times; the assembly ratio stayed at 2.5x and disassembly at
 2.0x.
+
+Post-`blockaddress`/`indirectbr` spot check on the 1,308,925-byte corpus with a
+dispatch block and one blockaddress constant per function: assembly was 72.3 ms
+C++ / 31.4 ms Rust and disassembly 59.9 ms / 34.0 ms, with peak RSS
+62.0/16.4 MiB and 59.4/26.1 MiB. Rust stayed at 2.3x assembly and 1.8x
+disassembly throughput with lower RSS.
+
+The absolute jump from the earlier 26.7/27.4 ms Rust numbers is corpus growth,
+not a code regression: a 25-pair A/B on the identical 1,170,987-byte corpus
+measured assembly 26.86 -> 26.95 ms (+0.3%) and disassembly stayed at about
+28.2 ms. A constants-heavy 50k-global module did expose a real regression from
+preallocating every module constant for blockaddress: read 23.8 -> 25.0 ms
+(+5.0%) and disassemble 28.4 -> 30.0 ms (+5.8%). Restoring single-pass module
+constants with deferred blockaddress IDs removed it; the 25-pair A/B then
+measured read -0.7% and disassemble -1.5%. The slice also fixed a reader bug
+that only appeared with unaligned globals: zero-width abbreviation fields must
+decode as zero.
 
 Performance lesson: a full-file `Vec<Token>` retained 354k tokens at 48 bytes
 each (552k capacity) and dominated peak RSS and page-fault time. The parser now

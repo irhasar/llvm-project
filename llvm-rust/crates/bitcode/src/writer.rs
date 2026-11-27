@@ -67,6 +67,7 @@ const CST_STRING: u32 = 8;
 const CST_CE_CAST: u32 = 11;
 const CST_CE_GEP: u32 = 32;
 const CST_POISON: u32 = 26;
+const CST_BLOCKADDRESS: u32 = 21;
 
 const FUNC_DECLAREBLOCKS: u32 = 1;
 const FUNC_INST_BINOP: u32 = 2;
@@ -94,6 +95,7 @@ const FUNC_INST_SHUFFLEVEC: u32 = 8;
 const FUNC_INST_FENCE: u32 = 36;
 const FUNC_INST_FREEZE: u32 = 58;
 const FUNC_INST_VAARG: u32 = 23;
+const FUNC_INST_INDIRECTBR: u32 = 31;
 const FUNC_INST_EXTRACTVAL: u32 = 26;
 const FUNC_INST_INSERTVAL: u32 = 27;
 
@@ -832,6 +834,30 @@ impl<'a> Writer<'a> {
                         self.stream.emit_record(CST_CE_CAST, &operands);
                     }
                 },
+                ConstKind::BlockAddress { function, block } => {
+                    let function_ref = self
+                        .module
+                        .functions
+                        .try_get(function)
+                        .ok_or_else(|| Error::bitcode("unknown blockaddress function"))?;
+                    let function_ty = function_ref.ty;
+                    let block_id = function_ref
+                        .block_named(block)
+                        .ok_or_else(|| Error::bitcode("unknown blockaddress block"))?;
+                    let block_index = block_index(function_ref, block_id)?;
+                    let function_value = self
+                        .functions
+                        .get(function.index())
+                        .copied()
+                        .filter(|index| *index != u32::MAX)
+                        .ok_or_else(|| Error::bitcode("unknown blockaddress function value"))?;
+                    let operands = [
+                        self.type_index(function_ty)? as u64,
+                        function_value as u64,
+                        block_index as u64,
+                    ];
+                    self.stream.emit_record(CST_BLOCKADDRESS, &operands);
+                }
                 ConstKind::String(bytes) => {
                     let operands: Vec<u64> = bytes.iter().map(|b| *b as u64).collect();
                     self.stream.emit_record(CST_STRING, &operands);
@@ -1256,6 +1282,18 @@ impl<'a> Writer<'a> {
                     self.push_value_and_type(&mut operands, value, inst_id)?;
                 }
                 self.stream.emit_record(FUNC_INST_RET, &operands);
+            }
+            InstKind::IndirectBr {
+                address,
+                destinations,
+            } => {
+                let mut operands = Operands::new();
+                operands.push(self.type_index(address.ty)? as u64);
+                self.push_value(&mut operands, address, inst_id)?;
+                for destination in destinations {
+                    operands.push(block_index(function, *destination)? as u64);
+                }
+                self.stream.emit_record(FUNC_INST_INDIRECTBR, &operands);
             }
             InstKind::Br { dest } => {
                 self.stream

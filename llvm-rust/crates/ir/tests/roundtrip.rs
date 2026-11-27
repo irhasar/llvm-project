@@ -657,3 +657,77 @@ fn parser_rejects_invalid_constant_gep() {
         parse_module(source).expect_err("invalid constant GEP must fail");
     }
 }
+
+#[test]
+fn blockaddress_and_indirectbr_roundtrip() {
+    let source = r#"
+@dispatch = global ptr blockaddress(@f, %case_a)
+
+define void @f(i1 %c) {
+entry:
+  br i1 %c, label %case_a, label %case_b
+
+case_a:
+  br label %exit
+
+case_b:
+  br label %exit
+
+exit:
+  %target = phi ptr [ blockaddress(@f, %case_a), %case_a ], [ blockaddress(@f, %case_b), %case_b ]
+  indirectbr ptr %target, [label %case_a, label %case_b]
+}
+
+define void @empty(ptr %target) {
+entry:
+  indirectbr ptr %target, []
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("@dispatch = global ptr blockaddress(@f, %case_a)"));
+    assert!(
+        printed.contains(
+            "%target = phi ptr [ blockaddress(@f, %case_a), %case_a ], [ blockaddress(@f, %case_b), %case_b ]"
+        )
+    );
+    assert!(printed.contains("indirectbr ptr %target, [label %case_a, label %case_b]"));
+    assert!(printed.contains("indirectbr ptr %target, []"));
+}
+
+#[test]
+fn verifier_rejects_unknown_blockaddress_block() {
+    let source = r#"
+@dispatch = global ptr blockaddress(@f, %missing)
+
+define void @f() {
+entry:
+  ret void
+}
+"#;
+    let module = parse_module(source).expect("parse blockaddress");
+    verify_module(&module).expect_err("unknown blockaddress block must fail verification");
+}
+
+#[test]
+fn parser_rejects_non_pointer_blockaddress() {
+    let source = r#"
+define void @f() {
+entry:
+  ret void
+}
+
+@bad = global i32 blockaddress(@f, %entry)
+"#;
+    parse_module(source).expect_err("blockaddress must produce a pointer");
+}
+
+#[test]
+fn parser_rejects_non_pointer_indirectbr_address() {
+    let source = r#"
+define void @f(i32 %target) {
+entry:
+  indirectbr i32 %target, []
+}
+"#;
+    parse_module(source).expect_err("indirectbr address must be a pointer");
+}

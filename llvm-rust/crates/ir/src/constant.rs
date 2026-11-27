@@ -1,6 +1,6 @@
 //! Constants and the module-level constant pool.
 
-use llvm_rust_support::{Arena, Idx};
+use llvm_rust_support::{Arena, Idx, Symbol};
 
 use crate::function::FuncId;
 use crate::inst::{CastOp, GepIndex};
@@ -39,6 +39,11 @@ pub enum ConstKind {
     Expr(ConstExpr),
     Global(GlobalId),
     Function(FuncId),
+    /// `blockaddress(@function, %block)`.
+    BlockAddress {
+        function: FuncId,
+        block: Symbol,
+    },
 }
 
 /// A constant expression.

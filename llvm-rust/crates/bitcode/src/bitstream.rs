@@ -210,8 +210,11 @@ impl<'a> BitReader<'a> {
     }
 
     pub fn read_bits(&mut self, bits: u32) -> Result<u64> {
-        if bits == 0 || bits > 32 {
+        if bits > 32 {
             return Err(Error::bitcode("invalid bit width"));
+        }
+        if bits == 0 {
+            return Ok(0);
         }
         if self.bit + bits as usize > self.bytes.len() * 8 {
             return Err(Error::bitcode("unexpected end of bitstream"));
@@ -624,5 +627,19 @@ fn decode_field(reader: &mut BitReader<'_>, op: &AbbrevOp) -> Result<u64> {
             Ok(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"[value] as u64)
         }
         AbbrevOp::Array(_) | AbbrevOp::Blob => Err(Error::bitcode("invalid scalar abbreviation")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_width_fields_decode_as_zero() {
+        let bytes = b"BC\xc0\xde\x00\x00\x00\x00";
+        let mut reader = BitReader::new(bytes).expect("bitcode header");
+        let bit = reader.bit;
+        assert_eq!(reader.read_bits(0).expect("zero width"), 0);
+        assert_eq!(reader.bit, bit);
     }
 }

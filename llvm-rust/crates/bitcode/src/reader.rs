@@ -10,7 +10,7 @@ use llvm_rust_ir::{
     InstKind, IntFlags, Linkage, Module, Operand, OperandKind, SyncScope, TailKind, ThreadLocal,
     Type, TypeId, Visibility,
 };
-use llvm_rust_support::{Error, FastHashMap, Result};
+use llvm_rust_support::{Error, FastHashMap, Result, Symbol};
 
 use crate::attrs::{
     PARAMATTR_CODE_ENTRY, PARAMATTR_GRP_CODE_ENTRY, decode_attribute_group, deduplicate_attributes,
@@ -67,11 +67,13 @@ const CST_AGGREGATE: u64 = 7;
 const CST_STRING: u64 = 8;
 const CST_CSTRING: u64 = 9;
 const CST_DATA: u64 = 22;
+const CST_BLOCKADDRESS: u64 = 21;
 const CST_CE_CAST: u64 = 11;
 const CST_CE_GEP: u64 = 32;
 const CST_POISON: u64 = 26;
 
 const FUNC_DECLAREBLOCKS: u64 = 1;
+const FUNC_BLOCKADDR_USERS: u64 = 60;
 const FUNC_INST_BINOP: u64 = 2;
 const FUNC_INST_CAST: u64 = 3;
 const FUNC_INST_SELECT_OLD: u64 = 5;
@@ -98,6 +100,7 @@ const FUNC_INST_SHUFFLEVEC: u64 = 8;
 const FUNC_INST_FENCE: u64 = 36;
 const FUNC_INST_FREEZE: u64 = 58;
 const FUNC_INST_VAARG: u64 = 23;
+const FUNC_INST_INDIRECTBR: u64 = 31;
 const FUNC_INST_EXTRACTVAL: u64 = 26;
 const FUNC_INST_INSERTVAL: u64 = 27;
 
@@ -162,6 +165,7 @@ pub fn read_bitcode_with_options(bytes: &[u8], options: ReadOptions) -> Result<M
         types: Vec::new(),
         values: Vec::new(),
         pending_globals: Vec::new(),
+        pending_block_addresses: Vec::new(),
         defined_functions: Vec::new(),
         next_body: 0,
         attr_groups: FastHashMap::default(),
@@ -172,6 +176,7 @@ pub fn read_bitcode_with_options(bytes: &[u8], options: ReadOptions) -> Result<M
     };
     reader.read_module(module_block)?;
     reader.resolve_globals()?;
+    reader.resolve_block_addresses()?;
     reader.module.assign_unnamed_slots();
     Ok(reader.module)
 }
@@ -183,6 +188,7 @@ struct Reader {
     types: Vec<TypeId>,
     values: Vec<ValueRef>,
     pending_globals: Vec<(GlobalId, u32)>,
+    pending_block_addresses: Vec<(ConstId, u32, u32)>,
     defined_functions: Vec<FuncId>,
     next_body: usize,
     attr_groups: FastHashMap<u64, (u32, Arc<Vec<Attribute>>)>,
@@ -565,23 +571,25 @@ impl Reader {
         Ok(())
     }
 
-    fn read_constants(&mut self, block: &Block, module_level: bool) -> Result<Vec<ConstId>> {
+    fn read_constants(&mut self, block: &Block, module_level: bool) -> Result<()> {
         let mut current_ty = None;
-        let mut ids = Vec::new();
         for record in block.records() {
             if record.code == CST_SETTYPE {
                 current_ty = Some(self.type_at(record.operands.first().copied().unwrap_or(0))?);
                 continue;
             }
             let ty = current_ty.ok_or_else(|| Error::bitcode("constant without a type"))?;
-            let kind = self.read_constant_kind(record.code, ty, record)?;
+            let (kind, pending) =
+                self.read_constant_kind_with_locals(record.code, ty, record, None, 0)?;
             let id = self.module.add_constant(Constant::new(ty, kind));
-            ids.push(id);
             if module_level {
                 self.values.push(ValueRef::Constant(id));
             }
+            if let Some((function, block)) = pending {
+                self.pending_block_addresses.push((id, function, block));
+            }
         }
-        Ok(ids)
+        Ok(())
     }
 
     /// Reads a function-local constants block.
@@ -608,15 +616,22 @@ impl Reader {
             })
             .collect();
         for (index, (code, ty, record)) in records.iter().enumerate() {
-            let kind =
+            let (kind, pending) =
                 self.read_constant_kind_with_locals(*code, *ty, record, Some(&ids), local_base)?;
             self.module.constants[ids[index]] = Constant::new(*ty, kind);
+            if let Some((function, block)) = pending {
+                self.pending_block_addresses
+                    .push((ids[index], function, block));
+            }
         }
         Ok(ids)
     }
 
+    #[cfg(test)]
     fn read_constant_kind(&mut self, code: u64, ty: TypeId, record: &Record) -> Result<ConstKind> {
-        self.read_constant_kind_with_locals(code, ty, record, None, 0)
+        Ok(self
+            .read_constant_kind_with_locals(code, ty, record, None, 0)?
+            .0)
     }
 
     fn read_constant_kind_with_locals(
@@ -626,8 +641,9 @@ impl Reader {
         record: &Record,
         locals: Option<&[ConstId]>,
         local_base: u32,
-    ) -> Result<ConstKind> {
-        Ok(match code {
+    ) -> Result<(ConstKind, Option<(u32, u32)>)> {
+        let mut pending = None;
+        let kind = match code {
             CST_NULL => match self.module.types.get(ty) {
                 Type::Int(_) => ConstKind::Int(0),
                 Type::Float(_) => ConstKind::Float(0),
@@ -638,6 +654,19 @@ impl Reader {
             },
             CST_UNDEF => ConstKind::Undef,
             CST_POISON => ConstKind::Poison,
+            CST_BLOCKADDRESS => {
+                if record.operands.len() < 3 {
+                    return Err(Error::bitcode("invalid blockaddress record"));
+                }
+                if !matches!(self.module.types.get(ty), Type::Pointer) {
+                    return Err(Error::bitcode("blockaddress type is not a pointer"));
+                }
+                pending = Some((record.operands[1] as u32, record.operands[2] as u32));
+                ConstKind::BlockAddress {
+                    function: FuncId::from_raw(0),
+                    block: Symbol::default(),
+                }
+            }
             CST_INTEGER => {
                 let value = decode_signed(record.operands.first().copied().unwrap_or(0));
                 ConstKind::Int(value as u128)
@@ -775,7 +804,41 @@ impl Reader {
                 ConstKind::Aggregate(elements)
             }
             other => return Err(Error::bitcode(format!("unsupported constant code {other}"))),
-        })
+        };
+        Ok((kind, pending))
+    }
+
+    fn resolve_block_addresses(&mut self) -> Result<()> {
+        let pending = core::mem::take(&mut self.pending_block_addresses);
+        for (constant, function_value, block_index) in pending {
+            let function = match self.values.get(function_value as usize).copied() {
+                Some(ValueRef::Function(function)) => function,
+                _ => {
+                    return Err(Error::bitcode(
+                        "blockaddress function is not a function value",
+                    ));
+                }
+            };
+            let block = {
+                let function_ref = self
+                    .module
+                    .functions
+                    .try_get(function)
+                    .ok_or_else(|| Error::bitcode("blockaddress function is undefined"))?;
+                let block = function_ref
+                    .block_order()
+                    .get(block_index as usize)
+                    .copied()
+                    .ok_or_else(|| Error::bitcode("blockaddress block index is out of range"))?;
+                function_ref
+                    .blocks
+                    .get(block)
+                    .name
+                    .ok_or_else(|| Error::bitcode("blockaddress target block has no name"))?
+            };
+            self.module.constants[constant].kind = ConstKind::BlockAddress { function, block };
+        }
+        Ok(())
     }
 
     fn resolve_globals(&mut self) -> Result<()> {
@@ -873,6 +936,9 @@ impl Reader {
         for item in &block.items {
             match item {
                 Item::Record(record) => {
+                    if record.code == FUNC_BLOCKADDR_USERS {
+                        continue;
+                    }
                     if record.code == FUNC_DECLAREBLOCKS {
                         saw_declare_blocks = true;
                         let count = record.operands.first().copied().unwrap_or(0) as usize;
@@ -1848,6 +1914,24 @@ impl Reader {
                     None,
                 ))
             }
+            FUNC_INST_INDIRECTBR => {
+                if record.operands.len() < 2 {
+                    return Err(Error::bitcode("invalid indirectbr record"));
+                }
+                let op_ty = self.type_at(record.operands[0])?;
+                let (address, index) = self.decode_value_as(record, 1, inst_id, state, op_ty)?;
+                let mut destinations = Vec::new();
+                for block in &record.operands[index..] {
+                    destinations.push(self.block_at(state, *block as usize)?);
+                }
+                Ok((
+                    InstKind::IndirectBr {
+                        address,
+                        destinations,
+                    },
+                    None,
+                ))
+            }
             FUNC_INST_VAARG => {
                 if record.operands.len() != 3 {
                     return Err(Error::bitcode("invalid va_arg record"));
@@ -2122,6 +2206,7 @@ mod tests {
             types: Vec::new(),
             values: Vec::new(),
             pending_globals: Vec::new(),
+            pending_block_addresses: Vec::new(),
             defined_functions: Vec::new(),
             next_body: 0,
             attr_groups,
@@ -2341,5 +2426,18 @@ mod tests {
             .decode_instruction(&record, 1, &mut state)
             .expect_err("short fence record must fail");
         assert!(error.message.contains("invalid fence record"), "{error}");
+    }
+    #[test]
+    fn rejects_malformed_blockaddress_record() {
+        let mut reader = test_reader(Vec::new());
+        let ty = reader.ptr_type().expect("pointer type");
+        let record = Record {
+            code: CST_BLOCKADDRESS,
+            operands: vec![0, 1].into(),
+            blob: None,
+        };
+        reader
+            .read_constant_kind(CST_BLOCKADDRESS, ty, &record)
+            .expect_err("blockaddress without a block must fail");
     }
 }

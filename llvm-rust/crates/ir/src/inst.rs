@@ -809,6 +809,10 @@ pub enum InstKind {
         list: Operand,
         ty: TypeId,
     },
+    IndirectBr {
+        address: Operand,
+        destinations: Vec<BlockId>,
+    },
     Unreachable,
 }
 
@@ -821,6 +825,7 @@ impl InstKind {
                 | Self::Br { .. }
                 | Self::CondBr { .. }
                 | Self::Switch { .. }
+                | Self::IndirectBr { .. }
                 | Self::Unreachable
         )
     }

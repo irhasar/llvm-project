@@ -704,6 +704,28 @@ fn write_instruction(
             out.push_str(", ");
             let _ = write!(out, "{}", module.display_type(*ty));
         }
+        InstKind::IndirectBr {
+            address,
+            destinations,
+        } => {
+            out.push_str("indirectbr ");
+            write_operand(module, function, *address, out);
+            out.push_str(", [");
+            for (index, destination) in destinations.iter().enumerate() {
+                if index != 0 {
+                    out.push_str(", ");
+                }
+                out.push_str("label %");
+                let label = function
+                    .blocks
+                    .get(*destination)
+                    .name
+                    .map(|name| module.name(name))
+                    .unwrap_or("0");
+                let _ = write_name(out, label);
+            }
+            out.push(']');
+        }
         InstKind::Unreachable => out.push_str("unreachable"),
     }
 }
@@ -800,6 +822,13 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
         ConstKind::Function(id) => {
             out.push('@');
             write_function_name(out, module, *id);
+        }
+        ConstKind::BlockAddress { function, block } => {
+            out.push_str("blockaddress(@");
+            write_function_name(out, module, *function);
+            out.push_str(", %");
+            let _ = write_name(out, module.name(*block));
+            out.push(')');
         }
         ConstKind::Aggregate(elems) => {
             let (open, close, padded) = match module.types.get(constant.ty) {

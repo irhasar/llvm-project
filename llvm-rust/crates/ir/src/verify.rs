@@ -31,8 +31,12 @@ pub fn verify_module(module: &Module) -> Result<(), Vec<VerifyError>> {
     }
 
     for (_, constant) in module.constants.iter() {
-        if let ConstKind::Expr(expr) = &constant.kind {
-            verify_const_expr(module, constant.ty, expr, &mut errors);
+        match &constant.kind {
+            ConstKind::Expr(expr) => verify_const_expr(module, constant.ty, expr, &mut errors),
+            ConstKind::BlockAddress { function, block } => {
+                verify_block_address(module, constant.ty, *function, *block, &mut errors);
+            }
+            _ => {}
         }
     }
 
@@ -608,6 +612,20 @@ fn verify_instruction(
                 ));
             }
         }
+        InstKind::IndirectBr {
+            address,
+            destinations,
+        } => {
+            check_operand(module, function, *address, errors, "indirectbr address");
+            if module.types.is_valid(address.ty)
+                && !matches!(module.types.get(address.ty), Type::Pointer)
+            {
+                errors.push(Error::verify("indirectbr address is not a pointer"));
+            }
+            for destination in destinations {
+                check_block(function, *destination, errors, "indirectbr destination");
+            }
+        }
         InstKind::Unreachable => {}
     }
 }
@@ -779,6 +797,29 @@ fn check_operand(
             ))),
             None => errors.push(Error::verify(format!("{what} function is out of range"))),
         },
+    }
+}
+
+fn verify_block_address(
+    module: &Module,
+    ty: crate::ty::TypeId,
+    function_id: crate::function::FuncId,
+    block: llvm_rust_support::Symbol,
+    errors: &mut Vec<VerifyError>,
+) {
+    if !matches!(module.types.get(ty), Type::Pointer) {
+        errors.push(Error::verify("blockaddress type is not a pointer"));
+    }
+    let Some(function) = module.functions.try_get(function_id) else {
+        errors.push(Error::verify("blockaddress function is undefined"));
+        return;
+    };
+    let Some(block_id) = function.block_named(block) else {
+        errors.push(Error::verify("blockaddress block is undefined"));
+        return;
+    };
+    if !function.block_order().contains(&block_id) {
+        errors.push(Error::verify("blockaddress block is not defined"));
     }
 }
 

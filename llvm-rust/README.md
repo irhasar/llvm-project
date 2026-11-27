@@ -48,8 +48,10 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   comparisons, `icmp`/`fcmp`, `alloca`, `load`, `store`, `getelementptr`,
   `call`, `phi`, vector `select`, `shufflevector`, `freeze`, `fence` with
   system and single-thread sync scopes, atomic `load`/`store` with orderings
-  and sync scopes, `atomicrmw`, `cmpxchg`, and `va_arg`, casts, `ret`, `br`,
-  `condbr`, `switch`, `unreachable`.
+  and sync scopes, `atomicrmw`, `cmpxchg`, `va_arg`, and `indirectbr`, casts,
+  `ret`, `br`, `condbr`, `switch`, `unreachable`, plus `blockaddress`
+  constants that target named or numbered blocks in the same or another
+  function.
   Unnamed values and blocks share one
   numbering sequence, and `phi` accepts forward and self references.
   `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
@@ -129,8 +131,8 @@ rejected otherwise instead of being lossily rewritten.
 This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
-debug info, constant expressions other than GEPs and casts,
-`invoke`/`landingpad`/`indirectbr`/`callbr`, scalable vector shuffles, sync
+debug info, other constant expressions (GEPs, casts, and `blockaddress` are
+supported), `invoke`/`landingpad`/`callbr`, scalable vector shuffles, sync
 scopes beyond system and single-thread, or
 `fp128`/`x86_fp80`/`ppc_fp128` constants (wide float records are rejected).
 MC, object, X86, and codegen are still out of scope.
@@ -190,9 +192,10 @@ python3 tests/bench.py --runs 11 --warmup 3
 
 ## M1 results
 
-Differential harness: all 35 generic modules in `tests/corpus/` match the
-selected C++ oracle in both directions after normalizing `source_filename`,
-`ModuleID`, and target-memory spelling. The
+Differential harness: all 38 generic corpus inputs in `tests/corpus/` (37 text
+modules plus the checked-in bitcode fixture) match the selected C++ oracle in
+both directions after normalizing `source_filename`, `ModuleID`, and
+target-memory spelling. The
 `tests/corpus/aarch64_memory.ll` fixture is checked separately against
 LLVM 19 with `--llvm19`, covering legacy AArch64 memory with differing
 default and inaccessible access. A separate
@@ -224,8 +227,11 @@ including shrinking masks and `undef` masks canonicalized to `poison`,
 `syncscope("singlethread")`, atomic `load`/`store` with all valid orderings,
 volatile forms, and single-thread scope, `atomicrmw` integer and floating-point
 operations, `cmpxchg` success/failure orderings, weak/volatile forms,
-`va_arg` with scalar, pointer, vector, and struct result types, and
-function-local aggregate constants and forward local element operands.
+`va_arg` with scalar, pointer, vector, and struct result types, `blockaddress`
+constants at module and function scope, including cross-function targets and
+unnamed/numbered blocks, `indirectbr` with named, numbered, duplicate, and empty
+destination lists, and function-local aggregate constants and forward local
+element operands.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -238,26 +244,33 @@ function-local aggregate constants and forward local element operands.
 
 Benchmark on a synthetic corpus of 1000 functions, 10 arithmetic instructions,
 four aggregate/vector element operations, vector arithmetic, comparison,
-select, shufflevector, one atomic load, one atomic store, one `va_arg`, and
-one attributed call each (1,170,987 bytes), LLVM 19.1.7, `taskset -c 0`, 11
-runs after 3 warmups:
+select, shufflevector, one atomic load, one atomic store, one `va_arg`, one
+`blockaddress`/`indirectbr` dispatch block, and one attributed call each
+(1,308,925 bytes), LLVM 19.1.7, `taskset -c 0`, 11 runs after 3 warmups:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 66.5 ms | 64.3-69.2 ms | 60.8 MiB |
-| `llvm-as-rust` | 26.7 ms | 26.1-27.6 ms | 15.0 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 54.0 ms | 52.8-62.7 ms | 58.5 MiB |
-| `llvm-dis-rust` on C++ bitcode | 27.4 ms | 26.9-28.8 ms | 21.2 MiB |
+| `llvm-as` (C++) | 72.3 ms | 71.1-76.9 ms | 62.0 MiB |
+| `llvm-as-rust` | 31.4 ms | 31.0-32.8 ms | 16.4 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 59.9 ms | 59.4-61.9 ms | 59.4 MiB |
+| `llvm-dis-rust` on C++ bitcode | 34.0 ms | 33.2-37.4 ms | 26.1 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
 isolates decoder work from writer record layout. On this parser/printer/bitcode
-corpus, Rust throughput was about 2.5x the C++ assembler and 2.0x the C++
-disassembler, and peak RSS was about 4.1x and 2.8x lower respectively. The
-`va_arg` arm adds one instruction per function, so absolute times rose with the
-larger corpus while the ratios stayed in the same range. These are throughput
-and memory measurements, not a generated-code performance claim. The Rust binaries are
-5.5 MiB (`llvm-as-rust`) and 4.6 MiB (`llvm-dis-rust`); the C++ tools need the
-124 MiB `libLLVM.so.19.1`.
+corpus, Rust throughput was about 2.3x the C++ assembler and 1.8x the C++
+disassembler, and peak RSS was about 3.8x and 2.3x lower respectively. The
+`blockaddress`/`indirectbr` arm adds a dispatch block per function, so absolute
+times rose with the larger corpus while Rust kept a clear lead. A same-corpus
+A/B against the pre-blockaddress commit (1,170,987 bytes) measured assembly
+26.86 -> 26.95 ms (+0.3%) and disassembly stayed at about 28.2 ms, so the
+higher absolute numbers above come from corpus growth, not a code regression.
+A constants-heavy 50k-global module exposed a real +5% read regression from a
+first two-pass module-constant decoder; restoring single-pass module constants
+with deferred blockaddress IDs removed it (25-pair A/B: read -0.7%,
+disassemble -1.5%). These are throughput and memory measurements, not a
+generated-code performance claim. The Rust binaries are 5.6 MiB
+(`llvm-as-rust`) and 4.7 MiB (`llvm-dis-rust`); the C++ tools need the 124 MiB
+`libLLVM.so.19.1`.
 
 A same-corpus A/B check against the pre-atomic commit showed no atomic
 regression: assembly was 30.81 ms before and 30.28 ms after on the vector
@@ -269,8 +282,8 @@ That cut `llvm-as-rust` from 33.5 ms to 24.4 ms and peak RSS from 26.0 MiB to
 14.8 MiB on the same input.
 
 In-process component timings on the same corpus (50 iterations, no process
-startup or file I/O) are 12.21 ms parse, 3.59 ms print, 4.26 ms bitcode write,
-8.57 ms bitcode read, 15.56 ms assemble (parse plus write), and 12.20 ms
+startup or file I/O) are 14.29 ms parse, 4.48 ms print, 4.60 ms bitcode write,
+10.21 ms bitcode read, 19.06 ms assemble (parse plus write), and 14.26 ms
 disassemble (read plus print). The performance pass keeps token text borrowed
 from the source, streams tokens through a two-token window instead of retaining
 the whole file, caches primitive and named types, uses FNV maps and
