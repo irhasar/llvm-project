@@ -196,7 +196,7 @@ live on the `rust-migration-track-b` branch.
 
 ### Phase 1 - pure leaf functions in lib/Support (in progress)
 
-Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, 6x faster than the C++ fallback),
+Done: `CRC.cpp` (`LLVM_ENABLE_RUST_CRC`, up to 18x faster than the C++ fallback),
 `MD5.cpp` (`LLVM_ENABLE_RUST_MD5`), `SHA1.cpp` (`LLVM_ENABLE_RUST_SHA1`),
 `SHA256.cpp` (`LLVM_ENABLE_RUST_SHA256`), `Base64.cpp`
 (`LLVM_ENABLE_RUST_BASE64`), `ConvertUTF.cpp`
@@ -383,7 +383,7 @@ generic x86-64 target unless noted:
 
 | Component       | Rust vs C++                                   |
 |-----------------|-----------------------------------------------|
-| CRC-32          | 6.2x vs the byte loop, 1.3x vs slicing-by-8    |
+| CRC-32          | 18.3x vs the byte loop, 3.8x vs slicing-by-8   |
 | SHA-1           | 1.9x (SHA-NI path)                            |
 | SHA-256         | 4.1x (SHA-NI path)                            |
 | Base64 encode   | 1.0x-1.1x at 12 B, 1.5x at 48 B, 6.0x at 1 MiB |
@@ -657,24 +657,26 @@ Correctness:
 
 Performance. `llvm-crc-differential` prints this table; numbers below are from
 the CMake build on the same machine (AMD EPYC 9B14, GCC 14.2 at `-O3`,
-`rustc 1.100.0`), ns per call:
+`rustc 1.100.1`), ns per call:
 
 | bytes | C++ byte-wise | C++ slicing-by-8 | Rust | vs byte-wise | vs slicing-by-8 |
 | ----- | ------------- | ---------------- | ---- | ------------ | --------------- |
-| 16    | 41.0          | 8.3              | 7.5  | 5.45x        | 1.10x           |
-| 64    | 151.4         | 31.6             | 24.3 | 6.24x        | 1.30x           |
-| 256   | 604.3         | 124.3            | 93.7 | 6.45x        | 1.33x           |
-| 1024  | 2414.9        | 494.9            | 372.8| 6.48x        | 1.33x           |
-| 4096  | 9651.8        | 2028.8           | 1504.3| 6.42x       | 1.35x           |
-| 65536 | 154289.8      | 32459.9          | 24804.7| 6.22x      | 1.31x           |
+| 16    | 38.2          | 8.3              | 7.4  | 5.14x        | 1.12x           |
+| 64    | 151.4         | 31.6             | 23.7 | 6.40x        | 1.34x           |
+| 256   | 602.9         | 124.2            | 79.1 | 7.62x        | 1.57x           |
+| 1024  | 2413.7        | 495.4            | 181.1| 13.33x       | 2.74x           |
+| 4096  | 9641.9        | 1979.4           | 578.1| 16.68x       | 3.42x           |
+| 65536 | 154315.8      | 31653.3          | 8414.3| 18.34x      | 3.76x           |
 
-With matched target flags (`g++ -O3 -march=native` and
-`-C target-cpu=native`) the picture holds: 5.4-6.7x over the byte-wise loop and
-1.09-1.26x over the same slicing-by-8 algorithm.
+From 128 bytes up, a PCLMUL carry-less-multiply fold is selected through CPUID;
+it folds 16 bytes per iteration into a 128-bit accumulator and reduces the final
+160-bit value with a compile-time table. Smaller inputs use the slicing-by-32
+fallback, which is also the path on CPUs without PCLMUL or SSSE3. Both paths are
+bit-identical; `cargo test` compares them directly across the threshold and for
+a range of tail lengths.
 
-The C++ implementation LLVM ships is byte-at-a-time, so most of the win comes
-from the algorithm: 32 bytes per iteration with 32 slicing tables, then 16, 8,
-4 and 1 byte steps. Tables are generated at compile time by a `const fn`, so
+The fallback keeps 32 bytes per iteration with 32 slicing tables, then 16, 8,
+4 and 1 byte steps. All tables are generated at compile time by `const fn`, so
 there is no runtime initialization and no build script.
 
 One codegen trap is worth recording. With AVX2 enabled, LLVM's SLP vectorizer

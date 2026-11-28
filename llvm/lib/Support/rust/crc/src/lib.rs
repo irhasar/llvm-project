@@ -10,9 +10,9 @@
 // same CRC-32 as llvm::crc32: reflected, polynomial 0xEDB88320, initial value
 // 0xFFFFFFFF, final xor 0xFFFFFFFF.
 //
-// The C++ implementation is byte-at-a-time. This one folds 32 bytes per
-// iteration with 32 slicing tables, then falls back to 16, 8, 4 and 1 byte
-// steps, which is 6x faster on large inputs.
+// The C++ implementation is byte-at-a-time. Large inputs use a PCLMUL
+// carry-less-multiply fold selected at runtime; the fallback folds 32 bytes per
+// iteration with 32 slicing tables, then 16, 8, 4 and 1 byte steps.
 //
 //===----------------------------------------------------------------------===//
 
@@ -64,6 +64,79 @@ const fn make_tables<const N: usize>() -> [[u32; 256]; N] {
 /// of the same table serve the 16-, 8- and 4-byte steps.
 static TABLES: [[u32; 256]; 32] = make_tables::<32>();
 
+/// Remainders of a byte at positions 4..19 in a 160-bit polynomial, i.e.
+/// `byte * x^(8 * (i + 4)) mod P`. Used once per PCLMUL hash to reduce the
+/// 128-bit folding accumulator shifted left by 32 bits.
+const fn mul_x(mut value: u32) -> u32 {
+    let carry = value >> 31;
+    value <<= 1;
+    if carry != 0 {
+        value ^= 0x04C1_1DB7;
+    }
+    value
+}
+
+const fn make_reduce160() -> [[u32; 256]; 16] {
+    let mut table = [[0u32; 256]; 16];
+    let mut pos = 0;
+    while pos < 16 {
+        let mut base = 1u32;
+        let mut n = 0;
+        while n < 8 * (pos + 4) {
+            base = mul_x(base);
+            n += 1;
+        }
+        let mut byte = 0;
+        while byte < 256 {
+            let mut value = 0u32;
+            let mut bit = 0;
+            while bit < 8 {
+                if (byte >> bit) & 1 != 0 {
+                    let mut power = base;
+                    let mut k = 0;
+                    while k < bit {
+                        power = mul_x(power);
+                        k += 1;
+                    }
+                    value ^= power;
+                }
+                bit += 1;
+            }
+            table[pos][byte] = value;
+            byte += 1;
+        }
+        pos += 1;
+    }
+    table
+}
+
+static REDUCE160: [[u32; 256]; 16] = make_reduce160();
+
+/// Multiplies two 32-bit polynomials modulo the reflected CRC-32 polynomial
+/// `x^32 + 0x04C11DB7`. Only used once per hash to fold the initial state.
+#[inline(always)]
+fn gf_mul_mod(mut a: u32, mut b: u32) -> u32 {
+    let mut result = 0u32;
+    let mut i = 0;
+    while i < 32 {
+        if b & 1 != 0 {
+            result ^= a;
+        }
+        b >>= 1;
+        let carry = a >> 31;
+        a <<= 1;
+        if carry != 0 {
+            a ^= 0x04C1_1DB7;
+        }
+        i += 1;
+    }
+    result
+}
+
+const K_FOLD: u64 = 0x0000_0000_e8a4_5605; // x^128 mod P
+const K_FOLD_HI: u64 = 0x0000_0000_c5b9_cd4c; // x^192 mod P
+const K_INIT: u32 = 0xcbf1_acda; // x^-32 mod P
+
 #[inline(always)]
 unsafe fn load32(p: *const u8) -> u32 {
     unsafe { u32::from_le(core::ptr::read_unaligned(p as *const u32)) }
@@ -95,7 +168,104 @@ macro_rules! fold8 {
     };
 }
 
+#[cfg(target_arch = "x86_64")]
+static PCLMUL: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+
+#[cfg(target_arch = "x86_64")]
+fn has_pclmul() -> bool {
+    use core::sync::atomic::Ordering;
+    match PCLMUL.load(Ordering::Relaxed) {
+        2 => true,
+        1 => false,
+        _ => {
+            let ok = {
+                use core::arch::x86_64::__cpuid;
+                let leaf = __cpuid(1);
+                leaf.ecx & (1 << 1) != 0 && leaf.ecx & (1 << 9) != 0
+            };
+            PCLMUL.store(if ok { 2 } else { 1 }, Ordering::Relaxed);
+            ok
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod pclmul {
+    #![allow(unsafe_op_in_unsafe_fn)]
+
+    use core::arch::x86_64::*;
+
+    #[inline(always)]
+    unsafe fn reverse_block(value: __m128i) -> __m128i {
+        let nibbles = _mm_setr_epi8(0, 8, 4, 12, 2, 10, 6, 14, 1, 9, 5, 13, 3, 11, 7, 15);
+        let mask = _mm_set1_epi8(0x0f);
+        let lo = _mm_and_si128(value, mask);
+        let hi = _mm_and_si128(_mm_srli_epi16(value, 4), mask);
+        let rev = _mm_or_si128(
+            _mm_slli_epi16(_mm_shuffle_epi8(nibbles, lo), 4),
+            _mm_shuffle_epi8(nibbles, hi),
+        );
+        _mm_shuffle_epi8(
+            rev,
+            _mm_setr_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0),
+        )
+    }
+
+    #[inline(always)]
+    unsafe fn reduce160(value: u128) -> u32 {
+        let bytes = value.to_le_bytes();
+        let mut result = 0u32;
+        let mut i = 0;
+        while i < 16 {
+            result ^= super::REDUCE160[i][bytes[i] as usize];
+            i += 1;
+        }
+        result
+    }
+
+    #[target_feature(enable = "pclmulqdq,ssse3,sse2")]
+    pub(super) unsafe fn crc32_pclmul(crc: u32, data: *const u8, len: usize) -> u32 {
+        if len < 16 {
+            return super::crc32_slicing(crc, data, len);
+        }
+        let start = super::gf_mul_mod((!crc).reverse_bits(), super::K_INIT);
+        let k = _mm_set_epi64x(super::K_FOLD_HI as i64, super::K_FOLD as i64);
+        let mut acc = _mm_set_epi64x(0, start as i64);
+        let blocks = len / 16;
+        let mut p = data;
+        let mut i = 0;
+        while i < blocks {
+            let block = reverse_block(_mm_loadu_si128(p.cast()));
+            let lo = _mm_clmulepi64_si128(acc, k, 0x00);
+            let hi = _mm_clmulepi64_si128(acc, k, 0x11);
+            acc = _mm_xor_si128(_mm_xor_si128(lo, hi), block);
+            p = p.add(16);
+            i += 1;
+        }
+
+        let lo = _mm_cvtsi128_si64(acc) as u64;
+        let hi = _mm_cvtsi128_si64(_mm_srli_si128(acc, 8)) as u64;
+        let folded = (lo as u128) | ((hi as u128) << 64);
+        let normal = reduce160(folded);
+        let public = !normal.reverse_bits();
+        let tail = len - blocks * 16;
+        if tail == 0 {
+            public
+        } else {
+            super::crc32_slicing(public, p, tail)
+        }
+    }
+}
+
 unsafe fn crc32_impl(crc: u32, data: *const u8, len: usize) -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    if len >= 128 && has_pclmul() {
+        return unsafe { pclmul::crc32_pclmul(crc, data, len) };
+    }
+    unsafe { crc32_slicing(crc, data, len) }
+}
+
+unsafe fn crc32_slicing(crc: u32, data: *const u8, len: usize) -> u32 {
     unsafe {
         let mut c = !crc;
         let mut p = data;
@@ -197,6 +367,25 @@ mod tests {
             let a = update(0, &data[..split]);
             let b = update(a, &data[split..]);
             assert_eq!(whole, b, "split at {split}");
+        }
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn pclmul_matches_slicing() {
+        if !has_pclmul() {
+            return;
+        }
+        let data: Vec<u8> = (0..2048u32)
+            .map(|i| (i.wrapping_mul(37) >> 3) as u8)
+            .collect();
+        for len in [
+            16usize, 17, 31, 32, 63, 64, 127, 128, 129, 255, 256, 257, 1023, 2048,
+        ] {
+            let seed = (len as u32).wrapping_mul(0x9e37_79b9);
+            let expected = unsafe { crc32_slicing(seed, data.as_ptr(), len) };
+            let actual = unsafe { pclmul::crc32_pclmul(seed, data.as_ptr(), len) };
+            assert_eq!(actual, expected, "len {len}");
         }
     }
 
