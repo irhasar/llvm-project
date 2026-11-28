@@ -372,6 +372,278 @@ impl TailKind {
     }
 }
 
+/// Atomic ordering used by fences.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomicOrdering {
+    NotAtomic,
+    Unordered,
+    Monotonic,
+    Acquire,
+    Release,
+    AcquireRelease,
+    SequentiallyConsistent,
+}
+
+impl AtomicOrdering {
+    /// Returns the textual spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAtomic => "not_atomic",
+            Self::Unordered => "unordered",
+            Self::Monotonic => "monotonic",
+            Self::Acquire => "acquire",
+            Self::Release => "release",
+            Self::AcquireRelease => "acq_rel",
+            Self::SequentiallyConsistent => "seq_cst",
+        }
+    }
+
+    /// Parses an atomic ordering.
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "not_atomic" => Self::NotAtomic,
+            "unordered" => Self::Unordered,
+            "monotonic" => Self::Monotonic,
+            "acquire" => Self::Acquire,
+            "release" => Self::Release,
+            "acq_rel" => Self::AcquireRelease,
+            "seq_cst" => Self::SequentiallyConsistent,
+            _ => return None,
+        })
+    }
+
+    /// Returns the bitcode encoding.
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::NotAtomic => 0,
+            Self::Unordered => 1,
+            Self::Monotonic => 2,
+            Self::Acquire => 3,
+            Self::Release => 4,
+            Self::AcquireRelease => 5,
+            Self::SequentiallyConsistent => 6,
+        }
+    }
+
+    /// Decodes a bitcode ordering.
+    pub const fn from_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => Self::NotAtomic,
+            1 => Self::Unordered,
+            2 => Self::Monotonic,
+            3 => Self::Acquire,
+            4 => Self::Release,
+            5 => Self::AcquireRelease,
+            6 => Self::SequentiallyConsistent,
+            _ => return None,
+        })
+    }
+
+    /// Returns true when the ordering is valid on a fence.
+    pub const fn is_fence_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Acquire | Self::Release | Self::AcquireRelease | Self::SequentiallyConsistent
+        )
+    }
+
+    /// Returns true when the ordering is valid on an atomic load.
+    pub const fn is_load_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Unordered | Self::Monotonic | Self::Acquire | Self::SequentiallyConsistent
+        )
+    }
+
+    /// Returns true when the ordering is valid on an atomic store.
+    pub const fn is_store_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Unordered | Self::Monotonic | Self::Release | Self::SequentiallyConsistent
+        )
+    }
+
+    /// Returns true when the ordering is valid on an atomicrmw.
+    pub const fn is_rmw_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Monotonic
+                | Self::Acquire
+                | Self::Release
+                | Self::AcquireRelease
+                | Self::SequentiallyConsistent
+        )
+    }
+
+    /// Returns true when the ordering is valid as a cmpxchg success ordering.
+    pub const fn is_cmpxchg_success_valid(self) -> bool {
+        self.is_rmw_valid()
+    }
+
+    /// Returns true when the ordering is valid as a cmpxchg failure ordering.
+    pub const fn is_cmpxchg_failure_valid(self) -> bool {
+        matches!(
+            self,
+            Self::Monotonic | Self::Acquire | Self::SequentiallyConsistent
+        )
+    }
+
+    /// Returns true when the operation is atomic.
+    pub const fn is_atomic(self) -> bool {
+        !matches!(self, Self::NotAtomic)
+    }
+}
+
+/// Synchronization scope used by fences.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SyncScope {
+    #[default]
+    System,
+    SingleThread,
+}
+
+impl SyncScope {
+    /// Returns the bitcode encoding.
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::SingleThread => 0,
+            Self::System => 1,
+        }
+    }
+
+    /// Decodes a bitcode synchronization scope.
+    pub const fn from_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => Self::SingleThread,
+            1 => Self::System,
+            _ => return None,
+        })
+    }
+}
+
+/// Operations supported by `atomicrmw`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomicRmwOp {
+    Xchg,
+    Add,
+    Sub,
+    And,
+    Nand,
+    Or,
+    Xor,
+    Max,
+    Min,
+    UMax,
+    UMin,
+    FAdd,
+    FSub,
+    FMax,
+    FMin,
+    UIncWrap,
+    UDecWrap,
+}
+
+impl AtomicRmwOp {
+    /// Returns the textual spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Xchg => "xchg",
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::And => "and",
+            Self::Nand => "nand",
+            Self::Or => "or",
+            Self::Xor => "xor",
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::UMax => "umax",
+            Self::UMin => "umin",
+            Self::FAdd => "fadd",
+            Self::FSub => "fsub",
+            Self::FMax => "fmax",
+            Self::FMin => "fmin",
+            Self::UIncWrap => "uinc_wrap",
+            Self::UDecWrap => "udec_wrap",
+        }
+    }
+
+    /// Returns true when the operation works on floating-point values.
+    pub const fn is_float(self) -> bool {
+        matches!(self, Self::FAdd | Self::FSub | Self::FMax | Self::FMin)
+    }
+
+    /// Parses an atomicrmw operation.
+    pub fn parse(text: &str) -> Option<Self> {
+        Some(match text {
+            "xchg" => Self::Xchg,
+            "add" => Self::Add,
+            "sub" => Self::Sub,
+            "and" => Self::And,
+            "nand" => Self::Nand,
+            "or" => Self::Or,
+            "xor" => Self::Xor,
+            "max" => Self::Max,
+            "min" => Self::Min,
+            "umax" => Self::UMax,
+            "umin" => Self::UMin,
+            "fadd" => Self::FAdd,
+            "fsub" => Self::FSub,
+            "fmax" => Self::FMax,
+            "fmin" => Self::FMin,
+            "uinc_wrap" => Self::UIncWrap,
+            "udec_wrap" => Self::UDecWrap,
+            _ => return None,
+        })
+    }
+
+    /// Returns the bitcode encoding.
+    pub const fn code(self) -> u64 {
+        match self {
+            Self::Xchg => 0,
+            Self::Add => 1,
+            Self::Sub => 2,
+            Self::And => 3,
+            Self::Nand => 4,
+            Self::Or => 5,
+            Self::Xor => 6,
+            Self::Max => 7,
+            Self::Min => 8,
+            Self::UMax => 9,
+            Self::UMin => 10,
+            Self::FAdd => 11,
+            Self::FSub => 12,
+            Self::FMax => 13,
+            Self::FMin => 14,
+            Self::UIncWrap => 15,
+            Self::UDecWrap => 16,
+        }
+    }
+
+    /// Decodes a bitcode operation.
+    pub const fn from_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => Self::Xchg,
+            1 => Self::Add,
+            2 => Self::Sub,
+            3 => Self::And,
+            4 => Self::Nand,
+            5 => Self::Or,
+            6 => Self::Xor,
+            7 => Self::Max,
+            8 => Self::Min,
+            9 => Self::UMax,
+            10 => Self::UMin,
+            11 => Self::FAdd,
+            12 => Self::FSub,
+            13 => Self::FMax,
+            14 => Self::FMin,
+            15 => Self::UIncWrap,
+            16 => Self::UDecWrap,
+            _ => return None,
+        })
+    }
+}
+
 /// Raw attribute text. Track B preserves attribute spellings instead of
 /// reimplementing every LLVM attribute kind in the first slice.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -388,6 +660,13 @@ impl fmt::Display for Attribute {
 pub struct Instruction {
     pub result: Option<LocalId>,
     pub kind: InstKind,
+}
+
+/// Clause kind on a legacy `landingpad` instruction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandingPadClause {
+    Catch,
+    Filter,
 }
 
 /// Instruction payload.
@@ -425,12 +704,36 @@ pub enum InstKind {
         ptr: Operand,
         align: Option<u64>,
         volatile: bool,
+        ordering: AtomicOrdering,
+        syncscope: SyncScope,
     },
     Store {
         value: Operand,
         ptr: Operand,
         align: Option<u64>,
         volatile: bool,
+        ordering: AtomicOrdering,
+        syncscope: SyncScope,
+    },
+    AtomicRmw {
+        op: AtomicRmwOp,
+        ptr: Operand,
+        value: Operand,
+        align: Option<u64>,
+        volatile: bool,
+        ordering: AtomicOrdering,
+        syncscope: SyncScope,
+    },
+    CmpXchg {
+        ptr: Operand,
+        cmp: Operand,
+        new: Operand,
+        align: Option<u64>,
+        volatile: bool,
+        success: AtomicOrdering,
+        failure: AtomicOrdering,
+        syncscope: SyncScope,
+        weak: bool,
     },
     Gep {
         inbounds: bool,
@@ -448,6 +751,59 @@ pub enum InstKind {
         fastmath: FastMath,
         ret_attrs: Arc<Vec<Attribute>>,
         attrs: Arc<Vec<Attribute>>,
+    },
+    CallBr {
+        ret_ty: TypeId,
+        fn_ty: TypeId,
+        callee: Operand,
+        args: Vec<Operand>,
+        arg_attrs: Vec<Arc<Vec<Attribute>>>,
+        fastmath: FastMath,
+        ret_attrs: Arc<Vec<Attribute>>,
+        attrs: Arc<Vec<Attribute>>,
+        default_dest: BlockId,
+        indirect_dests: Vec<BlockId>,
+    },
+    Invoke {
+        ret_ty: TypeId,
+        fn_ty: TypeId,
+        callee: Operand,
+        args: Vec<Operand>,
+        arg_attrs: Vec<Arc<Vec<Attribute>>>,
+        fastmath: FastMath,
+        ret_attrs: Arc<Vec<Attribute>>,
+        attrs: Arc<Vec<Attribute>>,
+        normal_dest: BlockId,
+        unwind_dest: BlockId,
+    },
+    LandingPad {
+        ty: TypeId,
+        cleanup: bool,
+        clauses: Vec<(LandingPadClause, Operand)>,
+    },
+    Resume {
+        value: Operand,
+    },
+    CatchSwitch {
+        parent_pad: Option<Operand>,
+        handlers: Vec<BlockId>,
+        unwind_dest: Option<BlockId>,
+    },
+    CatchPad {
+        parent_pad: Option<Operand>,
+        args: Vec<Operand>,
+    },
+    CleanupPad {
+        parent_pad: Option<Operand>,
+        args: Vec<Operand>,
+    },
+    CatchRet {
+        catch_pad: Operand,
+        successor: BlockId,
+    },
+    CleanupRet {
+        cleanup_pad: Operand,
+        unwind_dest: Option<BlockId>,
     },
     Phi {
         incoming: Vec<(Operand, BlockId)>,
@@ -479,6 +835,44 @@ pub enum InstKind {
         default: BlockId,
         cases: Vec<(ConstId, BlockId)>,
     },
+    ExtractValue {
+        aggregate: Operand,
+        indices: Vec<u32>,
+    },
+    InsertValue {
+        aggregate: Operand,
+        value: Operand,
+        indices: Vec<u32>,
+    },
+    ExtractElement {
+        vector: Operand,
+        index: Operand,
+    },
+    InsertElement {
+        vector: Operand,
+        value: Operand,
+        index: Operand,
+    },
+    ShuffleVector {
+        first: Operand,
+        second: Operand,
+        mask: Operand,
+    },
+    Freeze {
+        value: Operand,
+    },
+    Fence {
+        ordering: AtomicOrdering,
+        syncscope: SyncScope,
+    },
+    VaArg {
+        list: Operand,
+        ty: TypeId,
+    },
+    IndirectBr {
+        address: Operand,
+        destinations: Vec<BlockId>,
+    },
     Unreachable,
 }
 
@@ -491,6 +885,13 @@ impl InstKind {
                 | Self::Br { .. }
                 | Self::CondBr { .. }
                 | Self::Switch { .. }
+                | Self::IndirectBr { .. }
+                | Self::CallBr { .. }
+                | Self::Invoke { .. }
+                | Self::Resume { .. }
+                | Self::CatchSwitch { .. }
+                | Self::CatchRet { .. }
+                | Self::CleanupRet { .. }
                 | Self::Unreachable
         )
     }

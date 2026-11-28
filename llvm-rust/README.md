@@ -44,14 +44,26 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
 - `ir`: textual parser, printer, verifier; module/globals/functions; integer,
   floating-point, pointer, array, vector, struct, function, and opaque types;
   TLS models, sections, function alignment, wide integers, and per-kind
-  floating-point hex literals; binary/unary, `icmp`/`fcmp`, `alloca`, `load`,
-  `store`, `getelementptr`, `call`, `phi`, `select`, casts, `ret`, `br`,
-  `condbr`, `switch`, `unreachable`. Unnamed values and blocks share one
+  floating-point hex literals; binary/unary, vector arithmetic and vector
+  comparisons, `icmp`/`fcmp`, `alloca`, `load`, `store`, `getelementptr`,
+  `call`, `phi`, vector `select`, `shufflevector`, `freeze`, `fence` with
+  system and single-thread sync scopes, atomic `load`/`store` with orderings
+  and sync scopes, `atomicrmw`, `cmpxchg`, `va_arg`, `indirectbr`, inline asm
+  constants, the `callbr` asm-goto terminator, `invoke`, `landingpad`,
+  `resume`, `catchswitch`, `catchpad`, `cleanuppad`, `catchret`, and
+  `cleanupret` with the `personality` function attribute, casts, `ret`, `br`,
+  `condbr`, `switch`, `unreachable`, plus `blockaddress` constants that target
+  named or numbered blocks in the same or another function.
+  Unnamed values and blocks share one
   numbering sequence, and `phi` accepts forward and self references.
   `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
   functions. Forward global/function constants and instruction operands are
-  resolved after parsing, and globals/functions are emitted in definition
-  order. Empty and unquoted numeric symbol names are canonicalized to LLVM
+  resolved after parsing. Globals, aliases, ifuncs, and functions are emitted
+  in definition order within their group; the module printer and bitcode
+  writer use LLVM's variable, alias, ifunc, then function ordering. Aliases
+  and ifuncs accept weak/hidden/protected linkage and visibility, and
+  constant-expression aliasees print without a redundant pointer type.
+  Empty and unquoted numeric symbol names are canonicalized to LLVM
   unnamed slots (`@0`, `@1`, ...); quoted numeric names such as `@"0"` stay
   named, and slots are renumbered in the printer's global-then-function
   emission order. Nonzero global and pointer address spaces are rejected
@@ -60,11 +72,11 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   return signed zero instead of shifting by more than 63 bits.
 - `bitcode`: LLVM bitstream writer and reader covering the module, type,
   constants, function, value-symbol-table, string-table, and
-  `PARAMATTR`/`PARAMATTR_GROUP` blocks. The reader handles abbreviations and
-  block-info abbreviations emitted by LLVM 19. The writer deduplicates
-  attribute groups and lists. The reader interns a default pointer type when
-  the on-disk type table has none, so direct calls do not require a pointer
-  type record.
+  `PARAMATTR`/`PARAMATTR_GROUP` blocks, including `ALIAS` and `IFUNC` records.
+  The reader handles abbreviations and block-info abbreviations emitted by
+  LLVM 19. The writer deduplicates attribute groups and lists. The reader
+  interns a default pointer type when the on-disk type table has none, so
+  direct calls do not require a pointer type record.
 - `bitcode` attributes: return, parameter, function, call-site, and
   argument-indexed call-site attributes; `#N` group references; common enum
   attributes (`noundef`, `signext`, `zeroext`, `nonnull`, `noalias`, `inreg`,
@@ -107,6 +119,11 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   would otherwise imply different target effects, so Rust disassembly can
   be reassembled without changing the target contract. Parameter and return
   `readnone`/`readonly`/`writeonly` remain distinct flags.
+- `constants`: `getelementptr` and cast constant expressions, including
+  `inbounds` GEPs, pointer-to-integer and integer-to-pointer casts, nested
+  expressions, and forward global references. The bitcode reader and writer
+  use LLVM 19 `CE_GEP` and `CE_CAST` records and preserve the GEP `inbounds`
+  flag.
 - `tools`: `llvm-as-rust`, `llvm-dis-rust`, and `llvm-rust-bench`.
 
 Half and bfloat conversion handles subnormals, infinities, quiet NaNs, and
@@ -120,10 +137,11 @@ rejected otherwise instead of being lossily rewritten.
 This slice deliberately does not cover the metadata block (metadata strings
 parse and print in text, but do not round-trip through bitcode),
 `allocsize`/`stackalign`/`vscale_range`-style integer attributes, comdats,
-debug info, constant expressions, atomics, `invoke`/`landingpad`,
-aggregate/vector instructions, or `fp128`/`x86_fp80`/`ppc_fp128` constants
-(wide float records are rejected). MC, object, X86, and codegen are still out
-of scope.
+debug info, other constant expressions (GEPs, casts, and `blockaddress` are
+supported), scalable vector shuffles, sync
+scopes beyond system and single-thread, or
+`fp128`/`x86_fp80`/`ppc_fp128` constants (wide float records are rejected).
+MC, object, X86, and codegen are still out of scope.
 
 ## Commands
 
@@ -169,19 +187,25 @@ incomplete or mixed-version candidates are skipped. The harness fails if no
 LLVM 19 oracle is available, so legacy coverage cannot be skipped
 accidentally. The version-2 fixture keeps target-aware output.
 
-Reproducible benchmark (5 runs, `taskset -c 0`, median and min/max):
+Reproducible benchmark (11 runs, 3 warmups, `taskset -c 0`, median and
+min/max):
 
 ```sh
 CARGO_TARGET_DIR=/tmp/llvm-rust-target cargo build --release \
   -p llvm-rust-tools --bin llvm-as-rust --bin llvm-dis-rust
-python3 tests/bench.py --runs 5
+python3 tests/bench.py --runs 11 --warmup 3
 ```
+
+Add `--eh` to replace the mixed corpus with 1000 `invoke`/`landingpad`/`resume`
+functions, or `--wineh` for 1000 functions using
+`catchswitch`/`catchpad`/`cleanuppad`.
 
 ## M1 results
 
-Differential harness: all 30 generic modules in `tests/corpus/` match the
-selected C++ oracle in both directions after normalizing `source_filename`,
-`ModuleID`, and target-memory spelling. The
+Differential harness: all 42 generic corpus inputs in `tests/corpus/` (41 text
+modules plus the checked-in bitcode fixture) match the selected C++ oracle in
+both directions after normalizing `source_filename`, `ModuleID`, and
+target-memory spelling. The
 `tests/corpus/aarch64_memory.ll` fixture is checked separately against
 LLVM 19 with `--llvm19`, covering legacy AArch64 memory with differing
 default and inaccessible access. A separate
@@ -194,7 +218,9 @@ and multiple-group alignment, type attributes with quoted names, raw
 non-UTF-8 attribute strings, parameter memory attributes, argument-indexed
 call-site attributes,
 `local_unnamed_addr`, forward references in constants and instructions,
-UTF-8 section names, unnamed globals/functions, explicit quoted numeric
+UTF-8 section names, aliases with weak/hidden visibility and
+constant-expression aliasees, ifuncs with DSO locality, mixed alias/ifunc
+ordering, unnamed globals/functions, explicit quoted numeric
 global/function names, unnamed/global slot ordering, unnamed/name collisions,
 forward numbered references that must not consume definition slots, direct
 calls without pointer type records, repeated function memory effects,
@@ -204,7 +230,24 @@ scoped-memory groups, modern `memory(argmem: ...)`/
 version-2 decoding, and disassemble/reassemble preservation of conflicting
 default and target access, duplicate attribute groups in a checked-in bitcode
 fixture that is read and reassembled with both Rust tools, unnamed
-value/block numbering, exact shift/divide flags, and `phi` self references.
+value/block numbering, exact shift/divide flags, `phi` self references, and
+aggregate/vector element extraction and insertion (`extractvalue`,
+`insertvalue`, `extractelement`, and `insertelement`), vector integer and
+floating-point arithmetic, vector comparisons and `select`, `shufflevector`
+including shrinking masks and `undef` masks canonicalized to `poison`,
+`freeze` on scalar, vector, and floating-point values, `fence` orderings and
+`syncscope("singlethread")`, atomic `load`/`store` with all valid orderings,
+volatile forms, and single-thread scope, `atomicrmw` integer and floating-point
+operations, `cmpxchg` success/failure orderings, weak/volatile forms,
+`va_arg` with scalar, pointer, vector, and struct result types, `blockaddress`
+constants at module and function scope, including cross-function targets and
+unnamed/numbered blocks, `indirectbr` with named, numbered, duplicate, and empty
+destination lists, inline asm constants with sideeffect/alignstack/inteldialect/
+unwind flags, `callbr` asm-goto with result and argument forms,
+`invoke`/`landingpad`/`resume` with `personality`, Windows funclets
+(`catchswitch` with multiple handlers, `catchpad`/`catchret`, and
+`cleanuppad`/`cleanupret`), and function-local aggregate constants and forward
+local element operands.
 
 - Rust writer output is accepted by C++ `llvm-dis`.
 - Rust reader output is accepted by C++ `llvm-as`, and C++ `llvm-dis` of that
@@ -215,24 +258,77 @@ value/block numbering, exact shift/divide flags, and `phi` self references.
   `LLVM_RUST_DUPLICATE_FIXTURE` is set; the differential harness reads it with
   both disassemblers and canonicalizes the Rust output through C++ `llvm-as`.
 
-Benchmark on a synthetic corpus of 1000 functions, 10 arithmetic instructions
-and one attributed call each (342,956 bytes), LLVM 19.1.7, `taskset -c 0`,
-five runs:
+Benchmark on a synthetic corpus of 1000 functions, 10 arithmetic instructions,
+four aggregate/vector element operations, vector arithmetic, comparison,
+select, shufflevector, one atomic load, one atomic store, one `va_arg`, one
+`blockaddress`/`indirectbr` dispatch block, and one attributed call each
+(1,308,925 bytes), LLVM 19.1.7, `taskset -c 0`, 11 runs after 3 warmups:
 
 | Tool | Median | Min-max | Peak RSS |
 | --- | ---: | ---: | ---: |
-| `llvm-as` (C++) | 36.2 ms | 35.9-42.5 ms | 55.6 MiB |
-| `llvm-as-rust` | 23.9 ms | 23.4-26.3 ms | 14.5 MiB |
-| `llvm-dis` (C++) on C++ bitcode | 30.1 ms | 29.9-31.1 ms | 54.6 MiB |
-| `llvm-dis-rust` on C++ bitcode | 19.2 ms | 19.0-19.4 ms | 14.5 MiB |
+| `llvm-as` (C++) | 72.3 ms | 71.1-76.9 ms | 62.0 MiB |
+| `llvm-as-rust` | 31.4 ms | 31.0-32.8 ms | 16.4 MiB |
+| `llvm-dis` (C++) on C++ bitcode | 59.9 ms | 59.4-61.9 ms | 59.4 MiB |
+| `llvm-dis-rust` on C++ bitcode | 34.0 ms | 33.2-37.4 ms | 26.1 MiB |
 
 Both disassemblers read the same C++-produced bitcode, so the comparison
-isolates decoder work from writer record layout. On this parser/printer-only
-corpus, Rust throughput was about 1.5x the C++ assembler and 1.6x the C++
-disassembler, and peak RSS was about 3.8x lower. Each tool gets one discarded
-warmup run before the five measured runs. These are throughput and memory
-measurements, not a generated-code performance claim. The Rust binaries are 5.4 MiB (`llvm-as-rust`) and 4.3 MiB
-(`llvm-dis-rust`); the C++ tools need the 124 MiB `libLLVM.so.19.1`.
+isolates decoder work from writer record layout. On this parser/printer/bitcode
+corpus, Rust throughput was about 2.3x the C++ assembler and 1.8x the C++
+disassembler, and peak RSS was about 3.8x and 2.3x lower respectively. The
+`blockaddress`/`indirectbr` arm adds a dispatch block per function, so absolute
+times rose with the larger corpus while Rust kept a clear lead. A same-corpus
+A/B against the pre-blockaddress commit (1,170,987 bytes) measured assembly
+26.86 -> 26.95 ms (+0.3%) and disassembly stayed at about 28.2 ms, so the
+higher absolute numbers above come from corpus growth, not a code regression.
+A constants-heavy 50k-global module exposed a real +5% read regression from a
+first two-pass module-constant decoder; restoring single-pass module constants
+with deferred blockaddress IDs removed it (25-pair A/B: read -0.7%,
+disassemble -1.5%). These are throughput and memory measurements, not a
+generated-code performance claim. The Rust binaries are 5.6 MiB
+(`llvm-as-rust`) and 4.7 MiB (`llvm-dis-rust`); the C++ tools need the 124 MiB
+`libLLVM.so.19.1`.
+
+The `callbr`/inline-asm slice keeps the same corpus at 73.3 ms C++ / 32.6 ms
+Rust assembly and 62.0 ms / 34.6 ms disassembly (11 runs, 3 warmups). On a
+separate 178,890-byte corpus with 1000 `callbr` functions, Rust measured 7.9 ms
+assembly and 8.2 ms disassembly against 26.8 ms and 23.9 ms for C++, with peak
+RSS 14.1 MiB versus 54.3 MiB and 53.5 MiB.
+
+The `invoke`/`landingpad`/`resume` slice adds a 276,955-byte corpus with 1000
+exception-handling functions. Rust measured 7.7 ms assembly and 7.4 ms
+disassembly against 28.6 ms and 25.7 ms for C++, with peak RSS 14.9 MiB versus
+54.5 MiB and 53.6 MiB (11 runs, 3 warmups). The mixed corpus stayed at 73.4 ms
+C++ / 33.3 ms Rust assembly and 59.3 ms / 34.2 ms disassembly, so the new
+records did not regress the existing path.
+
+The Windows-funclet slice adds a 543,977-byte corpus with 1000 functions that
+mix `invoke`, `catchswitch`, two `catchpad`/`catchret` handlers, and a
+`cleanuppad`/`cleanupret`. Rust measured 13.1 ms assembly and 12.5 ms
+disassembly against 41.0 ms and 34.9 ms for C++, with peak RSS 15.0 MiB versus
+55.6 MiB and 55.1 MiB (7 runs, 2 warmups). The mixed and legacy-EH corpora
+stayed at 77.9/36.4 ms and 64.4/37.8 ms assembly and 29.2/7.8 ms and 26.4/7.7 ms
+disassembly, so the new records did not regress existing paths.
+
+A same-corpus A/B check against the pre-atomic commit showed no atomic
+regression: assembly was 30.81 ms before and 30.28 ms after on the vector
+corpus, and disassembly stayed within noise. The earlier ratio dip came from
+adding atomic load/store to a larger corpus, not from slower code. The larger
+gain here is the streaming lexer: the old design held all 354k tokens for this
+corpus, while the parser now keeps a two-token window and lexes on demand.
+That cut `llvm-as-rust` from 33.5 ms to 24.4 ms and peak RSS from 26.0 MiB to
+14.8 MiB on the same input.
+
+In-process component timings on the same corpus (50 iterations, no process
+startup or file I/O) are 14.29 ms parse, 4.48 ms print, 4.60 ms bitcode write,
+10.21 ms bitcode read, 19.06 ms assemble (parse plus write), and 14.26 ms
+disassemble (read plus print). The performance pass keeps token text borrowed
+from the source, streams tokens through a two-token window instead of retaining
+the whole file, caches primitive and named types, uses FNV maps and
+vector-backed ID tables for IR and bitcode
+lookups, keeps small bitcode records and instruction operands inline, shares
+abbreviation tables across blocks, moves decoded instruction kinds instead of
+cloning them, and streams printer names and escaped bytes directly. The CLI
+tools also exit without walking their arenas at process teardown.
 
 A clean release build of the two Rust tools, using a separate target
 directory, took 9.6 s wall, 31.4 s user, and 2.0 s system time. This is a

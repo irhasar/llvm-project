@@ -1,10 +1,10 @@
 //! The IR module: types, globals, functions, and constants.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use llvm_rust_support::{Arena, Idx, Interner, Symbol};
+use llvm_rust_support::{Arena, FastHashMap, Idx, Interner, Symbol};
 
-use crate::constant::{ConstId, ConstKind, Constant, ConstantPool};
+use crate::constant::{ConstExpr, ConstId, ConstKind, Constant, ConstantPool};
 use crate::function::{FuncId, Function};
 use crate::inst::InstKind;
 use crate::linkage::{Linkage, Visibility};
@@ -14,11 +14,30 @@ use crate::value::{Operand, OperandKind};
 /// Handle to a global variable.
 pub type GlobalId = Idx<Global>;
 
-/// A global variable or constant definition.
+/// The kind of a module-level global value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GlobalKind {
+    #[default]
+    Variable,
+    Alias,
+    IFunc,
+}
+
+impl GlobalKind {
+    pub const fn is_alias(self) -> bool {
+        matches!(self, Self::Alias | Self::IFunc)
+    }
+}
+
+/// A global variable, alias, or ifunc definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Global {
     pub name: Symbol,
+    pub kind: GlobalKind,
+    /// Value type. For aliases and ifuncs this is the aliased value type, not
+    /// the pointer type stored in `init`.
     pub ty: TypeId,
+    /// Initializer for a variable, or the aliasee/resolver for an alias/ifunc.
     pub init: Option<ConstId>,
     pub linkage: Linkage,
     pub visibility: Visibility,
@@ -91,15 +110,15 @@ pub struct Module {
     pub interner: Interner,
     pub named_types: Vec<TypeId>,
     pub attr_groups: Vec<(u32, String)>,
-    global_names: HashMap<Symbol, GlobalId>,
-    function_names: HashMap<Symbol, FuncId>,
-    global_order: HashMap<GlobalId, u32>,
-    function_order: HashMap<FuncId, u32>,
+    global_names: FastHashMap<Symbol, GlobalId>,
+    function_names: FastHashMap<Symbol, FuncId>,
+    global_order: FastHashMap<GlobalId, u32>,
+    function_order: FastHashMap<FuncId, u32>,
     next_order: u32,
     unnamed_globals: HashSet<GlobalId>,
     unnamed_functions: HashSet<FuncId>,
-    unnamed_global_slots: HashMap<GlobalId, u32>,
-    unnamed_function_slots: HashMap<FuncId, u32>,
+    unnamed_global_slots: FastHashMap<GlobalId, u32>,
+    unnamed_function_slots: FastHashMap<FuncId, u32>,
 }
 
 impl Module {
@@ -139,6 +158,7 @@ impl Module {
         }
         let id = self.globals.alloc(Global {
             name,
+            kind: GlobalKind::Variable,
             ty: INVALID_TYPE,
             init: None,
             linkage: Linkage::External,
@@ -191,21 +211,60 @@ impl Module {
     /// complete, constants pointing at an unresolved placeholder are retargeted
     /// to the real global or function with the same name.
     pub fn resolve_forward_references(&mut self) {
+        let mut function_to_global = FastHashMap::default();
+        for (id, function) in self.functions.iter() {
+            if !self.types.is_valid(function.ty)
+                && let Some(global) = self.global_named(function.name)
+            {
+                function_to_global.insert(id, global);
+            }
+        }
+        let mut global_to_function = FastHashMap::default();
+        for (id, global) in self.globals.iter() {
+            if !self.types.is_valid(global.ty)
+                && let Some(function) = self.function_named(global.name)
+            {
+                global_to_function.insert(id, function);
+            }
+        }
+
         let mut rewrites = Vec::new();
         for (id, constant) in self.constants.iter() {
-            match constant.kind {
-                ConstKind::Function(function)
-                    if !self.types.is_valid(self.functions[function].ty) =>
-                {
-                    let name = self.functions[function].name;
-                    if let Some(global) = self.global_named(name) {
-                        rewrites.push((id, ConstKind::Global(global)));
+            match &constant.kind {
+                ConstKind::Function(function) => {
+                    if let Some(global) = function_to_global.get(function) {
+                        rewrites.push((id, ConstKind::Global(*global)));
                     }
                 }
-                ConstKind::Global(global) if !self.types.is_valid(self.globals[global].ty) => {
-                    let name = self.globals[global].name;
-                    if let Some(function) = self.function_named(name) {
-                        rewrites.push((id, ConstKind::Function(function)));
+                ConstKind::Global(global) => {
+                    if let Some(function) = global_to_function.get(global) {
+                        rewrites.push((id, ConstKind::Function(*function)));
+                    }
+                }
+                ConstKind::Expr(expr) => {
+                    let mut expr = expr.clone();
+                    let changed = match &mut expr {
+                        ConstExpr::Gep { ptr, indices, .. } => {
+                            let mut changed = rewrite_forward_operand(
+                                ptr,
+                                &function_to_global,
+                                &global_to_function,
+                            );
+                            for index in indices {
+                                changed |= rewrite_forward_operand(
+                                    &mut index.value,
+                                    &function_to_global,
+                                    &global_to_function,
+                                );
+                            }
+                            changed
+                        }
+                        ConstExpr::Cast { value, .. } => {
+                            rewrite_forward_operand(value, &function_to_global, &global_to_function)
+                        }
+                    };
+                    if changed {
+                        rewrites.push((id, ConstKind::Expr(expr)));
                     }
                 }
                 _ => {}
@@ -219,8 +278,8 @@ impl Module {
     /// Retargets instruction operands that named a symbol before its kind was
     /// known, mirroring [`Self::resolve_forward_references`] for constants.
     pub fn resolve_forward_operands(&mut self) {
-        let mut global_to_function = HashMap::new();
-        let mut invalid_globals = HashMap::new();
+        let mut global_to_function = FastHashMap::default();
+        let mut invalid_globals = FastHashMap::default();
         for (id, global) in self.globals.iter() {
             if !self.types.is_valid(global.ty) {
                 invalid_globals.insert(id, global.name);
@@ -229,8 +288,8 @@ impl Module {
                 }
             }
         }
-        let mut function_to_global = HashMap::new();
-        let mut invalid_functions = HashMap::new();
+        let mut function_to_global = FastHashMap::default();
+        let mut invalid_functions = FastHashMap::default();
         for (id, function) in self.functions.iter() {
             if !self.types.is_valid(function.ty) {
                 invalid_functions.insert(id, function.name);
@@ -238,6 +297,9 @@ impl Module {
                     function_to_global.insert(function.name, global);
                 }
             }
+        }
+        if invalid_globals.is_empty() && invalid_functions.is_empty() {
+            return;
         }
         let pointer = self.types.pointer();
         let functions: Vec<FuncId> = self.functions.iter().map(|(id, _)| id).collect();
@@ -300,7 +362,7 @@ impl Module {
         self.unnamed_functions.contains(&id)
     }
 
-    /// Returns the emitted slot number for an unnamed global.
+    /// Returns the emitted slot number for an unnamed global or alias.
     pub fn unnamed_global_slot(&self, id: GlobalId) -> Option<u32> {
         if let Some(slot) = self.unnamed_global_slots.get(&id) {
             return Some(*slot);
@@ -312,6 +374,22 @@ impl Module {
         for global in self.ordered_globals() {
             if self.is_unnamed_global(global) {
                 if global == id {
+                    return Some(slot);
+                }
+                slot += 1;
+            }
+        }
+        for alias in self.ordered_aliases() {
+            if self.is_unnamed_global(alias) {
+                if alias == id {
+                    return Some(slot);
+                }
+                slot += 1;
+            }
+        }
+        for ifunc in self.ordered_ifuncs() {
+            if self.is_unnamed_global(ifunc) {
+                if ifunc == id {
                     return Some(slot);
                 }
                 slot += 1;
@@ -331,6 +409,8 @@ impl Module {
         let mut slot = self
             .ordered_globals()
             .into_iter()
+            .chain(self.ordered_aliases())
+            .chain(self.ordered_ifuncs())
             .filter(|global| self.is_unnamed_global(*global))
             .count() as u32;
         for function in self.ordered_functions() {
@@ -350,12 +430,27 @@ impl Module {
     }
 
     /// Assigns unnamed slots in the order the printer and bitcode writer emit
-    /// definitions: all globals first, then all functions.
+    /// definitions: variables, aliases, ifuncs, then functions.
     pub fn assign_unnamed_slots(&mut self) {
         self.unnamed_global_slots.clear();
         self.unnamed_function_slots.clear();
+        if self.unnamed_globals.is_empty() && self.unnamed_functions.is_empty() {
+            return;
+        }
         let mut slot = 0;
         for id in self.ordered_globals() {
+            if self.is_unnamed_global(id) {
+                self.unnamed_global_slots.insert(id, slot);
+                slot += 1;
+            }
+        }
+        for id in self.ordered_aliases() {
+            if self.is_unnamed_global(id) {
+                self.unnamed_global_slots.insert(id, slot);
+                slot += 1;
+            }
+        }
+        for id in self.ordered_ifuncs() {
             if self.is_unnamed_global(id) {
                 self.unnamed_global_slots.insert(id, slot);
                 slot += 1;
@@ -389,27 +484,51 @@ impl Module {
         }
     }
 
-    /// Globals in definition order, skipping unresolved placeholders.
+    /// Global variables in definition order, skipping unresolved placeholders.
     pub fn ordered_globals(&self) -> Vec<GlobalId> {
-        let mut ids: Vec<GlobalId> = self
-            .globals
-            .iter()
-            .filter(|(_, global)| self.types.is_valid(global.ty))
-            .map(|(id, _)| id)
-            .collect();
-        ids.sort_by_key(|id| self.global_order.get(id).copied().unwrap_or(u32::MAX));
+        let mut ids = Vec::with_capacity(self.globals.len());
+        ids.extend(
+            self.globals
+                .iter()
+                .filter(|(_, global)| !global.kind.is_alias() && self.types.is_valid(global.ty))
+                .map(|(id, _)| id),
+        );
+        ids.sort_unstable_by_key(|id| self.global_order.get(id).copied().unwrap_or(u32::MAX));
+        ids
+    }
+
+    /// Aliases in definition order, skipping unresolved placeholders.
+    pub fn ordered_aliases(&self) -> Vec<GlobalId> {
+        self.ordered_globals_of(GlobalKind::Alias)
+    }
+
+    /// IFuncs in definition order, skipping unresolved placeholders.
+    pub fn ordered_ifuncs(&self) -> Vec<GlobalId> {
+        self.ordered_globals_of(GlobalKind::IFunc)
+    }
+
+    fn ordered_globals_of(&self, kind: GlobalKind) -> Vec<GlobalId> {
+        let mut ids = Vec::with_capacity(self.globals.len());
+        ids.extend(
+            self.globals
+                .iter()
+                .filter(|(_, global)| global.kind == kind && self.types.is_valid(global.ty))
+                .map(|(id, _)| id),
+        );
+        ids.sort_unstable_by_key(|id| self.global_order.get(id).copied().unwrap_or(u32::MAX));
         ids
     }
 
     /// Functions in definition order, skipping unresolved placeholders.
     pub fn ordered_functions(&self) -> Vec<FuncId> {
-        let mut ids: Vec<FuncId> = self
-            .functions
-            .iter()
-            .filter(|(_, function)| self.types.is_valid(function.ty))
-            .map(|(id, _)| id)
-            .collect();
-        ids.sort_by_key(|id| self.function_order.get(id).copied().unwrap_or(u32::MAX));
+        let mut ids = Vec::with_capacity(self.functions.len());
+        ids.extend(
+            self.functions
+                .iter()
+                .filter(|(_, function)| self.types.is_valid(function.ty))
+                .map(|(id, _)| id),
+        );
+        ids.sort_unstable_by_key(|id| self.function_order.get(id).copied().unwrap_or(u32::MAX));
         ids
     }
 
@@ -506,6 +625,29 @@ impl Module {
     }
 }
 
+fn rewrite_forward_operand(
+    operand: &mut Operand,
+    function_to_global: &FastHashMap<FuncId, GlobalId>,
+    global_to_function: &FastHashMap<GlobalId, FuncId>,
+) -> bool {
+    match operand.kind {
+        OperandKind::Function(function) => {
+            if let Some(global) = function_to_global.get(&function) {
+                operand.kind = OperandKind::Global(*global);
+                return true;
+            }
+        }
+        OperandKind::Global(global) => {
+            if let Some(function) = global_to_function.get(&global) {
+                operand.kind = OperandKind::Function(*function);
+                return true;
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
 fn half_bits(value: f64) -> u16 {
     let bits = (value as f32).to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
@@ -560,6 +702,7 @@ mod tests {
         let global_name = module.intern("\0unnamed1");
         let global = Global {
             name: global_name,
+            kind: GlobalKind::Variable,
             ty: i32_ty,
             init: None,
             linkage: Linkage::External,
@@ -582,6 +725,7 @@ mod tests {
         let named_name = module.intern("named");
         let named = Global {
             name: named_name,
+            kind: GlobalKind::Variable,
             ty: i32_ty,
             init: None,
             linkage: Linkage::External,
@@ -638,6 +782,15 @@ fn for_each_operand_mut(kind: &mut InstKind, mut visit: impl FnMut(&mut Operand)
             visit(value);
             visit(ptr);
         }
+        InstKind::AtomicRmw { ptr, value, .. } => {
+            visit(ptr);
+            visit(value);
+        }
+        InstKind::CmpXchg { ptr, cmp, new, .. } => {
+            visit(ptr);
+            visit(cmp);
+            visit(new);
+        }
         InstKind::Gep { ptr, .. } => visit(ptr),
         InstKind::Call { callee, args, .. } => {
             visit(callee);
@@ -667,6 +820,65 @@ fn for_each_operand_mut(kind: &mut InstKind, mut visit: impl FnMut(&mut Operand)
         }
         InstKind::CondBr { cond, .. } => visit(cond),
         InstKind::Switch { value, .. } => visit(value),
-        InstKind::Br { .. } | InstKind::Unreachable => {}
+        InstKind::ExtractValue { aggregate, .. } => visit(aggregate),
+        InstKind::InsertValue {
+            aggregate, value, ..
+        } => {
+            visit(aggregate);
+            visit(value);
+        }
+        InstKind::ExtractElement { vector, index } => {
+            visit(vector);
+            visit(index);
+        }
+        InstKind::InsertElement {
+            vector,
+            value,
+            index,
+        } => {
+            visit(vector);
+            visit(value);
+            visit(index);
+        }
+        InstKind::ShuffleVector {
+            first,
+            second,
+            mask,
+        } => {
+            visit(first);
+            visit(second);
+            visit(mask);
+        }
+        InstKind::Freeze { value } => visit(value),
+        InstKind::VaArg { list, .. } => visit(list),
+        InstKind::IndirectBr { address, .. } => visit(address),
+        InstKind::CallBr { callee, args, .. } | InstKind::Invoke { callee, args, .. } => {
+            visit(callee);
+            for arg in args {
+                visit(arg);
+            }
+        }
+        InstKind::LandingPad { clauses, .. } => {
+            for (_, value) in clauses {
+                visit(value);
+            }
+        }
+        InstKind::Resume { value } => visit(value),
+        InstKind::CatchSwitch { parent_pad, .. } => {
+            if let Some(parent_pad) = parent_pad {
+                visit(parent_pad);
+            }
+        }
+        InstKind::CatchPad { parent_pad, args } | InstKind::CleanupPad { parent_pad, args } => {
+            if let Some(parent_pad) = parent_pad {
+                visit(parent_pad);
+            }
+            for arg in args {
+                visit(arg);
+            }
+        }
+        InstKind::CatchRet { catch_pad, .. } => visit(catch_pad),
+        InstKind::CleanupRet { cleanup_pad, .. } => visit(cleanup_pad),
+        InstKind::Fence { .. } | InstKind::Br { .. } | InstKind::Unreachable => {}
     }
 }

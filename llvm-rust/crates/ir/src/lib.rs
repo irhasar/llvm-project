@@ -17,14 +17,14 @@ pub mod ty;
 pub mod value;
 pub mod verify;
 
-pub use constant::{ConstId, ConstKind, Constant};
+pub use constant::{ConstExpr, ConstId, ConstKind, Constant};
 pub use function::{Block, BlockId, FuncId, Function, Local, LocalId, Param};
 pub use inst::{
-    Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred, InstId, InstKind,
-    Instruction, IntFlags, TailKind, UnOp,
+    AtomicOrdering, AtomicRmwOp, Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred,
+    InstId, InstKind, Instruction, IntFlags, LandingPadClause, SyncScope, TailKind, UnOp,
 };
 pub use linkage::{Linkage, Visibility};
-pub use module::{Global, GlobalId, Module, ThreadLocal};
+pub use module::{Global, GlobalId, GlobalKind, Module, ThreadLocal};
 pub use parser::{ParseError, parse_module};
 pub use print::print_module;
 pub use ty::{FloatKind, Type, TypeId, TypeTable};

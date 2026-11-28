@@ -1,13 +1,13 @@
 //! Functions, parameters, basic blocks, and local value slots.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use llvm_rust_support::{Arena, Idx, Symbol};
+use llvm_rust_support::{Arena, FastHashMap, Idx, Symbol};
 
 use crate::inst::{Attribute, InstId, Instruction};
 use crate::linkage::{Linkage, Visibility};
 use crate::ty::TypeId;
+use crate::value::Operand;
 
 /// Handle to a function in the module arena.
 pub type FuncId = Idx<Function>;
@@ -56,13 +56,14 @@ pub struct Function {
     pub is_declaration: bool,
     pub ret_attrs: Arc<Vec<Attribute>>,
     pub attrs: Arc<Vec<Attribute>>,
+    pub personality: Option<Operand>,
     pub params: Vec<Param>,
     pub locals: Vec<Local>,
     pub blocks: Arena<Block>,
     pub insts: Arena<Instruction>,
     pub entry: Option<BlockId>,
     block_order: Vec<BlockId>,
-    block_names: HashMap<Symbol, BlockId>,
+    block_names: FastHashMap<Symbol, BlockId>,
 }
 
 impl Function {
@@ -80,13 +81,14 @@ impl Function {
             is_declaration: true,
             ret_attrs: Arc::new(Vec::new()),
             attrs: Arc::new(Vec::new()),
+            personality: None,
             params: Vec::new(),
             locals: Vec::new(),
             blocks: Arena::new(),
             insts: Arena::new(),
             entry: None,
             block_order: Vec::new(),
-            block_names: HashMap::new(),
+            block_names: FastHashMap::default(),
         }
     }
 

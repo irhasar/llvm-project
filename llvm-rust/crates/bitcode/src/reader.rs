@@ -1,14 +1,16 @@
 //! LLVM bitcode reader for the Track B IR subset.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
+use llvm_rust_ir::ty::INVALID_TYPE;
 use llvm_rust_ir::{
-    Attribute, BinOp, BlockId, CastOp, ConstId, ConstKind, Constant, FastMath, FcmpPred, FuncId,
-    Function, Global, GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand,
-    OperandKind, TailKind, ThreadLocal, Type, TypeId, Visibility,
+    AtomicOrdering, AtomicRmwOp, Attribute, BinOp, BlockId, CastOp, ConstExpr, ConstId, ConstKind,
+    Constant, FastMath, FcmpPred, FuncId, Function, GepIndex, Global, GlobalId, GlobalKind,
+    IcmpPred, InstId, InstKind, IntFlags, LandingPadClause, Linkage, Module, Operand, OperandKind,
+    SyncScope, TailKind, ThreadLocal, Type, TypeId, Visibility,
 };
-use llvm_rust_support::{Error, Result};
+use llvm_rust_support::{Error, FastHashMap, Result, Symbol};
 
 use crate::attrs::{
     PARAMATTR_CODE_ENTRY, PARAMATTR_GRP_CODE_ENTRY, decode_attribute_group, deduplicate_attributes,
@@ -31,7 +33,9 @@ const MODULE_DATALAYOUT: u64 = 3;
 const MODULE_SECTIONNAME: u64 = 5;
 const MODULE_GLOBALVAR: u64 = 7;
 const MODULE_FUNCTION: u64 = 8;
+const MODULE_ALIAS: u64 = 14;
 const MODULE_SOURCE_FILENAME: u64 = 16;
+const MODULE_IFUNC: u64 = 18;
 
 const TYPE_VOID: u64 = 2;
 const TYPE_FLOAT: u64 = 3;
@@ -65,25 +69,53 @@ const CST_AGGREGATE: u64 = 7;
 const CST_STRING: u64 = 8;
 const CST_CSTRING: u64 = 9;
 const CST_DATA: u64 = 22;
+const CST_BLOCKADDRESS: u64 = 21;
+const CST_INLINEASM: u64 = 30;
+const CST_CE_CAST: u64 = 11;
+const CST_CE_GEP: u64 = 32;
 const CST_POISON: u64 = 26;
 
 const FUNC_DECLAREBLOCKS: u64 = 1;
+const FUNC_BLOCKADDR_USERS: u64 = 60;
 const FUNC_INST_BINOP: u64 = 2;
 const FUNC_INST_CAST: u64 = 3;
 const FUNC_INST_SELECT_OLD: u64 = 5;
 const FUNC_INST_RET: u64 = 10;
 const FUNC_INST_BR: u64 = 11;
 const FUNC_INST_SWITCH: u64 = 12;
+const FUNC_INST_INVOKE: u64 = 13;
 const FUNC_INST_UNREACHABLE: u64 = 15;
+const FUNC_INST_RESUME: u64 = 39;
+const FUNC_INST_LANDINGPAD_OLD: u64 = 40;
+const FUNC_INST_LANDINGPAD: u64 = 47;
+const FUNC_INST_CLEANUPRET: u64 = 48;
+const FUNC_INST_CATCHRET: u64 = 49;
+const FUNC_INST_CATCHPAD: u64 = 50;
+const FUNC_INST_CLEANUPPAD: u64 = 51;
+const FUNC_INST_CATCHSWITCH: u64 = 52;
 const FUNC_INST_PHI: u64 = 16;
 const FUNC_INST_ALLOCA: u64 = 19;
 const FUNC_INST_LOAD: u64 = 20;
+const FUNC_INST_LOADATOMIC: u64 = 41;
 const FUNC_INST_CMP2: u64 = 28;
 const FUNC_INST_VSELECT: u64 = 29;
 const FUNC_INST_CALL: u64 = 34;
+const FUNC_INST_CALLBR: u64 = 57;
 const FUNC_INST_GEP: u64 = 43;
 const FUNC_INST_STORE: u64 = 44;
+const FUNC_INST_STOREATOMIC: u64 = 45;
+const FUNC_INST_CMPXCHG: u64 = 46;
+const FUNC_INST_ATOMICRMW: u64 = 59;
 const FUNC_INST_UNOP: u64 = 56;
+const FUNC_INST_EXTRACTELT: u64 = 6;
+const FUNC_INST_INSERTELT: u64 = 7;
+const FUNC_INST_SHUFFLEVEC: u64 = 8;
+const FUNC_INST_FENCE: u64 = 36;
+const FUNC_INST_FREEZE: u64 = 58;
+const FUNC_INST_VAARG: u64 = 23;
+const FUNC_INST_INDIRECTBR: u64 = 31;
+const FUNC_INST_EXTRACTVAL: u64 = 26;
+const FUNC_INST_INSERTVAL: u64 = 27;
 
 const VST_ENTRY: u64 = 1;
 const VST_BBENTRY: u64 = 2;
@@ -146,16 +178,20 @@ pub fn read_bitcode_with_options(bytes: &[u8], options: ReadOptions) -> Result<M
         types: Vec::new(),
         values: Vec::new(),
         pending_globals: Vec::new(),
+        pending_block_addresses: Vec::new(),
+        pending_personalities: Vec::new(),
         defined_functions: Vec::new(),
         next_body: 0,
-        attr_groups: HashMap::new(),
+        attr_groups: FastHashMap::default(),
         attr_lists: Vec::new(),
         attr_budget: bytes.len().saturating_mul(8).saturating_add(4096),
         next_unnamed: 0,
         llvm19_compat: options.llvm19_compat,
     };
     reader.read_module(module_block)?;
+    reader.resolve_personalities()?;
     reader.resolve_globals()?;
+    reader.resolve_block_addresses()?;
     reader.module.assign_unnamed_slots();
     Ok(reader.module)
 }
@@ -167,9 +203,11 @@ struct Reader {
     types: Vec<TypeId>,
     values: Vec<ValueRef>,
     pending_globals: Vec<(GlobalId, u32)>,
+    pending_block_addresses: Vec<(ConstId, u32, u32)>,
+    pending_personalities: Vec<(FuncId, u32)>,
     defined_functions: Vec<FuncId>,
     next_body: usize,
-    attr_groups: HashMap<u64, (u32, Arc<Vec<Attribute>>)>,
+    attr_groups: FastHashMap<u64, (u32, Arc<Vec<Attribute>>)>,
     attr_lists: Vec<Arc<Vec<(u32, Arc<Vec<Attribute>>)>>>,
     attr_budget: usize,
     next_unnamed: u32,
@@ -222,6 +260,7 @@ impl Reader {
                     }
                     MODULE_GLOBALVAR => self.read_global(record)?,
                     MODULE_FUNCTION => self.read_function(record)?,
+                    MODULE_ALIAS | MODULE_IFUNC => self.read_alias(record)?,
                     _ => {}
                 },
                 Item::Block(child) => match child.id {
@@ -267,7 +306,7 @@ impl Reader {
                 continue;
             }
             let mut list: Vec<(u32, Arc<Vec<Attribute>>)> = Vec::new();
-            let mut positions: HashMap<u32, usize> = HashMap::new();
+            let mut positions: FastHashMap<u32, usize> = FastHashMap::default();
             let mut merged_slots: HashSet<u32> = HashSet::new();
             for group in &record.operands {
                 let (index, attrs) =
@@ -469,6 +508,7 @@ impl Reader {
             id,
             Global {
                 name: symbol,
+                kind: GlobalKind::Variable,
                 ty,
                 init: None,
                 linkage,
@@ -489,6 +529,75 @@ impl Reader {
         if init != 0 {
             self.pending_globals.push((id, (init - 1) as u32));
         }
+        Ok(())
+    }
+
+    fn read_alias(&mut self, record: &Record) -> Result<()> {
+        let name = self.name_from(
+            record.operands.first().copied().unwrap_or(0),
+            record.operands.get(1).copied().unwrap_or(0),
+        )?;
+        let unnamed = name.is_empty();
+        let name = if unnamed { self.unnamed_name() } else { name };
+        let ty = self.type_at(record.operands.get(2).copied().unwrap_or(0))?;
+        if record.operands.get(3).copied().unwrap_or(0) != 0 {
+            return Err(Error::bitcode(
+                "nonzero alias address spaces are not supported",
+            ));
+        }
+        let aliasee = record.operands.get(4).copied().unwrap_or(0);
+        let linkage = decode_linkage(record.operands.get(5).copied().unwrap_or(0));
+        let visibility = decode_visibility(record.operands.get(6).copied().unwrap_or(0));
+        let ifunc = record.code == MODULE_IFUNC;
+        // IFUNCs encode DSO locality where aliases put the DLL storage class,
+        // and have no thread-local or unnamed-address fields.
+        let tls_model = if ifunc {
+            ThreadLocal::None
+        } else {
+            ThreadLocal::from_bitcode(record.operands.get(8).copied().unwrap_or(0))
+        };
+        let unnamed_code = if ifunc {
+            0
+        } else {
+            record.operands.get(9).copied().unwrap_or(0)
+        };
+        let unnamed_addr = unnamed_code == 1;
+        let local_unnamed_addr = unnamed_code == 2;
+        let dso_local = record
+            .operands
+            .get(if ifunc { 7 } else { 10 })
+            .copied()
+            .unwrap_or(0)
+            != 0;
+        let symbol = self.module.intern(&name);
+        let id = self.module.global_or_insert(symbol);
+        self.module.define_global(
+            id,
+            Global {
+                name: symbol,
+                kind: if record.code == MODULE_IFUNC {
+                    GlobalKind::IFunc
+                } else {
+                    GlobalKind::Alias
+                },
+                ty,
+                init: None,
+                linkage,
+                visibility,
+                is_const: false,
+                tls_model,
+                unnamed_addr,
+                local_unnamed_addr,
+                dso_local,
+                align: None,
+                section: None,
+            },
+        );
+        if unnamed {
+            self.module.mark_unnamed_global(id);
+        }
+        self.values.push(ValueRef::Global(id));
+        self.pending_globals.push((id, aliasee as u32));
         Ok(())
     }
 
@@ -517,8 +626,8 @@ impl Reader {
         function.unnamed_addr = unnamed_addr;
         function.local_unnamed_addr = local_unnamed_addr;
         function.dso_local = dso_local;
-        if let Type::Function { params, .. } = self.module.types.get(ty).clone() {
-            for param in params {
+        if let Type::Function { params, .. } = self.module.types.get(ty) {
+            for &param in params {
                 function.add_param(None, param, Vec::new());
             }
         }
@@ -539,6 +648,12 @@ impl Reader {
         }
         let id = self.module.function_or_insert(symbol);
         self.module.define_function(id, function);
+        let personality = record.operands.get(16).copied().unwrap_or(0);
+        if personality != 0 {
+            let personality = u32::try_from(personality - 1)
+                .map_err(|_| Error::bitcode("personality value id is out of range"))?;
+            self.pending_personalities.push((id, personality));
+        }
         if unnamed {
             self.module.mark_unnamed_function(id);
         }
@@ -549,27 +664,79 @@ impl Reader {
         Ok(())
     }
 
-    fn read_constants(&mut self, block: &Block, module_level: bool) -> Result<Vec<ConstId>> {
+    fn read_constants(&mut self, block: &Block, module_level: bool) -> Result<()> {
         let mut current_ty = None;
-        let mut ids = Vec::new();
         for record in block.records() {
             if record.code == CST_SETTYPE {
                 current_ty = Some(self.type_at(record.operands.first().copied().unwrap_or(0))?);
                 continue;
             }
             let ty = current_ty.ok_or_else(|| Error::bitcode("constant without a type"))?;
-            let kind = self.read_constant_kind(record.code, ty, record)?;
+            let (kind, pending) =
+                self.read_constant_kind_with_locals(record.code, ty, record, None, 0)?;
             let id = self.module.add_constant(Constant::new(ty, kind));
-            ids.push(id);
             if module_level {
                 self.values.push(ValueRef::Constant(id));
+            }
+            if let Some((function, block)) = pending {
+                self.pending_block_addresses.push((id, function, block));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads a function-local constants block.
+    ///
+    /// LLVM emits local constants in the function value namespace, and an
+    /// aggregate may reference a later constant. Reserve the local slots
+    /// before decoding so forward references resolve to stable handles.
+    fn read_function_constants(&mut self, block: &Block, local_base: u32) -> Result<Vec<ConstId>> {
+        let mut current_ty = None;
+        let mut records = Vec::new();
+        for record in block.records() {
+            if record.code == CST_SETTYPE {
+                current_ty = Some(self.type_at(record.operands.first().copied().unwrap_or(0))?);
+                continue;
+            }
+            let ty = current_ty.ok_or_else(|| Error::bitcode("constant without a type"))?;
+            records.push((record.code, ty, record));
+        }
+        let ids: Vec<ConstId> = records
+            .iter()
+            .map(|(_, ty, _)| {
+                self.module
+                    .add_constant(Constant::new(*ty, ConstKind::Null))
+            })
+            .collect();
+        for (index, (code, ty, record)) in records.iter().enumerate() {
+            let (kind, pending) =
+                self.read_constant_kind_with_locals(*code, *ty, record, Some(&ids), local_base)?;
+            self.module.constants[ids[index]] = Constant::new(*ty, kind);
+            if let Some((function, block)) = pending {
+                self.pending_block_addresses
+                    .push((ids[index], function, block));
             }
         }
         Ok(ids)
     }
 
+    #[cfg(test)]
     fn read_constant_kind(&mut self, code: u64, ty: TypeId, record: &Record) -> Result<ConstKind> {
-        Ok(match code {
+        Ok(self
+            .read_constant_kind_with_locals(code, ty, record, None, 0)?
+            .0)
+    }
+
+    fn read_constant_kind_with_locals(
+        &mut self,
+        code: u64,
+        ty: TypeId,
+        record: &Record,
+        locals: Option<&[ConstId]>,
+        local_base: u32,
+    ) -> Result<(ConstKind, Option<(u32, u32)>)> {
+        let mut pending = None;
+        let kind = match code {
             CST_NULL => match self.module.types.get(ty) {
                 Type::Int(_) => ConstKind::Int(0),
                 Type::Float(_) => ConstKind::Float(0),
@@ -580,6 +747,65 @@ impl Reader {
             },
             CST_UNDEF => ConstKind::Undef,
             CST_POISON => ConstKind::Poison,
+            CST_INLINEASM => {
+                if record.operands.len() < 3 {
+                    return Err(Error::bitcode("invalid inline asm record"));
+                }
+                if !matches!(self.module.types.get(ty), Type::Pointer) {
+                    return Err(Error::bitcode("inline asm type is not a pointer"));
+                }
+                let fn_ty = self.type_at(record.operands[0])?;
+                if !matches!(self.module.types.get(fn_ty), Type::Function { .. }) {
+                    return Err(Error::bitcode("inline asm type is not a function type"));
+                }
+                let flags = record.operands[1];
+                let asm_len = usize::try_from(record.operands[2])
+                    .map_err(|_| Error::bitcode("inline asm string length overflow"))?;
+                let asm_start: usize = 3;
+                let asm_end = asm_start
+                    .checked_add(asm_len)
+                    .ok_or_else(|| Error::bitcode("inline asm string length overflow"))?;
+                if asm_end >= record.operands.len() {
+                    return Err(Error::bitcode("truncated inline asm string"));
+                }
+                let constraints_len = usize::try_from(record.operands[asm_end])
+                    .map_err(|_| Error::bitcode("inline asm constraint length overflow"))?;
+                let constraints_start = asm_end + 1;
+                let constraints_end = constraints_start
+                    .checked_add(constraints_len)
+                    .ok_or_else(|| Error::bitcode("inline asm constraint length overflow"))?;
+                if constraints_end > record.operands.len() {
+                    return Err(Error::bitcode("truncated inline asm constraints"));
+                }
+                ConstKind::InlineAsm {
+                    fn_ty,
+                    asm: record.operands[asm_start..asm_end]
+                        .iter()
+                        .map(|byte| *byte as u8)
+                        .collect(),
+                    constraints: record.operands[constraints_start..constraints_end]
+                        .iter()
+                        .map(|byte| *byte as u8)
+                        .collect(),
+                    sideeffect: flags & 1 != 0,
+                    alignstack: flags & 2 != 0,
+                    inteldialect: flags & 4 != 0,
+                    unwind: flags & 8 != 0,
+                }
+            }
+            CST_BLOCKADDRESS => {
+                if record.operands.len() < 3 {
+                    return Err(Error::bitcode("invalid blockaddress record"));
+                }
+                if !matches!(self.module.types.get(ty), Type::Pointer) {
+                    return Err(Error::bitcode("blockaddress type is not a pointer"));
+                }
+                pending = Some((record.operands[1] as u32, record.operands[2] as u32));
+                ConstKind::BlockAddress {
+                    function: FuncId::from_raw(0),
+                    block: Symbol::default(),
+                }
+            }
             CST_INTEGER => {
                 let value = decode_signed(record.operands.first().copied().unwrap_or(0));
                 ConstKind::Int(value as u128)
@@ -626,6 +852,63 @@ impl Reader {
                     }
                 }
             }
+            CST_CE_CAST => {
+                if record.operands.len() < 3 {
+                    return Err(Error::bitcode("invalid cast constant expression record"));
+                }
+                let op = decode_cast_op(record.operands[0])
+                    .ok_or_else(|| Error::bitcode("unknown cast constant expression opcode"))?;
+                let operand_ty = self.type_at(record.operands[1])?;
+                let value = self.resolve_const_in(record.operands[2] as u32, locals, local_base)?;
+                ConstKind::Expr(ConstExpr::Cast {
+                    op,
+                    value: Operand::constant(operand_ty, value),
+                })
+            }
+            CST_CE_GEP => {
+                if record.operands.len() < 4 || !record.operands.len().is_multiple_of(2) {
+                    return Err(Error::bitcode(
+                        "invalid getelementptr constant expression record",
+                    ));
+                }
+                let source_ty = self.type_at(record.operands[0])?;
+                let flags = record.operands[1];
+                if flags & !0b11 != 0 {
+                    return Err(Error::bitcode(format!(
+                        "unsupported getelementptr constant expression flags {flags}"
+                    )));
+                }
+                if !matches!(self.module.types.get(ty), Type::Pointer) {
+                    return Err(Error::bitcode(
+                        "getelementptr constant expression result is not a pointer",
+                    ));
+                }
+                let mut operands = Vec::new();
+                let mut index = 2;
+                while index < record.operands.len() {
+                    let operand_ty = self.type_at(record.operands[index])?;
+                    let value = self.resolve_const_in(
+                        record.operands[index + 1] as u32,
+                        locals,
+                        local_base,
+                    )?;
+                    operands.push(GepIndex {
+                        ty: operand_ty,
+                        value: Operand::constant(operand_ty, value),
+                    });
+                    index += 2;
+                }
+                let mut operands = operands.into_iter();
+                let ptr = operands
+                    .next()
+                    .ok_or_else(|| Error::bitcode("getelementptr constant has no pointer"))?;
+                ConstKind::Expr(ConstExpr::Gep {
+                    inbounds: flags & 1 != 0,
+                    source_ty,
+                    ptr: ptr.value,
+                    indices: operands.collect(),
+                })
+            }
             CST_STRING | CST_CSTRING => {
                 let mut bytes: Vec<u8> = record.operands.iter().map(|b| *b as u8).collect();
                 if code == CST_CSTRING {
@@ -636,7 +919,7 @@ impl Reader {
             CST_AGGREGATE => {
                 let mut elements = Vec::new();
                 for operand in &record.operands {
-                    elements.push(self.resolve_const(*operand as u32)?);
+                    elements.push(self.resolve_const_in(*operand as u32, locals, local_base)?);
                 }
                 ConstKind::Aggregate(elements)
             }
@@ -660,7 +943,63 @@ impl Reader {
                 ConstKind::Aggregate(elements)
             }
             other => return Err(Error::bitcode(format!("unsupported constant code {other}"))),
-        })
+        };
+        Ok((kind, pending))
+    }
+
+    fn resolve_block_addresses(&mut self) -> Result<()> {
+        let pending = core::mem::take(&mut self.pending_block_addresses);
+        for (constant, function_value, block_index) in pending {
+            let function = match self.values.get(function_value as usize).copied() {
+                Some(ValueRef::Function(function)) => function,
+                _ => {
+                    return Err(Error::bitcode(
+                        "blockaddress function is not a function value",
+                    ));
+                }
+            };
+            let block = {
+                let function_ref = self
+                    .module
+                    .functions
+                    .try_get(function)
+                    .ok_or_else(|| Error::bitcode("blockaddress function is undefined"))?;
+                let block = function_ref
+                    .block_order()
+                    .get(block_index as usize)
+                    .copied()
+                    .ok_or_else(|| Error::bitcode("blockaddress block index is out of range"))?;
+                function_ref
+                    .blocks
+                    .get(block)
+                    .name
+                    .ok_or_else(|| Error::bitcode("blockaddress target block has no name"))?
+            };
+            self.module.constants[constant].kind = ConstKind::BlockAddress { function, block };
+        }
+        Ok(())
+    }
+
+    fn resolve_personalities(&mut self) -> Result<()> {
+        let pending = core::mem::take(&mut self.pending_personalities);
+        for (function, value) in pending {
+            let personality = self.resolve_module_operand(value)?;
+            self.module.functions[function].personality = Some(personality);
+        }
+        Ok(())
+    }
+
+    fn resolve_module_operand(&mut self, value: u32) -> Result<Operand> {
+        let ptr = self.ptr_type()?;
+        match self.values.get(value as usize).copied() {
+            Some(ValueRef::Function(id)) => Ok(Operand::function(ptr, id)),
+            Some(ValueRef::Global(id)) => Ok(Operand::global(ptr, id)),
+            Some(ValueRef::Constant(id)) => {
+                let ty = self.module.constant(id).ty;
+                Ok(Operand::constant(ty, id))
+            }
+            None => Err(Error::bitcode(format!("unknown module value {value}"))),
+        }
     }
 
     fn resolve_globals(&mut self) -> Result<()> {
@@ -670,6 +1009,24 @@ impl Reader {
             self.module.globals.get_mut(global).init = Some(init);
         }
         Ok(())
+    }
+
+    fn resolve_const_in(
+        &mut self,
+        value: u32,
+        locals: Option<&[ConstId]>,
+        local_base: u32,
+    ) -> Result<ConstId> {
+        if let Some(locals) = locals
+            && value >= local_base
+        {
+            let index = (value - local_base) as usize;
+            return locals
+                .get(index)
+                .copied()
+                .ok_or_else(|| Error::bitcode(format!("unknown local constant value {value}")));
+        }
+        self.resolve_const(value)
     }
 
     fn resolve_const(&mut self, value: u32) -> Result<ConstId> {
@@ -736,11 +1093,13 @@ impl Reader {
             current_block: 0,
             deferred_phis: Vec::new(),
         };
-        let mut items = block.items.clone();
         let mut saw_declare_blocks = false;
-        for item in items.drain(..) {
+        for item in &block.items {
             match item {
                 Item::Record(record) => {
+                    if record.code == FUNC_BLOCKADDR_USERS {
+                        continue;
+                    }
                     if record.code == FUNC_DECLAREBLOCKS {
                         saw_declare_blocks = true;
                         let count = record.operands.first().copied().unwrap_or(0) as usize;
@@ -753,25 +1112,26 @@ impl Reader {
                         function.entry = state.blocks.first().copied();
                         continue;
                     }
-                    self.read_instruction(&record, &mut state)?;
+                    self.read_instruction(record, &mut state)?;
                 }
                 Item::Block(child) => match child.id {
                     CONSTANTS_BLOCK => {
-                        let ids = self.read_constants(&child, false)?;
+                        let local_base = state.next_value;
+                        let ids = self.read_function_constants(child, local_base)?;
                         state.next_value = state
                             .next_value
                             .checked_add(ids.len() as u32)
                             .ok_or_else(|| Error::bitcode("too many function values"))?;
                         state.locals.extend(ids.into_iter().map(LocalRef::Constant));
                     }
-                    VALUE_SYMTAB_BLOCK => self.read_vst(&child, &mut state)?,
+                    VALUE_SYMTAB_BLOCK => self.read_vst(child, &mut state)?,
                     _ => {}
                 },
             }
         }
         let deferred = std::mem::take(&mut state.deferred_phis);
         for (inst, record, value_id, ty) in deferred {
-            let (kind, result_ty) = self.decode_instruction(&record, value_id, &state)?;
+            let (kind, result_ty) = self.decode_instruction(&record, value_id, &mut state)?;
             if result_ty != Some(ty) {
                 return Err(Error::bitcode("phi result type mismatch"));
             }
@@ -784,6 +1144,15 @@ impl Reader {
     }
 
     fn assign_unnamed_slots(&mut self, id: FuncId) -> Result<()> {
+        let function = &self.module.functions[id];
+        if function.params.iter().all(|param| param.name.is_some())
+            && function.locals.iter().all(|local| local.name.is_some())
+            && function
+                .blocks_in_order()
+                .all(|(_, block)| block.name.is_some())
+        {
+            return Ok(());
+        }
         let mut slot = 0u32;
         let param_count = self.module.functions[id].params.len();
         for index in 0..param_count {
@@ -869,7 +1238,7 @@ impl Reader {
         Ok(())
     }
 
-    fn resolve_value(&mut self, state: &FuncState, value: u32) -> Result<Operand> {
+    fn resolve_value(&mut self, state: &mut FuncState, value: u32) -> Result<Operand> {
         if (value as usize) < self.values.len() {
             return Ok(match self.values[value as usize] {
                 ValueRef::Global(id) => {
@@ -887,6 +1256,13 @@ impl Reader {
             });
         }
         let index = (value - state.base) as usize;
+        if index >= state.locals.len() {
+            let function = &mut self.module.functions[state.id];
+            while state.locals.len() <= index {
+                let local = function.reserve_local(None, INVALID_TYPE);
+                state.locals.push(LocalRef::Local(local));
+            }
+        }
         let local = *state
             .locals
             .get(index)
@@ -908,11 +1284,51 @@ impl Reader {
         record: &Record,
         index: usize,
         inst_id: u32,
-        state: &FuncState,
+        state: &mut FuncState,
     ) -> Result<(Operand, usize)> {
-        let relative = record.operands[index];
+        let relative = *record
+            .operands
+            .get(index)
+            .ok_or_else(|| Error::bitcode(format!("missing instruction operand {index}")))?;
         let value = inst_id.wrapping_sub(relative as u32);
         Ok((self.resolve_value(state, value)?, index + 1))
+    }
+
+    fn decode_parent_pad(
+        &mut self,
+        record: &Record,
+        index: usize,
+        inst_id: u32,
+        state: &mut FuncState,
+    ) -> Result<(Option<Operand>, usize)> {
+        let (operand, next) = self.decode_value(record, index, inst_id, state)?;
+        let is_none = match operand.kind {
+            OperandKind::Const(id) => {
+                let constant = self.module.constant(id);
+                matches!(self.module.types.get(constant.ty), Type::Token)
+                    && constant.kind == ConstKind::Null
+            }
+            _ => false,
+        };
+        Ok((if is_none { None } else { Some(operand) }, next))
+    }
+
+    fn decode_value_as(
+        &mut self,
+        record: &Record,
+        index: usize,
+        inst_id: u32,
+        state: &mut FuncState,
+        expected: TypeId,
+    ) -> Result<(Operand, usize)> {
+        let (mut operand, next) = self.decode_value(record, index, inst_id, state)?;
+        if operand.ty == INVALID_TYPE {
+            operand.ty = expected;
+            if let OperandKind::Local(id) = operand.kind {
+                self.module.functions[state.id].locals[id as usize].ty = expected;
+            }
+        }
+        Ok((operand, next))
     }
 
     fn decode_typed_value(
@@ -920,14 +1336,24 @@ impl Reader {
         record: &Record,
         index: usize,
         inst_id: u32,
-        state: &FuncState,
+        state: &mut FuncState,
     ) -> Result<(Operand, usize)> {
-        let relative = record.operands[index];
+        let relative = *record
+            .operands
+            .get(index)
+            .ok_or_else(|| Error::bitcode(format!("missing instruction operand {index}")))?;
         let value = inst_id.wrapping_sub(relative as u32);
         let mut operand = self.resolve_value(state, value)?;
         let mut next = index + 1;
         if relative as u32 > inst_id {
-            operand.ty = self.type_at(record.operands[next])?;
+            let type_index = *record
+                .operands
+                .get(next)
+                .ok_or_else(|| Error::bitcode("missing instruction operand type"))?;
+            operand.ty = self.type_at(type_index)?;
+            if let OperandKind::Local(id) = operand.kind {
+                self.module.functions[state.id].locals[id as usize].ty = operand.ty;
+            }
             next += 1;
         }
         Ok((operand, next))
@@ -979,14 +1405,9 @@ impl Reader {
             return Ok(());
         }
         let (kind, result_ty) = self.decode_instruction(record, inst_id, state)?;
+        let is_terminator = kind.is_terminator();
         let function = &mut self.module.functions[state.id];
-        let inst = function.add_inst(
-            block,
-            llvm_rust_ir::Instruction {
-                result: None,
-                kind: kind.clone(),
-            },
-        );
+        let inst = function.add_inst(block, llvm_rust_ir::Instruction { result: None, kind });
         if let Some(ty) = result_ty {
             let index = (inst_id - state.base) as usize;
             let local = match state.locals.get(index).copied() {
@@ -1008,7 +1429,7 @@ impl Reader {
                 .checked_add(1)
                 .ok_or_else(|| Error::bitcode("too many function values"))?;
         }
-        if kind.is_terminator() {
+        if is_terminator {
             state.current_block += 1;
         }
         Ok(())
@@ -1018,7 +1439,7 @@ impl Reader {
         &mut self,
         record: &Record,
         inst_id: u32,
-        state: &FuncState,
+        state: &mut FuncState,
     ) -> Result<(InstKind, Option<TypeId>)> {
         match record.code {
             FUNC_INST_BINOP => {
@@ -1028,7 +1449,7 @@ impl Reader {
                 let opcode = record.operands[index] as u32;
                 index += 1;
                 let flags = record.operands.get(index).copied().unwrap_or(0);
-                let is_float = matches!(self.module.types.get(lhs.ty), Type::Float(_));
+                let is_float = self.is_float_type(lhs.ty);
                 let op = binop_from_code(opcode, is_float)?;
                 let mut int_flags = IntFlags::default();
                 let mut fastmath = FastMath::default();
@@ -1074,8 +1495,8 @@ impl Reader {
                 let predicate = record.operands[index] as u32;
                 index += 1;
                 let flags = record.operands.get(index).copied().unwrap_or(0);
-                let i1 = self.i1_type()?;
-                let kind = if matches!(self.module.types.get(lhs.ty), Type::Float(_)) {
+                let result_ty = self.comparison_result_type(lhs.ty)?;
+                let kind = if self.is_float_type(lhs.ty) {
                     InstKind::FCmp {
                         pred: fcmp_from_code(predicate)?,
                         flags: decode_fastmath(flags),
@@ -1089,7 +1510,7 @@ impl Reader {
                         rhs,
                     }
                 };
-                Ok((kind, Some(i1)))
+                Ok((kind, Some(result_ty)))
             }
             FUNC_INST_ALLOCA => {
                 let elem_ty = self.type_at(record.operands[0])?;
@@ -1133,6 +1554,39 @@ impl Reader {
                         ptr,
                         align,
                         volatile,
+                        ordering: AtomicOrdering::NotAtomic,
+                        syncscope: SyncScope::System,
+                    },
+                    Some(ty),
+                ))
+            }
+            FUNC_INST_LOADATOMIC => {
+                let (ptr, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                if record.operands.len() != index + 5 {
+                    return Err(Error::bitcode("invalid atomic load record"));
+                }
+                let ty = self.type_at(record.operands[index])?;
+                index += 1;
+                let align = decode_align(record.operands[index]);
+                index += 1;
+                let volatile = record.operands[index] != 0;
+                index += 1;
+                let ordering = AtomicOrdering::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("invalid atomic load ordering"))?;
+                index += 1;
+                let syncscope = SyncScope::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("unsupported atomic load syncscope"))?;
+                if align.is_none() || !ordering.is_load_valid() {
+                    return Err(Error::bitcode("invalid atomic load"));
+                }
+                Ok((
+                    InstKind::Load {
+                        ty,
+                        ptr,
+                        align,
+                        volatile,
+                        ordering,
+                        syncscope,
                     },
                     Some(ty),
                 ))
@@ -1150,6 +1604,39 @@ impl Reader {
                         ptr,
                         align,
                         volatile,
+                        ordering: AtomicOrdering::NotAtomic,
+                        syncscope: SyncScope::System,
+                    },
+                    None,
+                ))
+            }
+            FUNC_INST_STOREATOMIC => {
+                let (ptr, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (value, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                if record.operands.len() != index + 4 {
+                    return Err(Error::bitcode("invalid atomic store record"));
+                }
+                let align = decode_align(record.operands[index]);
+                index += 1;
+                let volatile = record.operands[index] != 0;
+                index += 1;
+                let ordering = AtomicOrdering::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("invalid atomic store ordering"))?;
+                index += 1;
+                let syncscope = SyncScope::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("unsupported atomic store syncscope"))?;
+                if align.is_none() || !ordering.is_store_valid() {
+                    return Err(Error::bitcode("invalid atomic store"));
+                }
+                Ok((
+                    InstKind::Store {
+                        value,
+                        ptr,
+                        align,
+                        volatile,
+                        ordering,
+                        syncscope,
                     },
                     None,
                 ))
@@ -1163,9 +1650,100 @@ impl Reader {
         code: u64,
         record: &Record,
         inst_id: u32,
-        state: &FuncState,
+        state: &mut FuncState,
     ) -> Result<(InstKind, Option<TypeId>)> {
         match code {
+            FUNC_INST_ATOMICRMW => {
+                let (ptr, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (value, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                if record.operands.len() != index + 5 {
+                    return Err(Error::bitcode("invalid atomicrmw record"));
+                }
+                let op = AtomicRmwOp::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("unsupported atomicrmw operation"))?;
+                index += 1;
+                let volatile = record.operands[index] != 0;
+                index += 1;
+                let ordering = AtomicOrdering::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("invalid atomicrmw ordering"))?;
+                index += 1;
+                let syncscope = SyncScope::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("unsupported atomicrmw syncscope"))?;
+                index += 1;
+                let align = decode_align(record.operands[index]);
+                if align.is_none() || !ordering.is_rmw_valid() {
+                    return Err(Error::bitcode("invalid atomicrmw"));
+                }
+                Ok((
+                    InstKind::AtomicRmw {
+                        op,
+                        ptr,
+                        value,
+                        align,
+                        volatile,
+                        ordering,
+                        syncscope,
+                    },
+                    Some(value.ty),
+                ))
+            }
+            FUNC_INST_CMPXCHG => {
+                let (ptr, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (cmp, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                let (mut new, next) = self.decode_value(record, index, inst_id, state)?;
+                index = next;
+                if new.ty == INVALID_TYPE {
+                    new.ty = cmp.ty;
+                    if let OperandKind::Local(id) = new.kind {
+                        self.module.functions[state.id].locals[id as usize].ty = cmp.ty;
+                    }
+                }
+                if record.operands.len() != index + 6 {
+                    return Err(Error::bitcode("invalid cmpxchg record"));
+                }
+                let volatile = record.operands[index] != 0;
+                index += 1;
+                let success = AtomicOrdering::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("invalid cmpxchg success ordering"))?;
+                index += 1;
+                let syncscope = SyncScope::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("unsupported cmpxchg syncscope"))?;
+                index += 1;
+                let failure = AtomicOrdering::from_code(record.operands[index])
+                    .ok_or_else(|| Error::bitcode("invalid cmpxchg failure ordering"))?;
+                index += 1;
+                let weak = record.operands[index] != 0;
+                index += 1;
+                let align = decode_align(record.operands[index]);
+                if align.is_none()
+                    || !success.is_cmpxchg_success_valid()
+                    || !failure.is_cmpxchg_failure_valid()
+                {
+                    return Err(Error::bitcode("invalid cmpxchg"));
+                }
+                let i1 = self.module.types.int(1);
+                let result_ty = self.module.types.intern(Type::Struct {
+                    name: None,
+                    fields: vec![cmp.ty, i1],
+                    packed: false,
+                });
+                Ok((
+                    InstKind::CmpXchg {
+                        ptr,
+                        cmp,
+                        new,
+                        align,
+                        volatile,
+                        success,
+                        failure,
+                        syncscope,
+                        weak,
+                    },
+                    Some(result_ty),
+                ))
+            }
             FUNC_INST_GEP => {
                 let inbounds = record.operands.first().copied().unwrap_or(0) & 1 != 0;
                 let source_ty = self.type_at(record.operands[1])?;
@@ -1280,6 +1858,366 @@ impl Reader {
                     result,
                 ))
             }
+            FUNC_INST_CALLBR => {
+                let mut ret_attrs = Arc::new(Vec::new());
+                let mut call_attrs = Arc::new(Vec::new());
+                let mut arg_attr_entries = Vec::new();
+                for (index, attrs) in self
+                    .attribute_list(record.operands.first().copied().unwrap_or(0))?
+                    .iter()
+                {
+                    match *index {
+                        0 => ret_attrs = attrs.clone(),
+                        u32::MAX => call_attrs = attrs.clone(),
+                        _ => arg_attr_entries.push((*index, attrs.clone())),
+                    }
+                }
+                let mut index = 1;
+                let flags = record.operands.get(index).copied().unwrap_or(0);
+                index += 1;
+                if flags & (1 << 15) == 0 {
+                    return Err(Error::bitcode(
+                        "callbr record has no explicit function type",
+                    ));
+                }
+                let default_dest =
+                    self.block_at(
+                        state,
+                        record.operands.get(index).copied().ok_or_else(|| {
+                            Error::bitcode("callbr record has no default destination")
+                        })? as usize,
+                    )?;
+                index += 1;
+                let indirect_count = record
+                    .operands
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| Error::bitcode("callbr record has no indirect count"))?
+                    as usize;
+                index += 1;
+                let mut indirect_dests = Vec::with_capacity(indirect_count);
+                for _ in 0..indirect_count {
+                    let destination = record
+                        .operands
+                        .get(index)
+                        .copied()
+                        .ok_or_else(|| Error::bitcode("truncated callbr destinations"))?;
+                    index += 1;
+                    indirect_dests.push(self.block_at(state, destination as usize)?);
+                }
+                let fn_ty = self.type_at(
+                    record
+                        .operands
+                        .get(index)
+                        .copied()
+                        .ok_or_else(|| Error::bitcode("callbr record has no function type"))?,
+                )?;
+                index += 1;
+                let (callee, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                let (ret_ty, fixed, varargs) = match self.module.types.get(fn_ty) {
+                    Type::Function {
+                        ret,
+                        params,
+                        varargs,
+                    } => (*ret, params.len(), *varargs),
+                    _ => return Err(Error::bitcode("callbr with a non-function type")),
+                };
+                let mut args = Vec::new();
+                for _ in 0..fixed {
+                    let (arg, next) = self.decode_value(record, index, inst_id, state)?;
+                    args.push(arg);
+                    index = next;
+                }
+                if varargs {
+                    while index < record.operands.len() {
+                        let (arg, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                        args.push(arg);
+                        index = next;
+                    }
+                }
+                let mut arg_attrs = vec![Arc::new(Vec::new()); args.len()];
+                for (index, attrs) in arg_attr_entries {
+                    let slot = index
+                        .checked_sub(1)
+                        .and_then(|value| arg_attrs.get_mut(value as usize))
+                        .ok_or_else(|| {
+                            Error::bitcode(format!(
+                                "callbr argument attribute index {index} is out of range"
+                            ))
+                        })?;
+                    *slot = attrs;
+                }
+                let result = if self.module.types.get(ret_ty).is_void() {
+                    None
+                } else {
+                    Some(ret_ty)
+                };
+                Ok((
+                    InstKind::CallBr {
+                        ret_ty,
+                        fn_ty,
+                        callee,
+                        args,
+                        arg_attrs,
+                        fastmath: FastMath::default(),
+                        ret_attrs,
+                        attrs: call_attrs,
+                        default_dest,
+                        indirect_dests,
+                    },
+                    result,
+                ))
+            }
+            FUNC_INST_INVOKE => {
+                let mut ret_attrs = Arc::new(Vec::new());
+                let mut call_attrs = Arc::new(Vec::new());
+                let mut arg_attr_entries = Vec::new();
+                for (index, attrs) in self
+                    .attribute_list(record.operands.first().copied().unwrap_or(0))?
+                    .iter()
+                {
+                    match *index {
+                        0 => ret_attrs = attrs.clone(),
+                        u32::MAX => call_attrs = attrs.clone(),
+                        _ => arg_attr_entries.push((*index, attrs.clone())),
+                    }
+                }
+                let mut index = 1;
+                let flags = record.operands.get(index).copied().unwrap_or(0);
+                index += 1;
+                if flags & (1 << 13) == 0 {
+                    return Err(Error::bitcode(
+                        "invoke record has no explicit function type",
+                    ));
+                }
+                let normal_dest =
+                    self.block_at(
+                        state,
+                        record.operands.get(index).copied().ok_or_else(|| {
+                            Error::bitcode("invoke record has no normal destination")
+                        })? as usize,
+                    )?;
+                index += 1;
+                let unwind_dest =
+                    self.block_at(
+                        state,
+                        record.operands.get(index).copied().ok_or_else(|| {
+                            Error::bitcode("invoke record has no unwind destination")
+                        })? as usize,
+                    )?;
+                index += 1;
+                let fn_ty = self.type_at(
+                    record
+                        .operands
+                        .get(index)
+                        .copied()
+                        .ok_or_else(|| Error::bitcode("invoke record has no function type"))?,
+                )?;
+                index += 1;
+                let (callee, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                index = next;
+                let (ret_ty, fixed, varargs) = match self.module.types.get(fn_ty) {
+                    Type::Function {
+                        ret,
+                        params,
+                        varargs,
+                    } => (*ret, params.len(), *varargs),
+                    _ => return Err(Error::bitcode("invoke with a non-function type")),
+                };
+                let mut args = Vec::new();
+                for _ in 0..fixed {
+                    let (arg, next) = self.decode_value(record, index, inst_id, state)?;
+                    args.push(arg);
+                    index = next;
+                }
+                if varargs {
+                    while index < record.operands.len() {
+                        let (arg, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                        args.push(arg);
+                        index = next;
+                    }
+                }
+                let mut arg_attrs = vec![Arc::new(Vec::new()); args.len()];
+                for (index, attrs) in arg_attr_entries {
+                    let slot = index
+                        .checked_sub(1)
+                        .and_then(|value| arg_attrs.get_mut(value as usize))
+                        .ok_or_else(|| {
+                            Error::bitcode(format!(
+                                "invoke argument attribute index {index} is out of range"
+                            ))
+                        })?;
+                    *slot = attrs;
+                }
+                let result = if self.module.types.get(ret_ty).is_void() {
+                    None
+                } else {
+                    Some(ret_ty)
+                };
+                Ok((
+                    InstKind::Invoke {
+                        ret_ty,
+                        fn_ty,
+                        callee,
+                        args,
+                        arg_attrs,
+                        fastmath: FastMath::default(),
+                        ret_attrs,
+                        attrs: call_attrs,
+                        normal_dest,
+                        unwind_dest,
+                    },
+                    result,
+                ))
+            }
+            FUNC_INST_RESUME => {
+                let (value, _) = self.decode_typed_value(record, 0, inst_id, state)?;
+                Ok((InstKind::Resume { value }, None))
+            }
+            FUNC_INST_CATCHSWITCH => {
+                let (parent_pad, mut index) = self.decode_parent_pad(record, 0, inst_id, state)?;
+                let count = record
+                    .operands
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| Error::bitcode("catchswitch record has no handler count"))?
+                    as usize;
+                index += 1;
+                let mut handlers = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let handler = *record
+                        .operands
+                        .get(index)
+                        .ok_or_else(|| Error::bitcode("catchswitch record is missing a handler"))?;
+                    handlers.push(self.block_at(state, handler as usize)?);
+                    index += 1;
+                }
+                let unwind_dest = if index < record.operands.len() {
+                    let dest = *record.operands.get(index).ok_or_else(|| {
+                        Error::bitcode("catchswitch record is missing unwind dest")
+                    })?;
+                    index += 1;
+                    Some(self.block_at(state, dest as usize)?)
+                } else {
+                    None
+                };
+                if index != record.operands.len() {
+                    return Err(Error::bitcode("catchswitch record has trailing operands"));
+                }
+                let ty = self.module.types.token();
+                Ok((
+                    InstKind::CatchSwitch {
+                        parent_pad,
+                        handlers,
+                        unwind_dest,
+                    },
+                    Some(ty),
+                ))
+            }
+            FUNC_INST_CATCHPAD | FUNC_INST_CLEANUPPAD => {
+                let (parent_pad, mut index) = self.decode_parent_pad(record, 0, inst_id, state)?;
+                let count = record
+                    .operands
+                    .get(index)
+                    .copied()
+                    .ok_or_else(|| Error::bitcode("funclet pad record has no argument count"))?
+                    as usize;
+                index += 1;
+                let mut args = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let (arg, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                    args.push(arg);
+                    index = next;
+                }
+                if index != record.operands.len() {
+                    return Err(Error::bitcode("funclet pad record has trailing operands"));
+                }
+                let ty = self.module.types.token();
+                let kind = if record.code == FUNC_INST_CATCHPAD {
+                    InstKind::CatchPad { parent_pad, args }
+                } else {
+                    InstKind::CleanupPad { parent_pad, args }
+                };
+                Ok((kind, Some(ty)))
+            }
+            FUNC_INST_CATCHRET => {
+                if record.operands.len() != 2 {
+                    return Err(Error::bitcode("catchret record must have two operands"));
+                }
+                let (catch_pad, _) = self.decode_value(record, 0, inst_id, state)?;
+                let successor = self.block_at(state, record.operands[1] as usize)?;
+                Ok((
+                    InstKind::CatchRet {
+                        catch_pad,
+                        successor,
+                    },
+                    None,
+                ))
+            }
+            FUNC_INST_CLEANUPRET => {
+                if record.operands.is_empty() || record.operands.len() > 2 {
+                    return Err(Error::bitcode(
+                        "cleanupret record must have one or two operands",
+                    ));
+                }
+                let (cleanup_pad, _) = self.decode_value(record, 0, inst_id, state)?;
+                let unwind_dest = if record.operands.len() == 2 {
+                    Some(self.block_at(state, record.operands[1] as usize)?)
+                } else {
+                    None
+                };
+                Ok((
+                    InstKind::CleanupRet {
+                        cleanup_pad,
+                        unwind_dest,
+                    },
+                    None,
+                ))
+            }
+            FUNC_INST_LANDINGPAD | FUNC_INST_LANDINGPAD_OLD => {
+                let mut index = 0;
+                let ty = self.type_at(
+                    record
+                        .operands
+                        .get(index)
+                        .copied()
+                        .ok_or_else(|| Error::bitcode("landingpad record has no type"))?,
+                )?;
+                index += 1;
+                if record.code == FUNC_INST_LANDINGPAD_OLD {
+                    let (_, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                    index = next;
+                }
+                let cleanup = record.operands.get(index).copied().unwrap_or(0) != 0;
+                index += 1;
+                let count = record.operands.get(index).copied().unwrap_or(0) as usize;
+                index += 1;
+                let mut clauses = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let clause = match record.operands.get(index).copied().unwrap_or(0) {
+                        0 => LandingPadClause::Catch,
+                        1 => LandingPadClause::Filter,
+                        other => {
+                            return Err(Error::bitcode(format!(
+                                "unknown landingpad clause kind {other}"
+                            )));
+                        }
+                    };
+                    index += 1;
+                    let (value, next) = self.decode_typed_value(record, index, inst_id, state)?;
+                    index = next;
+                    clauses.push((clause, value));
+                }
+                Ok((
+                    InstKind::LandingPad {
+                        ty,
+                        cleanup,
+                        clauses,
+                    },
+                    Some(ty),
+                ))
+            }
             FUNC_INST_PHI => {
                 let ty = self.type_at(record.operands[0])?;
                 let mut incoming = Vec::new();
@@ -1378,11 +2316,196 @@ impl Reader {
                     (kind, ty)
                 })
             }
+            FUNC_INST_EXTRACTVAL => {
+                let (aggregate, index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let indices = self.decode_aggregate_indices(record, index)?;
+                let result = self
+                    .module
+                    .types
+                    .aggregate_indexed(aggregate.ty, &indices)
+                    .ok_or_else(|| Error::bitcode("invalid extractvalue indices"))?;
+                Ok((InstKind::ExtractValue { aggregate, indices }, Some(result)))
+            }
+            FUNC_INST_INSERTVAL => {
+                let (aggregate, index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (value, index) = self.decode_typed_value(record, index, inst_id, state)?;
+                let indices = self.decode_aggregate_indices(record, index)?;
+                let expected = self
+                    .module
+                    .types
+                    .aggregate_indexed(aggregate.ty, &indices)
+                    .ok_or_else(|| Error::bitcode("invalid insertvalue indices"))?;
+                if expected != value.ty {
+                    return Err(Error::bitcode(
+                        "insertvalue element type does not match the index",
+                    ));
+                }
+                Ok((
+                    InstKind::InsertValue {
+                        aggregate,
+                        value,
+                        indices,
+                    },
+                    Some(aggregate.ty),
+                ))
+            }
+            FUNC_INST_EXTRACTELT => {
+                let (vector, index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (index, _) = self.decode_typed_value(record, index, inst_id, state)?;
+                let result =
+                    self.module.types.vector_element(vector.ty).ok_or_else(|| {
+                        Error::bitcode("extractelement requires a vector operand")
+                    })?;
+                Ok((InstKind::ExtractElement { vector, index }, Some(result)))
+            }
+            FUNC_INST_INSERTELT => {
+                let (vector, index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let element_ty = self
+                    .module
+                    .types
+                    .vector_element(vector.ty)
+                    .ok_or_else(|| Error::bitcode("insertelement requires a vector operand"))?;
+                let (value, index) =
+                    self.decode_value_as(record, index, inst_id, state, element_ty)?;
+                let (index, _) = self.decode_typed_value(record, index, inst_id, state)?;
+                if value.ty != element_ty {
+                    return Err(Error::bitcode(
+                        "insertelement value type does not match the vector",
+                    ));
+                }
+                Ok((
+                    InstKind::InsertElement {
+                        vector,
+                        value,
+                        index,
+                    },
+                    Some(vector.ty),
+                ))
+            }
+            FUNC_INST_SHUFFLEVEC => {
+                let (first, mut index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                let (second, next) =
+                    self.decode_value_as(record, index, inst_id, state, first.ty)?;
+                index = next;
+                let (mask, _) = self.decode_typed_value(record, index, inst_id, state)?;
+                if !matches!(mask.kind, OperandKind::Const(_)) {
+                    return Err(Error::bitcode("shufflevector mask is not a constant"));
+                }
+                let (elem, _, scalable) =
+                    self.module.types.vector_info(first.ty).ok_or_else(|| {
+                        Error::bitcode("shufflevector first operand is not a vector")
+                    })?;
+                if scalable {
+                    return Err(Error::bitcode("scalable shufflevector is not supported"));
+                }
+                if second.ty != first.ty {
+                    return Err(Error::bitcode(
+                        "shufflevector operands must have the same type",
+                    ));
+                }
+                let (mask_elem, mask_len, mask_scalable) =
+                    self.module
+                        .types
+                        .vector_info(mask.ty)
+                        .ok_or_else(|| Error::bitcode("shufflevector mask is not a vector"))?;
+                if mask_scalable {
+                    return Err(Error::bitcode(
+                        "scalable shufflevector masks are not supported",
+                    ));
+                }
+                if !matches!(self.module.types.get(mask_elem), Type::Int(32)) {
+                    return Err(Error::bitcode(
+                        "shufflevector mask element type must be i32",
+                    ));
+                }
+                let result = self.module.types.vector(elem, mask_len, false);
+                Ok((
+                    InstKind::ShuffleVector {
+                        first,
+                        second,
+                        mask,
+                    },
+                    Some(result),
+                ))
+            }
+            FUNC_INST_FREEZE => {
+                let (value, index) = self.decode_typed_value(record, 0, inst_id, state)?;
+                if index != record.operands.len() {
+                    return Err(Error::bitcode("invalid freeze record"));
+                }
+                Ok((InstKind::Freeze { value }, Some(value.ty)))
+            }
+            FUNC_INST_FENCE => {
+                if record.operands.len() != 2 {
+                    return Err(Error::bitcode("invalid fence record"));
+                }
+                let ordering = AtomicOrdering::from_code(record.operands[0])
+                    .ok_or_else(|| Error::bitcode("invalid fence ordering"))?;
+                if !ordering.is_fence_valid() {
+                    return Err(Error::bitcode("invalid fence ordering"));
+                }
+                let syncscope = SyncScope::from_code(record.operands[1])
+                    .ok_or_else(|| Error::bitcode("unsupported fence syncscope"))?;
+                Ok((
+                    InstKind::Fence {
+                        ordering,
+                        syncscope,
+                    },
+                    None,
+                ))
+            }
+            FUNC_INST_INDIRECTBR => {
+                if record.operands.len() < 2 {
+                    return Err(Error::bitcode("invalid indirectbr record"));
+                }
+                let op_ty = self.type_at(record.operands[0])?;
+                let (address, index) = self.decode_value_as(record, 1, inst_id, state, op_ty)?;
+                let mut destinations = Vec::new();
+                for block in &record.operands[index..] {
+                    destinations.push(self.block_at(state, *block as usize)?);
+                }
+                Ok((
+                    InstKind::IndirectBr {
+                        address,
+                        destinations,
+                    },
+                    None,
+                ))
+            }
+            FUNC_INST_VAARG => {
+                if record.operands.len() != 3 {
+                    return Err(Error::bitcode("invalid va_arg record"));
+                }
+                let list_ty = self.type_at(record.operands[0])?;
+                let (list, index) = self.decode_value_as(record, 1, inst_id, state, list_ty)?;
+                if index != 2 {
+                    return Err(Error::bitcode("invalid va_arg record"));
+                }
+                let ty = self.type_at(record.operands[2])?;
+                Ok((InstKind::VaArg { list, ty }, Some(ty)))
+            }
             FUNC_INST_UNREACHABLE => Ok((InstKind::Unreachable, None)),
             other => Err(Error::bitcode(format!(
                 "unsupported instruction code {other}"
             ))),
         }
+    }
+
+    fn decode_aggregate_indices(&self, record: &Record, mut index: usize) -> Result<Vec<u32>> {
+        let mut indices = Vec::new();
+        while index < record.operands.len() {
+            indices.push(
+                u32::try_from(record.operands[index])
+                    .map_err(|_| Error::bitcode("aggregate index is out of range"))?,
+            );
+            index += 1;
+        }
+        if indices.is_empty() {
+            return Err(Error::bitcode(
+                "aggregate instruction requires at least one index",
+            ));
+        }
+        Ok(indices)
     }
 
     fn resolve_const_state(&mut self, value: u32, state: &FuncState) -> Result<ConstId> {
@@ -1402,6 +2525,26 @@ impl Reader {
             .get(index)
             .copied()
             .ok_or_else(|| Error::bitcode(format!("unknown basic block {index}")))
+    }
+
+    fn is_float_type(&self, ty: TypeId) -> bool {
+        match self.module.types.get(ty) {
+            Type::Float(_) => true,
+            Type::Vector { elem, .. } => matches!(self.module.types.get(*elem), Type::Float(_)),
+            _ => false,
+        }
+    }
+
+    fn comparison_result_type(&mut self, operand_ty: TypeId) -> Result<TypeId> {
+        let vector = match self.module.types.get(operand_ty) {
+            Type::Vector { len, scalable, .. } => Some((*len, *scalable)),
+            _ => None,
+        };
+        let i1 = self.i1_type()?;
+        Ok(match vector {
+            Some((len, scalable)) => self.module.types.vector(i1, len, scalable),
+            None => i1,
+        })
     }
 
     fn i1_type(&self) -> Result<TypeId> {
@@ -1568,12 +2711,31 @@ fn bytes_to_utf8(bytes: &[u64]) -> Option<String> {
     String::from_utf8(raw).ok()
 }
 
+fn decode_cast_op(code: u64) -> Option<CastOp> {
+    Some(match code {
+        0 => CastOp::Trunc,
+        1 => CastOp::ZExt,
+        2 => CastOp::SExt,
+        3 => CastOp::FPToUI,
+        4 => CastOp::FPToSI,
+        5 => CastOp::UIToFP,
+        6 => CastOp::SIToFP,
+        7 => CastOp::FPTrunc,
+        8 => CastOp::FPExt,
+        9 => CastOp::PtrToInt,
+        10 => CastOp::IntToPtr,
+        11 => CastOp::BitCast,
+        12 => CastOp::AddrSpaceCast,
+        _ => return None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn test_reader(groups: Vec<(u64, u32, Vec<Attribute>)>) -> Reader {
-        let mut attr_groups = HashMap::new();
+        let mut attr_groups = FastHashMap::default();
         for (id, index, attrs) in groups {
             attr_groups.insert(id, (index, Arc::new(attrs)));
         }
@@ -1584,6 +2746,8 @@ mod tests {
             types: Vec::new(),
             values: Vec::new(),
             pending_globals: Vec::new(),
+            pending_personalities: Vec::new(),
+            pending_block_addresses: Vec::new(),
             defined_functions: Vec::new(),
             next_body: 0,
             attr_groups,
@@ -1601,7 +2765,7 @@ mod tests {
     fn attr_list_record(groups: &[u64]) -> Record {
         Record {
             code: PARAMATTR_CODE_ENTRY,
-            operands: groups.to_vec(),
+            operands: groups.to_vec().into(),
             blob: None,
         }
     }
@@ -1613,7 +2777,7 @@ mod tests {
             code_len: 0,
             items: vec![Item::Record(Record {
                 code: PARAMATTR_GRP_CODE_ENTRY,
-                operands: vec![1, u64::from(u32::MAX), 1, 86, (2u64 << 56) | 0x504],
+                operands: vec![1, u64::from(u32::MAX), 1, 86, (2u64 << 56) | 0x504].into(),
                 blob: None,
             })],
         };
@@ -1671,5 +2835,150 @@ mod tests {
         let second = reader.attribute_list(2).expect("second list");
         assert_eq!(second.len(), 1);
         assert!(Arc::ptr_eq(&second[0].1, &reader.attr_groups[&3].1));
+    }
+
+    #[test]
+    fn malformed_constant_expression_records_return_errors() {
+        let mut reader = test_reader(Vec::new());
+        let ptr = reader.module.types.pointer();
+        reader.types.push(ptr);
+
+        let cases = [
+            (
+                CST_CE_CAST,
+                Vec::new(),
+                "invalid cast constant expression record",
+            ),
+            (
+                CST_CE_CAST,
+                vec![99, 0, 0],
+                "unknown cast constant expression opcode",
+            ),
+            (
+                CST_CE_GEP,
+                Vec::new(),
+                "invalid getelementptr constant expression record",
+            ),
+            (
+                CST_CE_GEP,
+                vec![0, 0],
+                "invalid getelementptr constant expression record",
+            ),
+            (
+                CST_CE_GEP,
+                vec![0, 0, 0, 0, 0],
+                "invalid getelementptr constant expression record",
+            ),
+            (
+                CST_CE_GEP,
+                vec![0, 4, 0, 0, 0, 0],
+                "unsupported getelementptr constant expression flags",
+            ),
+        ];
+        for (code, operands, needle) in cases {
+            let record = Record {
+                code,
+                operands: operands.into(),
+                blob: None,
+            };
+            let error = reader
+                .read_constant_kind(code, ptr, &record)
+                .expect_err("malformed constant expression must fail");
+            assert!(error.message.contains(needle), "{code}: {error}");
+        }
+    }
+
+    #[test]
+    fn malformed_va_arg_record_returns_error() {
+        let mut reader = test_reader(Vec::new());
+        let mut state = FuncState {
+            id: FuncId::from_raw(0),
+            base: 0,
+            next_value: 1,
+            locals: Vec::new(),
+            blocks: Vec::new(),
+            current_block: 0,
+            deferred_phis: Vec::new(),
+        };
+        let record = Record {
+            code: FUNC_INST_VAARG,
+            operands: vec![0, 1].into(),
+            blob: None,
+        };
+        let error = reader
+            .decode_instruction(&record, 1, &mut state)
+            .expect_err("short va_arg record must fail");
+        assert!(error.message.contains("invalid va_arg record"), "{error}");
+    }
+
+    #[test]
+    fn short_element_records_return_errors() {
+        let mut reader = test_reader(Vec::new());
+        let mut state = FuncState {
+            id: FuncId::from_raw(0),
+            base: 0,
+            next_value: 1,
+            locals: Vec::new(),
+            blocks: Vec::new(),
+            current_block: 0,
+            deferred_phis: Vec::new(),
+        };
+        for code in [
+            FUNC_INST_EXTRACTVAL,
+            FUNC_INST_INSERTVAL,
+            FUNC_INST_EXTRACTELT,
+            FUNC_INST_INSERTELT,
+            FUNC_INST_SHUFFLEVEC,
+            FUNC_INST_FREEZE,
+            FUNC_INST_LOADATOMIC,
+            FUNC_INST_STOREATOMIC,
+            FUNC_INST_ATOMICRMW,
+            FUNC_INST_CMPXCHG,
+        ] {
+            let record = Record {
+                code,
+                operands: Vec::new().into(),
+                blob: None,
+            };
+            let error = reader
+                .decode_instruction(&record, 1, &mut state)
+                .expect_err("short record must fail");
+            assert!(
+                error.message.contains("missing instruction operand"),
+                "{code}: {error}"
+            );
+        }
+        let record = Record {
+            code: FUNC_INST_EXTRACTVAL,
+            operands: vec![0].into(),
+            blob: None,
+        };
+        let error = reader
+            .decode_aggregate_indices(&record, 1)
+            .expect_err("empty aggregate path must fail");
+        assert!(error.message.contains("at least one index"), "{error}");
+
+        let record = Record {
+            code: FUNC_INST_FENCE,
+            operands: Vec::new().into(),
+            blob: None,
+        };
+        let error = reader
+            .decode_instruction(&record, 1, &mut state)
+            .expect_err("short fence record must fail");
+        assert!(error.message.contains("invalid fence record"), "{error}");
+    }
+    #[test]
+    fn rejects_malformed_blockaddress_record() {
+        let mut reader = test_reader(Vec::new());
+        let ty = reader.ptr_type().expect("pointer type");
+        let record = Record {
+            code: CST_BLOCKADDRESS,
+            operands: vec![0, 1].into(),
+            blob: None,
+        };
+        reader
+            .read_constant_kind(CST_BLOCKADDRESS, ty, &record)
+            .expect_err("blockaddress without a block must fail");
     }
 }

@@ -1,27 +1,46 @@
 //! Deterministic textual LLVM IR printer.
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
-use crate::constant::{ConstId, ConstKind, Constant};
+use crate::constant::{ConstExpr, ConstId, ConstKind, Constant};
 use crate::function::{BlockId, FuncId, Function};
-use crate::inst::{Attribute, FastMath, InstKind, Instruction, IntFlags};
+use crate::inst::{
+    Attribute, FastMath, InstKind, Instruction, IntFlags, LandingPadClause, TailKind,
+};
 use crate::linkage::{Linkage, Visibility};
-use crate::module::{Global, GlobalId, Module};
-use crate::names::{quote_bytes, quote_name};
+use crate::module::{Global, GlobalId, GlobalKind, Module};
+use crate::names::{quote_name, write_name, write_quoted_bytes};
 use crate::ty::{FloatKind, Type, TypeId};
 use crate::value::{Operand, OperandKind};
 
 /// Prints a module in canonical textual form.
 pub fn print_module(module: &Module) -> String {
-    let mut out = String::new();
+    let instruction_count: usize = module
+        .functions
+        .iter()
+        .map(|(_, function)| function.insts.len())
+        .sum();
+    let mut out = String::with_capacity(
+        instruction_count.saturating_mul(48)
+            + module.globals.len().saturating_mul(64)
+            + module.named_types.len().saturating_mul(32)
+            + 4096,
+    );
     if let Some(value) = &module.source_filename {
-        let _ = writeln!(out, "source_filename = {}", quote_bytes(value.as_bytes()));
+        out.push_str("source_filename = ");
+        write_quoted_bytes(&mut out, value.as_bytes());
+        out.push('\n');
     }
     if let Some(value) = &module.data_layout {
-        let _ = writeln!(out, "target datalayout = {}", quote_bytes(value.as_bytes()));
+        out.push_str("target datalayout = ");
+        write_quoted_bytes(&mut out, value.as_bytes());
+        out.push('\n');
     }
     if let Some(value) = &module.target_triple {
-        let _ = writeln!(out, "target triple = {}", quote_bytes(value.as_bytes()));
+        out.push_str("target triple = ");
+        write_quoted_bytes(&mut out, value.as_bytes());
+        out.push('\n');
     }
     if module.source_filename.is_some()
         || module.data_layout.is_some()
@@ -51,10 +70,25 @@ pub fn print_module(module: &Module) -> String {
         out.push('\n');
     }
 
-    for id in module.ordered_globals() {
-        print_global(module, id, &module.globals[id], &mut out);
+    let globals = module.ordered_globals();
+    for id in &globals {
+        print_global(module, *id, &module.globals[*id], &mut out);
     }
-    if !module.globals.is_empty() {
+    let aliases = module.ordered_aliases();
+    if !globals.is_empty() && !aliases.is_empty() {
+        out.push('\n');
+    }
+    for id in &aliases {
+        print_global(module, *id, &module.globals[*id], &mut out);
+    }
+    let ifuncs = module.ordered_ifuncs();
+    if !aliases.is_empty() && !ifuncs.is_empty() {
+        out.push('\n');
+    }
+    for id in &ifuncs {
+        print_global(module, *id, &module.globals[*id], &mut out);
+    }
+    if !globals.is_empty() || !aliases.is_empty() || !ifuncs.is_empty() {
         out.push('\n');
     }
 
@@ -90,43 +124,51 @@ fn struct_body(module: &Module, fields: &[TypeId], packed: bool) -> String {
     out
 }
 
-fn quote_declared_name(name: &str) -> String {
+fn write_declared_name(out: &mut String, name: &str) {
     if !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()) {
-        format!("\"{name}\"")
+        out.push('"');
+        out.push_str(name);
+        out.push('"');
     } else {
-        quote_name(name)
+        let _ = write_name(out, name);
     }
 }
 
-fn global_name(module: &Module, id: GlobalId) -> String {
+fn write_global_name(out: &mut String, module: &Module, id: GlobalId) {
     if module.is_unnamed_global(id) {
-        return module
-            .unnamed_global_slot(id)
-            .map(|slot| slot.to_string())
-            .unwrap_or_else(|| module.name(module.globals[id].name).to_string());
+        if let Some(slot) = module.unnamed_global_slot(id) {
+            let _ = write!(out, "{slot}");
+        } else {
+            out.push_str(module.name(module.globals[id].name));
+        }
+        return;
     }
-    quote_declared_name(module.name(module.globals[id].name))
+    write_declared_name(out, module.name(module.globals[id].name));
 }
 
-fn function_name(module: &Module, id: FuncId) -> String {
+fn write_function_name(out: &mut String, module: &Module, id: FuncId) {
     if module.is_unnamed_function(id) {
-        return module
-            .unnamed_function_slot(id)
-            .map(|slot| slot.to_string())
-            .unwrap_or_else(|| module.name(module.functions[id].name).to_string());
+        if let Some(slot) = module.unnamed_function_slot(id) {
+            let _ = write!(out, "{slot}");
+        } else {
+            out.push_str(module.name(module.functions[id].name));
+        }
+        return;
     }
-    quote_declared_name(module.name(module.functions[id].name))
+    write_declared_name(out, module.name(module.functions[id].name));
 }
 
 fn print_global(module: &Module, id: GlobalId, global: &Global, out: &mut String) {
-    let _ = write!(out, "@{} = ", global_name(module, id));
+    out.push('@');
+    write_global_name(out, module, id);
+    out.push_str(" = ");
     if global.linkage != Linkage::External {
         let _ = write!(out, "{} ", global.linkage.as_str());
     }
     if global.visibility != Visibility::Default {
         let _ = write!(out, "{} ", global.visibility.as_str());
     }
-    if global.dso_local {
+    if global.dso_local && !global.visibility.implies_dso_local() {
         out.push_str("dso_local ");
     }
     if global.tls_model.is_thread_local() {
@@ -136,6 +178,24 @@ fn print_global(module: &Module, id: GlobalId, global: &Global, out: &mut String
         out.push_str("local_unnamed_addr ");
     } else if global.unnamed_addr {
         out.push_str("unnamed_addr ");
+    }
+    if global.kind.is_alias() {
+        out.push_str(if global.kind == GlobalKind::IFunc {
+            "ifunc "
+        } else {
+            "alias "
+        });
+        let _ = write!(out, "{}", module.display_type(global.ty));
+        if let Some(init) = global.init {
+            let aliasee = module.constant(init);
+            out.push_str(", ");
+            if !matches!(aliasee.kind, ConstKind::Expr(_)) {
+                let _ = write!(out, "{} ", module.display_type(aliasee.ty));
+            }
+            write_constant(module, init, out);
+        }
+        out.push('\n');
+        return;
     }
     if global.init.is_none() && global.linkage == Linkage::External {
         out.push_str("external ");
@@ -154,7 +214,8 @@ fn print_global(module: &Module, id: GlobalId, global: &Global, out: &mut String
         let _ = write!(out, ", align {align}");
     }
     if let Some(section) = &global.section {
-        let _ = write!(out, ", section {}", quote_bytes(section.as_bytes()));
+        out.push_str(", section ");
+        write_quoted_bytes(out, section.as_bytes());
     }
     out.push('\n');
 }
@@ -174,18 +235,15 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
     if function.visibility != Visibility::Default {
         let _ = write!(out, "{} ", function.visibility.as_str());
     }
-    if function.dso_local {
+    if function.dso_local && !function.visibility.implies_dso_local() {
         out.push_str("dso_local ");
     }
     for attr in function.ret_attrs.iter() {
         let _ = write!(out, "{attr} ");
     }
-    let _ = write!(
-        out,
-        "{} @{}(",
-        module.display_type(ret),
-        function_name(module, id)
-    );
+    let _ = write!(out, "{} @", module.display_type(ret));
+    write_function_name(out, module, id);
+    out.push('(');
     for (index, param) in function.params.iter().enumerate() {
         if index > 0 {
             out.push_str(", ");
@@ -195,7 +253,8 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
             let _ = write!(out, " {attr}");
         }
         if let Some(name) = param.name {
-            let _ = write!(out, " %{}", quote_name(module.name(name)));
+            out.push_str(" %");
+            let _ = write_name(out, module.name(name));
         }
     }
     if varargs {
@@ -216,6 +275,10 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
     for attr in function.attrs.iter() {
         let _ = write!(out, " {attr}");
     }
+    if let Some(personality) = function.personality {
+        out.push_str(" personality ");
+        write_operand(module, function, personality, out);
+    }
     if function.is_declaration {
         out.push('\n');
         return;
@@ -223,7 +286,8 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
     out.push_str(" {\n");
     for (block_id, block) in function.blocks_in_order() {
         let label = block.name.map(|name| module.name(name)).unwrap_or("0");
-        let _ = writeln!(out, "{}:", quote_name(label));
+        let _ = write_name(out, label);
+        out.push_str(":\n");
         for &inst_id in &block.insts {
             out.push_str("  ");
             let inst = &function.insts[inst_id];
@@ -232,7 +296,9 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
                     .local_name(result)
                     .map(|name| module.name(name))
                     .unwrap_or("0");
-                let _ = write!(out, "%{} = ", quote_name(name));
+                out.push('%');
+                let _ = write_name(out, name);
+                out.push_str(" = ");
             }
             write_instruction(module, function, inst, block_id, out);
             out.push('\n');
@@ -308,13 +374,25 @@ fn write_instruction(
             ptr,
             align,
             volatile,
+            ordering,
+            syncscope,
         } => {
             out.push_str("load ");
+            if ordering.is_atomic() {
+                out.push_str("atomic ");
+            }
             if *volatile {
                 out.push_str("volatile ");
             }
             let _ = write!(out, "{}, ", module.display_type(*ty));
             write_operand(module, function, *ptr, out);
+            if ordering.is_atomic() {
+                out.push(' ');
+                if *syncscope == crate::inst::SyncScope::SingleThread {
+                    out.push_str("syncscope(\"singlethread\") ");
+                }
+                out.push_str(ordering.as_str());
+            }
             if let Some(align) = align {
                 let _ = write!(out, ", align {align}");
             }
@@ -324,14 +402,87 @@ fn write_instruction(
             ptr,
             align,
             volatile,
+            ordering,
+            syncscope,
         } => {
             out.push_str("store ");
+            if ordering.is_atomic() {
+                out.push_str("atomic ");
+            }
             if *volatile {
                 out.push_str("volatile ");
             }
             write_operand(module, function, *value, out);
             out.push_str(", ");
             write_operand(module, function, *ptr, out);
+            if ordering.is_atomic() {
+                out.push(' ');
+                if *syncscope == crate::inst::SyncScope::SingleThread {
+                    out.push_str("syncscope(\"singlethread\") ");
+                }
+                out.push_str(ordering.as_str());
+            }
+            if let Some(align) = align {
+                let _ = write!(out, ", align {align}");
+            }
+        }
+        InstKind::AtomicRmw {
+            op,
+            ptr,
+            value,
+            align,
+            volatile,
+            ordering,
+            syncscope,
+        } => {
+            out.push_str("atomicrmw ");
+            if *volatile {
+                out.push_str("volatile ");
+            }
+            out.push_str(op.as_str());
+            out.push(' ');
+            write_operand(module, function, *ptr, out);
+            out.push_str(", ");
+            write_operand(module, function, *value, out);
+            out.push(' ');
+            if *syncscope == crate::inst::SyncScope::SingleThread {
+                out.push_str("syncscope(\"singlethread\") ");
+            }
+            out.push_str(ordering.as_str());
+            if let Some(align) = align {
+                let _ = write!(out, ", align {align}");
+            }
+        }
+        InstKind::CmpXchg {
+            ptr,
+            cmp,
+            new,
+            align,
+            volatile,
+            success,
+            failure,
+            syncscope,
+            weak,
+        } => {
+            out.push_str("cmpxchg ");
+            if *weak {
+                out.push_str("weak ");
+            }
+            if *volatile {
+                out.push_str("volatile ");
+            }
+            write_operand(module, function, *ptr, out);
+            out.push_str(", ");
+            write_operand(module, function, *cmp, out);
+            out.push_str(", ");
+            write_operand(module, function, *new, out);
+            out.push(' ');
+            if *syncscope == crate::inst::SyncScope::SingleThread {
+                out.push_str("syncscope(\"singlethread\") ");
+            }
+            out.push_str(success.as_str());
+            out.push(' ');
+            out.push_str(failure.as_str());
             if let Some(align) = align {
                 let _ = write!(out, ", align {align}");
             }
@@ -363,49 +514,182 @@ fn write_instruction(
             fastmath,
             ret_attrs,
             attrs,
+        } => write_call(
+            module, function, *tail, "call", *ret_ty, *fn_ty, *callee, args, arg_attrs, *fastmath,
+            ret_attrs, attrs, out,
+        ),
+        InstKind::CallBr {
+            ret_ty,
+            fn_ty,
+            callee,
+            args,
+            arg_attrs,
+            fastmath,
+            ret_attrs,
+            attrs,
+            default_dest,
+            indirect_dests,
         } => {
-            out.push_str(tail.prefix());
-            out.push_str("call");
-            write_fastmath(*fastmath, out);
-            out.push(' ');
-            let mut calling_conv = Vec::new();
-            let mut other = Vec::new();
-            for attr in attrs.iter() {
-                if is_calling_convention(attr) {
-                    calling_conv.push(attr);
-                } else {
-                    other.push(attr);
+            write_call(
+                module,
+                function,
+                TailKind::None,
+                "callbr",
+                *ret_ty,
+                *fn_ty,
+                *callee,
+                args,
+                arg_attrs,
+                *fastmath,
+                ret_attrs,
+                attrs,
+                out,
+            );
+            out.push_str(" to label %");
+            let label = function
+                .blocks
+                .get(*default_dest)
+                .name
+                .map(|name| module.name(name))
+                .unwrap_or("0");
+            let _ = write_name(out, label);
+            out.push_str(" [");
+            for (index, destination) in indirect_dests.iter().enumerate() {
+                if index != 0 {
+                    out.push_str(", ");
                 }
+                out.push_str("label %");
+                let label = function
+                    .blocks
+                    .get(*destination)
+                    .name
+                    .map(|name| module.name(name))
+                    .unwrap_or("0");
+                let _ = write_name(out, label);
             }
-            for attr in calling_conv {
-                let _ = write!(out, "{attr} ");
+            out.push(']');
+        }
+        InstKind::Invoke {
+            ret_ty,
+            fn_ty,
+            callee,
+            args,
+            arg_attrs,
+            fastmath,
+            ret_attrs,
+            attrs,
+            normal_dest,
+            unwind_dest,
+        } => {
+            write_call(
+                module,
+                function,
+                TailKind::None,
+                "invoke",
+                *ret_ty,
+                *fn_ty,
+                *callee,
+                args,
+                arg_attrs,
+                *fastmath,
+                ret_attrs,
+                attrs,
+                out,
+            );
+            out.push_str(" to label %");
+            let normal = function
+                .blocks
+                .get(*normal_dest)
+                .name
+                .map(|name| module.name(name))
+                .unwrap_or("0");
+            let _ = write_name(out, normal);
+            out.push_str(" unwind label %");
+            let unwind = function
+                .blocks
+                .get(*unwind_dest)
+                .name
+                .map(|name| module.name(name))
+                .unwrap_or("0");
+            let _ = write_name(out, unwind);
+        }
+        InstKind::LandingPad {
+            ty,
+            cleanup,
+            clauses,
+        } => {
+            let _ = write!(out, "landingpad {}", module.display_type(*ty));
+            if *cleanup {
+                out.push_str(" cleanup");
             }
-            for attr in ret_attrs.iter() {
-                let _ = write!(out, "{attr} ");
+            for (clause, value) in clauses {
+                out.push_str(match clause {
+                    LandingPadClause::Catch => " catch ",
+                    LandingPadClause::Filter => " filter ",
+                });
+                write_operand(module, function, *value, out);
             }
-            let ty = match module.types.get(*fn_ty) {
-                Type::Function { varargs: true, .. } => *fn_ty,
-                _ => *ret_ty,
-            };
-            let _ = write!(out, "{} ", module.display_type(ty));
-            write_callee(module, function, *callee, out);
-            out.push('(');
-            for (index, arg) in args.iter().enumerate() {
+        }
+        InstKind::Resume { value } => {
+            out.push_str("resume ");
+            write_operand(module, function, *value, out);
+        }
+        InstKind::CatchSwitch {
+            parent_pad,
+            handlers,
+            unwind_dest,
+        } => {
+            out.push_str("catchswitch ");
+            write_parent_pad(module, function, *parent_pad, out);
+            out.push_str(" [");
+            for (index, handler) in handlers.iter().enumerate() {
                 if index > 0 {
                     out.push_str(", ");
                 }
-                let _ = write!(out, "{} ", module.display_type(arg.ty));
-                if let Some(attrs) = arg_attrs.get(index) {
-                    for attr in attrs.iter() {
-                        let _ = write!(out, "{attr} ");
-                    }
-                }
-                write_value(module, function, *arg, out);
+                out.push_str("label %");
+                let label = function
+                    .blocks
+                    .get(*handler)
+                    .name
+                    .map(|name| module.name(name))
+                    .unwrap_or("0");
+                let _ = write_name(out, label);
             }
-            out.push(')');
-            for attr in other {
-                let _ = write!(out, " {attr}");
-            }
+            out.push(']');
+            write_unwind_dest(module, function, *unwind_dest, out);
+        }
+        InstKind::CatchPad { parent_pad, args } => {
+            out.push_str("catchpad ");
+            write_parent_pad(module, function, *parent_pad, out);
+            write_pad_args(module, function, args, out);
+        }
+        InstKind::CleanupPad { parent_pad, args } => {
+            out.push_str("cleanuppad ");
+            write_parent_pad(module, function, *parent_pad, out);
+            write_pad_args(module, function, args, out);
+        }
+        InstKind::CatchRet {
+            catch_pad,
+            successor,
+        } => {
+            out.push_str("catchret from ");
+            write_value(module, function, *catch_pad, out);
+            out.push_str(" to label %");
+            let label = function
+                .blocks
+                .get(*successor)
+                .name
+                .map(|name| module.name(name))
+                .unwrap_or("0");
+            let _ = write_name(out, label);
+        }
+        InstKind::CleanupRet {
+            cleanup_pad,
+            unwind_dest,
+        } => {
+            out.push_str("cleanupret from ");
+            write_value(module, function, *cleanup_pad, out);
+            write_unwind_dest(module, function, *unwind_dest, out);
         }
         InstKind::Phi { incoming } => {
             out.push_str("phi ");
@@ -424,7 +708,9 @@ fn write_instruction(
                     .name
                     .map(|name| module.name(name))
                     .unwrap_or("0");
-                let _ = write!(out, ", %{} ]", quote_name(label));
+                out.push_str(", %");
+                let _ = write_name(out, label);
+                out.push_str(" ]");
             }
         }
         InstKind::Select {
@@ -462,7 +748,8 @@ fn write_instruction(
                 .name
                 .map(|name| module.name(name))
                 .unwrap_or("0");
-            let _ = write!(out, "br label %{}", quote_name(label));
+            out.push_str("br label %");
+            let _ = write_name(out, label);
         }
         InstKind::CondBr {
             cond,
@@ -484,12 +771,10 @@ fn write_instruction(
                 .name
                 .map(|name| module.name(name))
                 .unwrap_or("0");
-            let _ = write!(
-                out,
-                "label %{}, label %{}",
-                quote_name(then_label),
-                quote_name(else_label)
-            );
+            out.push_str("label %");
+            let _ = write_name(out, then_label);
+            out.push_str(", label %");
+            let _ = write_name(out, else_label);
         }
         InstKind::Switch {
             value,
@@ -504,7 +789,9 @@ fn write_instruction(
                 .name
                 .map(|name| module.name(name))
                 .unwrap_or("0");
-            let _ = write!(out, ", label %{} [", quote_name(default_label));
+            out.push_str(", label %");
+            let _ = write_name(out, default_label);
+            out.push_str(" [");
             if !cases.is_empty() {
                 out.push(' ');
             }
@@ -521,10 +808,103 @@ fn write_instruction(
                     .name
                     .map(|name| module.name(name))
                     .unwrap_or("0");
-                let _ = write!(out, ", label %{}", quote_name(label));
+                out.push_str(", label %");
+                let _ = write_name(out, label);
             }
             if !cases.is_empty() {
                 out.push(' ');
+            }
+            out.push(']');
+        }
+        InstKind::ExtractValue { aggregate, indices } => {
+            out.push_str("extractvalue ");
+            write_operand(module, function, *aggregate, out);
+            for index in indices {
+                let _ = write!(out, ", {index}");
+            }
+        }
+        InstKind::InsertValue {
+            aggregate,
+            value,
+            indices,
+        } => {
+            out.push_str("insertvalue ");
+            write_operand(module, function, *aggregate, out);
+            out.push_str(", ");
+            write_operand(module, function, *value, out);
+            for index in indices {
+                let _ = write!(out, ", {index}");
+            }
+        }
+        InstKind::ExtractElement { vector, index } => {
+            out.push_str("extractelement ");
+            write_operand(module, function, *vector, out);
+            out.push_str(", ");
+            write_operand(module, function, *index, out);
+        }
+        InstKind::InsertElement {
+            vector,
+            value,
+            index,
+        } => {
+            out.push_str("insertelement ");
+            write_operand(module, function, *vector, out);
+            out.push_str(", ");
+            write_operand(module, function, *value, out);
+            out.push_str(", ");
+            write_operand(module, function, *index, out);
+        }
+        InstKind::ShuffleVector {
+            first,
+            second,
+            mask,
+        } => {
+            out.push_str("shufflevector ");
+            write_operand(module, function, *first, out);
+            out.push_str(", ");
+            write_operand(module, function, *second, out);
+            out.push_str(", ");
+            write_operand(module, function, *mask, out);
+        }
+        InstKind::Freeze { value } => {
+            out.push_str("freeze ");
+            write_operand(module, function, *value, out);
+        }
+        InstKind::Fence {
+            ordering,
+            syncscope,
+        } => {
+            out.push_str("fence ");
+            if *syncscope == crate::inst::SyncScope::SingleThread {
+                out.push_str("syncscope(\"singlethread\") ");
+            }
+            out.push_str(ordering.as_str());
+        }
+        InstKind::VaArg { list, ty } => {
+            out.push_str("va_arg ");
+            write_operand(module, function, *list, out);
+            out.push_str(", ");
+            let _ = write!(out, "{}", module.display_type(*ty));
+        }
+        InstKind::IndirectBr {
+            address,
+            destinations,
+        } => {
+            out.push_str("indirectbr ");
+            write_operand(module, function, *address, out);
+            out.push_str(", [");
+            for (index, destination) in destinations.iter().enumerate() {
+                if index != 0 {
+                    out.push_str(", ");
+                }
+                out.push_str("label %");
+                let label = function
+                    .blocks
+                    .get(*destination)
+                    .name
+                    .map(|name| module.name(name))
+                    .unwrap_or("0");
+                let _ = write_name(out, label);
             }
             out.push(']');
         }
@@ -532,23 +912,123 @@ fn write_instruction(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn write_call(
+    module: &Module,
+    function: &Function,
+    tail: TailKind,
+    mnemonic: &str,
+    ret_ty: TypeId,
+    fn_ty: TypeId,
+    callee: Operand,
+    args: &[Operand],
+    arg_attrs: &[Arc<Vec<Attribute>>],
+    fastmath: FastMath,
+    ret_attrs: &[Attribute],
+    attrs: &[Attribute],
+    out: &mut String,
+) {
+    out.push_str(tail.prefix());
+    out.push_str(mnemonic);
+    write_fastmath(fastmath, out);
+    out.push(' ');
+    for attr in attrs.iter().filter(|attr| is_calling_convention(attr)) {
+        let _ = write!(out, "{attr} ");
+    }
+    for attr in ret_attrs {
+        let _ = write!(out, "{attr} ");
+    }
+    let ty = match module.types.get(fn_ty) {
+        Type::Function { varargs: true, .. } => fn_ty,
+        _ => ret_ty,
+    };
+    let _ = write!(out, "{} ", module.display_type(ty));
+    write_callee(module, function, callee, out);
+    out.push('(');
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{} ", module.display_type(arg.ty));
+        if let Some(attrs) = arg_attrs.get(index) {
+            for attr in attrs.iter() {
+                let _ = write!(out, "{attr} ");
+            }
+        }
+        write_value(module, function, *arg, out);
+    }
+    out.push(')');
+    for attr in attrs.iter().filter(|attr| !is_calling_convention(attr)) {
+        let _ = write!(out, " {attr}");
+    }
+}
+
 fn write_callee(module: &Module, function: &Function, operand: Operand, out: &mut String) {
     match operand.kind {
         OperandKind::Function(id) => {
-            let _ = write!(out, "@{}", function_name(module, id));
+            out.push('@');
+            write_function_name(out, module, id);
         }
         OperandKind::Global(id) => {
-            let _ = write!(out, "@{}", global_name(module, id));
+            out.push('@');
+            write_global_name(out, module, id);
         }
         OperandKind::Local(id) => {
             let name = function
                 .local_name(id)
                 .map(|name| module.name(name))
                 .unwrap_or("0");
-            let _ = write!(out, "%{}", quote_name(name));
+            out.push('%');
+            let _ = write_name(out, name);
         }
         OperandKind::Const(id) => write_constant(module, id, out),
     }
+}
+
+fn write_parent_pad(
+    module: &Module,
+    function: &Function,
+    parent_pad: Option<Operand>,
+    out: &mut String,
+) {
+    out.push_str("within ");
+    match parent_pad {
+        Some(parent_pad) => write_value(module, function, parent_pad, out),
+        None => out.push_str("none"),
+    }
+}
+
+fn write_unwind_dest(
+    module: &Module,
+    function: &Function,
+    unwind_dest: Option<BlockId>,
+    out: &mut String,
+) {
+    out.push_str(" unwind ");
+    match unwind_dest {
+        Some(dest) => {
+            out.push_str("label %");
+            let label = function
+                .blocks
+                .get(dest)
+                .name
+                .map(|name| module.name(name))
+                .unwrap_or("0");
+            let _ = write_name(out, label);
+        }
+        None => out.push_str("to caller"),
+    }
+}
+
+fn write_pad_args(module: &Module, function: &Function, args: &[Operand], out: &mut String) {
+    out.push_str(" [");
+    for (index, arg) in args.iter().enumerate() {
+        if index > 0 {
+            out.push_str(", ");
+        }
+        write_operand(module, function, *arg, out);
+    }
+    out.push(']');
 }
 
 fn write_operand(module: &Module, function: &Function, operand: Operand, out: &mut String) {
@@ -563,14 +1043,17 @@ fn write_value(module: &Module, function: &Function, operand: Operand, out: &mut
                 .local_name(id)
                 .map(|name| module.name(name))
                 .unwrap_or("0");
-            let _ = write!(out, "%{}", quote_name(name));
+            out.push('%');
+            let _ = write_name(out, name);
         }
         OperandKind::Const(id) => write_constant(module, id, out),
         OperandKind::Global(id) => {
-            let _ = write!(out, "@{}", global_name(module, id));
+            out.push('@');
+            write_global_name(out, module, id);
         }
         OperandKind::Function(id) => {
-            let _ = write!(out, "@{}", function_name(module, id));
+            out.push('@');
+            write_function_name(out, module, id);
         }
     }
 }
@@ -594,7 +1077,7 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
                     let shift = 128 - bits;
                     ((masked << shift) as i128) >> shift
                 };
-                let _ = write!(out, "{signed}");
+                write_i128(out, signed);
             }
         }
         ConstKind::Float(bits) => write_float(module, constant.ty, *bits, out),
@@ -604,28 +1087,65 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
         ConstKind::ZeroInitializer => out.push_str("zeroinitializer"),
         ConstKind::String(bytes) => {
             out.push('c');
-            out.push_str(&quote_bytes(bytes));
+            write_quoted_bytes(out, bytes);
         }
         ConstKind::MetadataString(text) => {
             out.push('!');
-            out.push_str(&quote_bytes(text.as_bytes()));
+            write_quoted_bytes(out, text.as_bytes());
         }
+        ConstKind::Expr(expr) => write_const_expr(module, constant.ty, expr, out),
         ConstKind::Global(id) => {
-            let _ = write!(out, "@{}", global_name(module, *id));
+            out.push('@');
+            write_global_name(out, module, *id);
         }
         ConstKind::Function(id) => {
-            let _ = write!(out, "@{}", function_name(module, *id));
+            out.push('@');
+            write_function_name(out, module, *id);
+        }
+        ConstKind::BlockAddress { function, block } => {
+            out.push_str("blockaddress(@");
+            write_function_name(out, module, *function);
+            out.push_str(", %");
+            let _ = write_name(out, module.name(*block));
+            out.push(')');
+        }
+        ConstKind::InlineAsm {
+            asm,
+            constraints,
+            sideeffect,
+            alignstack,
+            inteldialect,
+            unwind,
+            ..
+        } => {
+            out.push_str("asm");
+            if *sideeffect {
+                out.push_str(" sideeffect");
+            }
+            if *alignstack {
+                out.push_str(" alignstack");
+            }
+            if *inteldialect {
+                out.push_str(" inteldialect");
+            }
+            if *unwind {
+                out.push_str(" unwind");
+            }
+            out.push(' ');
+            write_quoted_bytes(out, asm);
+            out.push_str(", ");
+            write_quoted_bytes(out, constraints);
         }
         ConstKind::Aggregate(elems) => {
-            let (open, close) = match module.types.get(constant.ty) {
-                Type::Array { .. } => ("[", "]"),
-                Type::Vector { .. } => ("<", ">"),
-                Type::Struct { packed: true, .. } => ("<{", "}>"),
-                Type::Struct { .. } => ("{", "}"),
-                _ => ("[", "]"),
+            let (open, close, padded) = match module.types.get(constant.ty) {
+                Type::Array { .. } => ("[", "]", false),
+                Type::Vector { .. } => ("<", ">", false),
+                Type::Struct { packed: true, .. } => ("<{", "}>", true),
+                Type::Struct { .. } => ("{", "}", true),
+                _ => ("[", "]", false),
             };
             out.push_str(open);
-            if !elems.is_empty() {
+            if padded && !elems.is_empty() {
                 out.push(' ');
             }
             for (index, elem) in elems.iter().enumerate() {
@@ -636,12 +1156,83 @@ fn write_constant(module: &Module, id: ConstId, out: &mut String) {
                 let _ = write!(out, "{} ", module.display_type(elem_constant.ty));
                 write_constant(module, *elem, out);
             }
-            if !elems.is_empty() {
+            if padded && !elems.is_empty() {
                 out.push(' ');
             }
             out.push_str(close);
         }
     }
+}
+
+fn write_const_expr(module: &Module, result_ty: TypeId, expr: &ConstExpr, out: &mut String) {
+    match expr {
+        ConstExpr::Gep {
+            inbounds,
+            source_ty,
+            ptr,
+            indices,
+        } => {
+            out.push_str("getelementptr ");
+            if *inbounds {
+                out.push_str("inbounds ");
+            }
+            out.push('(');
+            let _ = write!(out, "{}, ", module.display_type(*source_ty));
+            write_const_operand(module, *ptr, out);
+            for index in indices {
+                out.push_str(", ");
+                let _ = write!(out, "{} ", module.display_type(index.ty));
+                write_const_value(module, index.value, out);
+            }
+            out.push(')');
+        }
+        ConstExpr::Cast { op, value } => {
+            out.push_str(op.as_str());
+            out.push_str(" (");
+            write_const_operand(module, *value, out);
+            let _ = write!(out, " to {})", module.display_type(result_ty));
+        }
+    }
+}
+
+fn write_const_operand(module: &Module, operand: Operand, out: &mut String) {
+    let _ = write!(out, "{} ", module.display_type(operand.ty));
+    write_const_value(module, operand, out);
+}
+
+fn write_const_value(module: &Module, operand: Operand, out: &mut String) {
+    match operand.kind {
+        OperandKind::Const(id) => write_constant(module, id, out),
+        OperandKind::Global(id) => {
+            out.push('@');
+            write_global_name(out, module, id);
+        }
+        OperandKind::Function(id) => {
+            out.push('@');
+            write_function_name(out, module, id);
+        }
+        OperandKind::Local(_) => out.push_str("%<local>"),
+    }
+}
+
+fn write_i128(out: &mut String, value: i128) {
+    let negative = value < 0;
+    let mut magnitude = value.unsigned_abs();
+    let mut buffer = [0u8; 40];
+    let mut cursor = buffer.len();
+    loop {
+        cursor -= 1;
+        buffer[cursor] = b'0' + (magnitude % 10) as u8;
+        magnitude /= 10;
+        if magnitude == 0 {
+            break;
+        }
+    }
+    if negative {
+        cursor -= 1;
+        buffer[cursor] = b'-';
+    }
+    out.push_str(core::str::from_utf8(&buffer[cursor..]).expect("decimal digits"));
 }
 
 fn write_float(module: &Module, ty: TypeId, bits: u64, out: &mut String) {

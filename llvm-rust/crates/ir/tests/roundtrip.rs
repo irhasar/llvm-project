@@ -88,6 +88,174 @@ exit:
 }
 
 #[test]
+fn inline_asm_and_callbr() {
+    let source = r#"
+define void @jump() {
+entry:
+  callbr void asm sideeffect "jmp ${0:l}", "!i"() to label %fallthrough [label %indirect]
+
+fallthrough:
+  ret void
+
+indirect:
+  ret void
+}
+
+define i32 @with_result(i32 %x) {
+entry:
+  %r = callbr i32 asm "add $0, $1", "=r,r,!i"(i32 %x) to label %fallthrough [label %indirect]
+
+fallthrough:
+  ret i32 %r
+
+indirect:
+  ret i32 0
+}
+
+define void @asm_call() {
+entry:
+  call void asm sideeffect "nop", ""()
+  ret void
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(
+        printed.contains(
+            "callbr void asm sideeffect \"jmp ${0:l}\", \"!i\"() to label %fallthrough [label %indirect]"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(
+            "%r = callbr i32 asm \"add $0, $1\", \"=r,r,!i\"(i32 %x) to label %fallthrough [label %indirect]"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("call void asm sideeffect \"nop\", \"\"()"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn exception_handling_roundtrip() {
+    let source = r#"
+declare i32 @may_throw()
+declare i32 @__gxx_personality_v0(...)
+
+define i32 @f() personality ptr @__gxx_personality_v0 {
+entry:
+  %r = invoke i32 @may_throw() to label %normal unwind label %lpad
+
+normal:
+  ret i32 %r
+
+lpad:
+  %lp = landingpad { ptr, i32 } cleanup catch ptr null filter [0 x ptr] zeroinitializer
+  resume { ptr, i32 } %lp
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(
+        printed.contains("personality ptr @__gxx_personality_v0"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("%r = invoke i32 @may_throw() to label %normal unwind label %lpad"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(
+            "landingpad { ptr, i32 } cleanup catch ptr null filter [0 x ptr] zeroinitializer"
+        ),
+        "{printed}"
+    );
+    assert!(printed.contains("resume { ptr, i32 } %lp"), "{printed}");
+}
+
+#[test]
+fn windows_exception_handling_roundtrip() {
+    let source = r#"
+declare void @may_throw()
+declare i32 @__CxxFrameHandler3(...)
+declare void @dtor(ptr)
+
+define void @f() personality ptr @__CxxFrameHandler3 {
+entry:
+  invoke void @may_throw() to label %cont unwind label %dispatch
+
+dispatch:
+  %cs = catchswitch within none [label %catch1, label %catch2] unwind label %cleanup
+
+catch1:
+  %cp1 = catchpad within %cs [ptr null, i32 64, ptr null]
+  catchret from %cp1 to label %cont
+
+catch2:
+  %cp2 = catchpad within %cs [ptr null, i32 64, ptr null]
+  catchret from %cp2 to label %cont
+
+cleanup:
+  %lp = cleanuppad within none [ptr @dtor]
+  cleanupret from %lp unwind to caller
+
+cont:
+  ret void
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(
+        printed.contains(
+            "%cs = catchswitch within none [label %catch1, label %catch2] unwind label %cleanup"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("%cp1 = catchpad within %cs [ptr null, i32 64, ptr null]"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("catchret from %cp1 to label %cont"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("%lp = cleanuppad within none [ptr @dtor]"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("cleanupret from %lp unwind to caller"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn verifier_requires_personality_for_landingpad() {
+    let source = r#"
+declare i32 @may_throw()
+
+define i32 @f() {
+entry:
+  %r = invoke i32 @may_throw() to label %normal unwind label %lpad
+
+normal:
+  ret i32 %r
+
+lpad:
+  %lp = landingpad { ptr, i32 } cleanup
+  resume { ptr, i32 } %lp
+}
+"#;
+    let module = parse_module(source).expect("parse");
+    let errors = verify_module(&module).expect_err("missing personality");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("requires a personality")),
+        "{errors:?}"
+    );
+}
+
+#[test]
 fn gep_switch_select_and_casts() {
     let source = r#"
 %struct.pair = type { i32, i8 }
@@ -185,6 +353,247 @@ define i32 @f(i32 %x) align 16 {
 }
 
 #[test]
+fn aggregate_and_vector_element_ops() {
+    let source = r#"
+%pair = type { i32, [2 x i8] }
+
+define i32 @extract_pair(%pair %p) {
+entry:
+  %v = extractvalue %pair %p, 1, 0
+  %x = sext i8 %v to i32
+  ret i32 %x
+}
+
+define %pair @insert_pair(%pair %p, i8 %v) {
+entry:
+  %q = insertvalue %pair %p, i8 %v, 1, 1
+  ret %pair %q
+}
+
+define i32 @vector_ops(<4 x i32> %v, i32 %idx) {
+entry:
+  %e = extractelement <4 x i32> %v, i32 %idx
+  %n = insertelement <4 x i32> %v, i32 %e, i32 0
+  %r = extractelement <4 x i32> %n, i32 0
+  ret i32 %r
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%v = extractvalue %pair %p, 1, 0"));
+    assert!(printed.contains("%q = insertvalue %pair %p, i8 %v, 1, 1"));
+    assert!(printed.contains("%e = extractelement <4 x i32> %v, i32 %idx"));
+    assert!(printed.contains("%n = insertelement <4 x i32> %v, i32 %e, i32 0"));
+}
+
+#[test]
+fn vector_arithmetic_and_shufflevector() {
+    let source = r#"
+define <4 x i32> @vector_int(<4 x i32> %a, <4 x i32> %b) {
+entry:
+  %sum = add <4 x i32> %a, %b
+  %cmp = icmp slt <4 x i32> %sum, %a
+  %sel = select <4 x i1> %cmp, <4 x i32> %sum, <4 x i32> %a
+  ret <4 x i32> %sel
+}
+
+define <2 x double> @vector_float(<2 x double> %a, <2 x double> %b) {
+entry:
+  %sum = fadd <2 x double> %a, %b
+  %cmp = fcmp olt <2 x double> %sum, %a
+  %sel = select <2 x i1> %cmp, <2 x double> %sum, <2 x double> %a
+  ret <2 x double> %sel
+}
+
+define <4 x i32> @vector_shuffle(<4 x i32> %a, <4 x i32> %b) {
+entry:
+  %r = shufflevector <4 x i32> %a, <4 x i32> %b, <4 x i32> <i32 0, i32 5, i32 2, i32 7>
+  ret <4 x i32> %r
+}
+
+define <2 x i32> @vector_undef_mask(<4 x i32> %a, <4 x i32> %b) {
+entry:
+  %r = shufflevector <4 x i32> %a, <4 x i32> %b, <2 x i32> undef
+  ret <2 x i32> %r
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%cmp = icmp slt <4 x i32> %sum, %a"));
+    assert!(printed.contains("%sel = select <4 x i1> %cmp, <4 x i32> %sum, <4 x i32> %a"));
+    assert!(printed.contains("%sum = fadd <2 x double> %a, %b"));
+    assert!(printed.contains("%cmp = fcmp olt <2 x double> %sum, %a"));
+    assert!(printed.contains(
+        "%r = shufflevector <4 x i32> %a, <4 x i32> %b, <4 x i32> <i32 0, i32 5, i32 2, i32 7>"
+    ));
+    assert!(printed.contains("%r = shufflevector <4 x i32> %a, <4 x i32> %b, <2 x i32> poison"));
+}
+
+#[test]
+fn freeze_and_fences() {
+    let source = r#"
+define i32 @freeze_int(i32 %x) {
+entry:
+  %f = freeze i32 %x
+  ret i32 %f
+}
+
+define <4 x i32> @freeze_vector(<4 x i32> %v) {
+entry:
+  %f = freeze <4 x i32> %v
+  ret <4 x i32> %f
+}
+
+define void @fences() {
+entry:
+  fence acquire
+  fence release
+  fence acq_rel
+  fence seq_cst
+  fence syncscope("singlethread") seq_cst
+  ret void
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%f = freeze i32 %x"));
+    assert!(printed.contains("%f = freeze <4 x i32> %v"));
+    assert!(printed.contains("fence acquire"));
+    assert!(printed.contains("fence release"));
+    assert!(printed.contains("fence acq_rel"));
+    assert!(printed.contains("fence seq_cst"));
+    assert!(printed.contains("fence syncscope(\"singlethread\") seq_cst"));
+}
+
+#[test]
+fn atomic_load_store() {
+    let source = r#"
+define i32 @load_seq_cst(ptr %p) {
+entry:
+  %v = load atomic i32, ptr %p seq_cst, align 4
+  ret i32 %v
+}
+
+define void @store_release(ptr %p, i32 %v) {
+entry:
+  store atomic i32 %v, ptr %p release, align 4
+  ret void
+}
+
+define i32 @load_single(ptr %p) {
+entry:
+  %v = load atomic i32, ptr %p syncscope("singlethread") acquire, align 4
+  ret i32 %v
+}
+
+define void @store_volatile(ptr %p, i32 %v) {
+entry:
+  store atomic volatile i32 %v, ptr %p seq_cst, align 4
+  ret void
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%v = load atomic i32, ptr %p seq_cst, align 4"));
+    assert!(printed.contains("store atomic i32 %v, ptr %p release, align 4"));
+    assert!(
+        printed
+            .contains("%v = load atomic i32, ptr %p syncscope(\"singlethread\") acquire, align 4")
+    );
+    assert!(printed.contains("store atomic volatile i32 %v, ptr %p seq_cst, align 4"));
+}
+
+#[test]
+fn atomic_rmw_and_cmpxchg() {
+    let source = r#"
+define i32 @rmw(ptr %p, i32 %v) {
+entry:
+  %a = atomicrmw add ptr %p, i32 %v seq_cst, align 4
+  %b = atomicrmw volatile xchg ptr %p, i32 %v syncscope("singlethread") acquire, align 4
+  %c = atomicrmw fadd ptr %p, float 1.000000e+00 release, align 4
+  ret i32 %a
+}
+
+define {i32, i1} @cx(ptr %p, i32 %c, i32 %n) {
+entry:
+  %r = cmpxchg ptr %p, i32 %c, i32 %n seq_cst seq_cst, align 4
+  %r2 = cmpxchg weak volatile ptr %p, i32 %c, i32 %n acquire monotonic, align 4
+  ret {i32, i1} %r
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%a = atomicrmw add ptr %p, i32 %v seq_cst, align 4"));
+    assert!(printed.contains(
+        "%b = atomicrmw volatile xchg ptr %p, i32 %v syncscope(\"singlethread\") acquire, align 4"
+    ));
+    assert!(
+        printed.contains("%c = atomicrmw fadd ptr %p, float 0x3FF0000000000000 release, align 4")
+    );
+    assert!(printed.contains("%r = cmpxchg ptr %p, i32 %c, i32 %n seq_cst seq_cst, align 4"));
+    assert!(
+        printed.contains(
+            "%r2 = cmpxchg weak volatile ptr %p, i32 %c, i32 %n acquire monotonic, align 4"
+        )
+    );
+}
+
+#[test]
+fn rejects_invalid_atomic_rmw_and_cmpxchg() {
+    let rmw_unordered = r#"
+define i32 @bad(ptr %p, i32 %v) {
+entry:
+  %a = atomicrmw add ptr %p, i32 %v unordered, align 4
+  ret i32 %a
+}
+"#;
+    assert!(parse_module(rmw_unordered).is_err());
+
+    let cmpxchg_bad_failure = r#"
+define {i32, i1} @bad(ptr %p, i32 %c, i32 %n) {
+entry:
+  %r = cmpxchg ptr %p, i32 %c, i32 %n seq_cst release, align 4
+  ret {i32, i1} %r
+}
+"#;
+    assert!(parse_module(cmpxchg_bad_failure).is_err());
+
+    let rmw_no_align = r#"
+define i32 @bad(ptr %p, i32 %v) {
+entry:
+  %a = atomicrmw add ptr %p, i32 %v seq_cst
+  ret i32 %a
+}
+"#;
+    assert!(parse_module(rmw_no_align).is_err());
+}
+
+#[test]
+fn rejects_invalid_atomic_load_store() {
+    let load_release = r#"
+define i32 @bad(ptr %p) {
+entry:
+  %v = load atomic i32, ptr %p release, align 4
+  ret i32 %v
+}
+"#;
+    assert!(parse_module(load_release).is_err());
+
+    let store_acquire = r#"
+define void @bad(ptr %p, i32 %v) {
+entry:
+  store atomic i32 %v, ptr %p acquire, align 4
+  ret void
+}
+"#;
+    assert!(parse_module(store_acquire).is_err());
+
+    let load_no_align = r#"
+define i32 @bad(ptr %p) {
+entry:
+  %v = load atomic i32, ptr %p seq_cst
+  ret i32 %v
+}
+"#;
+    assert!(parse_module(load_no_align).is_err());
+}
+
+#[test]
 fn varargs_and_attribute_groups() {
     let source = r#"
 declare i32 @printf(ptr, ...)
@@ -231,4 +640,412 @@ entry:
 "#;
     let error = parse_module(source).expect_err("parse should fail");
     assert!(error.message.contains("undefined local"));
+}
+
+#[test]
+fn aggregate_indices_can_wrap_lines() {
+    let source = r#"
+%pair = type { i32, [2 x i8] }
+
+define i8 @extract(%pair %p) {
+entry:
+  %v = extractvalue %pair %p,
+    1,
+    0
+  ret i8 %v
+}
+
+define %pair @insert(%pair %p, i8 %v) {
+entry:
+  %q = insertvalue %pair %p, i8 %v,
+    1, 1
+  ret %pair %q
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%v = extractvalue %pair %p, 1, 0"));
+    assert!(printed.contains("%q = insertvalue %pair %p, i8 %v, 1, 1"));
+}
+
+#[test]
+fn parser_rejects_mistyped_element_operands() {
+    let cases = [
+        r#"
+define i32 @extractvalue_type(i32 %p) {
+entry:
+  %x = extractvalue { i32, i32 } %p, 0
+  ret i32 %x
+}
+"#,
+        r#"
+define i32 @insertvalue_type({ i32, i32 } %p) {
+entry:
+  %x = insertvalue { i32, i32 } %p, i64 1, 0
+  ret i32 0
+}
+"#,
+        r#"
+define i32 @extractelement_type(<2 x i64> %v) {
+entry:
+  %x = extractelement <2 x i32> %v, i32 0
+  ret i32 %x
+}
+"#,
+        r#"
+define i32 @insertelement_type(<2 x i32> %v) {
+entry:
+  %x = insertelement <2 x i32> %v, i64 1, i32 0
+  ret i32 0
+}
+"#,
+    ];
+    for source in cases {
+        let error = parse_module(source).expect_err("mistyped operand must fail");
+        assert!(
+            error.message.contains("type does not match"),
+            "unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn forward_element_reference_roundtrips() {
+    let source = r#"
+define i32 @f(i32 %n) {
+entry:
+  br label %def
+use:
+  %x = extractelement <2 x i32> %v, i32 0
+  ret i32 %x
+def:
+  %v = insertelement <2 x i32> zeroinitializer, i32 %n, i32 0
+  ret i32 0
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%x = extractelement <2 x i32> %v, i32 0"));
+    assert!(printed.contains("%v = insertelement <2 x i32> zeroinitializer, i32 %n, i32 0"));
+}
+
+#[test]
+fn constant_expressions_roundtrip() {
+    let source = r#"
+@a = global i32 0, align 4
+@arr = global [4 x i32] zeroinitializer, align 4
+@b = global ptr getelementptr (i32, ptr @a, i64 1)
+@c = global ptr getelementptr inbounds ([4 x i32], ptr @arr, i64 0, i64 2)
+@d = global i64 ptrtoint (ptr @a to i64)
+@e = global ptr inttoptr (i64 8 to ptr)
+@nested = global i64 ptrtoint (ptr getelementptr (i32, ptr @a, i64 1) to i64)
+@nested_gep = global ptr getelementptr inbounds (i32, ptr getelementptr (i32, ptr @a, i64 1), i64 2)
+
+define ptr @f() {
+entry:
+  ret ptr getelementptr (i32, ptr @a, i64 2)
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("@b = global ptr getelementptr (i32, ptr @a, i64 1)"));
+    assert!(
+        printed
+            .contains("@c = global ptr getelementptr inbounds ([4 x i32], ptr @arr, i64 0, i64 2)")
+    );
+    assert!(printed.contains("@d = global i64 ptrtoint (ptr @a to i64)"));
+    assert!(printed.contains("@e = global ptr inttoptr (i64 8 to ptr)"));
+    assert!(
+        printed.contains(
+            "@nested = global i64 ptrtoint (ptr getelementptr (i32, ptr @a, i64 1) to i64)"
+        )
+    );
+    assert!(printed.contains(
+        "@nested_gep = global ptr getelementptr inbounds (i32, ptr getelementptr (i32, ptr @a, i64 1), i64 2)"
+    ));
+    assert!(printed.contains("ret ptr getelementptr (i32, ptr @a, i64 2)"));
+}
+
+#[test]
+fn forward_constant_expression_reference_roundtrips() {
+    let source = r#"
+@b = global ptr getelementptr (i32, ptr @a, i64 1)
+@a = global i32 0, align 4
+
+define ptr @f() {
+entry:
+  ret ptr @b
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("@b = global ptr getelementptr (i32, ptr @a, i64 1)"));
+}
+
+#[test]
+fn va_arg_roundtrip() {
+    let source = r#"
+%struct.S = type { i32, i64 }
+
+define void @f(ptr %ap) {
+entry:
+  %a = va_arg ptr %ap, i32
+  %b = va_arg ptr %ap, <4 x i32>
+  %c = va_arg ptr %ap, %struct.S
+  ret void
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("%a = va_arg ptr %ap, i32"));
+    assert!(printed.contains("%b = va_arg ptr %ap, <4 x i32>"));
+    assert!(printed.contains("%c = va_arg ptr %ap, %struct.S"));
+}
+
+#[test]
+fn parser_rejects_invalid_va_arg_list() {
+    let source = r#"
+define void @f(i32 %not_a_pointer) {
+entry:
+  %v = va_arg i32 %not_a_pointer, i32
+  ret void
+}
+"#;
+    parse_module(source).expect_err("va_arg list must be a pointer");
+}
+
+#[test]
+fn parser_rejects_invalid_constant_gep() {
+    let cases = [
+        r#"
+@a = global i32 0
+@b = global i32 getelementptr (i32, ptr @a, i64 1)
+"#,
+        r#"
+@a = global i32 0
+@b = global ptr getelementptr (i32, ptr @a)
+"#,
+    ];
+    for source in cases {
+        parse_module(source).expect_err("invalid constant GEP must fail");
+    }
+}
+
+#[test]
+fn blockaddress_and_indirectbr_roundtrip() {
+    let source = r#"
+@dispatch = global ptr blockaddress(@f, %case_a)
+
+define void @f(i1 %c) {
+entry:
+  br i1 %c, label %case_a, label %case_b
+
+case_a:
+  br label %exit
+
+case_b:
+  br label %exit
+
+exit:
+  %target = phi ptr [ blockaddress(@f, %case_a), %case_a ], [ blockaddress(@f, %case_b), %case_b ]
+  indirectbr ptr %target, [label %case_a, label %case_b]
+}
+
+define void @empty(ptr %target) {
+entry:
+  indirectbr ptr %target, []
+}
+"#;
+    let printed = roundtrip(source);
+    assert!(printed.contains("@dispatch = global ptr blockaddress(@f, %case_a)"));
+    assert!(
+        printed.contains(
+            "%target = phi ptr [ blockaddress(@f, %case_a), %case_a ], [ blockaddress(@f, %case_b), %case_b ]"
+        )
+    );
+    assert!(printed.contains("indirectbr ptr %target, [label %case_a, label %case_b]"));
+    assert!(printed.contains("indirectbr ptr %target, []"));
+}
+
+#[test]
+fn verifier_rejects_unknown_blockaddress_block() {
+    let source = r#"
+@dispatch = global ptr blockaddress(@f, %missing)
+
+define void @f() {
+entry:
+  ret void
+}
+"#;
+    let module = parse_module(source).expect("parse blockaddress");
+    verify_module(&module).expect_err("unknown blockaddress block must fail verification");
+}
+
+#[test]
+fn parser_rejects_non_pointer_blockaddress() {
+    let source = r#"
+define void @f() {
+entry:
+  ret void
+}
+
+@bad = global i32 blockaddress(@f, %entry)
+"#;
+    parse_module(source).expect_err("blockaddress must produce a pointer");
+}
+
+#[test]
+fn parser_rejects_non_pointer_indirectbr_address() {
+    let source = r#"
+define void @f(i32 %target) {
+entry:
+  indirectbr i32 %target, []
+}
+"#;
+    parse_module(source).expect_err("indirectbr address must be a pointer");
+}
+
+#[test]
+fn aliases_and_ifuncs() {
+    let source = r#"
+@target = global i32 7, align 4
+@arr = global [4 x i8] zeroinitializer, align 1
+@alias_int = alias i32, ptr @target
+@weak_alias = weak alias i32, ptr @target
+@hidden_alias = hidden alias i32, ptr @target
+@gep_alias = alias i8, getelementptr ([4 x i8], ptr @arr, i64 0, i64 2)
+@tls_alias = thread_local(initialexec) alias i32, ptr @target
+
+define void @f() {
+  ret void
+}
+
+@alias_fn = alias void (), ptr @f
+@foo = thread_local ifunc i32 (), ptr @resolver
+
+define ptr @resolver() {
+  ret ptr @impl
+}
+
+define i32 @impl() {
+  ret i32 7
+}
+"#;
+    let printed = roundtrip(source);
+    let globals = printed.find("@target = global").expect("global");
+    let aliases = printed.find("@alias_int = alias").expect("alias");
+    let functions = printed.find("define void @f").expect("function");
+    assert!(globals < aliases && aliases < functions);
+    assert!(printed.contains("@weak_alias = weak alias i32, ptr @target"));
+    assert!(printed.contains("@hidden_alias = hidden alias i32, ptr @target"));
+    assert!(
+        printed.contains("@gep_alias = alias i8, getelementptr ([4 x i8], ptr @arr, i64 0, i64 2)")
+    );
+    assert!(printed.contains("@tls_alias = thread_local(initialexec) alias i32, ptr @target"));
+    assert!(printed.contains("@alias_fn = alias void (), ptr @f"));
+    assert!(printed.contains("@foo = ifunc i32 (), ptr @resolver"));
+}
+
+#[test]
+fn verifier_rejects_alias_to_declaration() {
+    let source = r#"
+@target = external global i32
+@alias_int = alias i32, ptr @target
+"#;
+    let module = parse_module(source).expect("parse alias");
+    verify_module(&module).expect_err("alias to a declaration must fail verification");
+}
+
+#[test]
+fn verifier_rejects_alias_without_target() {
+    let source = r#"
+@alias_int = alias i32, ptr @missing
+"#;
+    let module = parse_module(source).expect("parse alias");
+    verify_module(&module).expect_err("alias to a missing target must fail verification");
+}
+
+#[test]
+fn verifier_checks_ifunc_resolvers() {
+    let bad_return = r#"
+define i32 @resolver() {
+  ret i32 0
+}
+
+@foo = ifunc i32 (), ptr @resolver
+"#;
+    let module = parse_module(bad_return).expect("parse ifunc");
+    let errors = verify_module(&module).expect_err("resolver must return a pointer");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("return a pointer"))
+    );
+
+    let bad_resolver = r#"
+@g = global i32 1
+@foo = ifunc i32 (), ptr @g
+"#;
+    let module = parse_module(bad_resolver).expect("parse ifunc");
+    let errors = verify_module(&module).expect_err("resolver must be a function");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("function resolver"))
+    );
+
+    let declaration = r#"
+declare ptr @resolver()
+
+@foo = ifunc i32 (), ptr @resolver
+"#;
+    let module = parse_module(declaration).expect("parse ifunc");
+    let errors = verify_module(&module).expect_err("resolver must be defined");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("must be a definition"))
+    );
+
+    let through_alias = r#"
+define ptr @impl() {
+  ret ptr null
+}
+
+@resolver = alias ptr (), ptr @impl
+@foo = ifunc i32 (), ptr @resolver
+"#;
+    let module = parse_module(through_alias).expect("parse ifunc alias resolver");
+    verify_module(&module).expect("alias resolver should verify");
+}
+
+#[test]
+fn verifier_checks_alias_linkage_and_interposition() {
+    let interposable = r#"
+@g = global i32 1
+@first = alias i32, ptr @g
+@second = alias i32, ptr @first
+"#;
+    let module = parse_module(interposable).expect("parse aliases");
+    let errors = verify_module(&module).expect_err("alias to an interposable alias must fail");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("interposable alias"))
+    );
+
+    let hidden_target = r#"
+@g = global i32 1
+@first = hidden alias i32, ptr @g
+@second = alias i32, ptr @first
+"#;
+    let module = parse_module(hidden_target).expect("parse aliases");
+    verify_module(&module).expect("hidden alias target is not interposable");
+
+    let common = r#"
+@g = global i32 1
+@a = common alias i32, ptr @g
+"#;
+    let module = parse_module(common).expect("parse alias");
+    let errors = verify_module(&module).expect_err("common alias linkage must fail");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("invalid linkage"))
+    );
 }

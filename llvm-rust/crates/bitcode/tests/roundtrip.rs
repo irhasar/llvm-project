@@ -218,6 +218,100 @@ fn rust_bitcode_round_trip_matches_text() {
 }
 
 #[test]
+fn round_trips_exception_handling() {
+    let source = r#"
+declare i32 @may_throw()
+declare i32 @__gxx_personality_v0(...)
+
+define i32 @f() personality ptr @__gxx_personality_v0 {
+entry:
+  %r = invoke i32 @may_throw() to label %normal unwind label %lpad
+
+normal:
+  ret i32 %r
+
+lpad:
+  %lp = landingpad { ptr, i32 } cleanup catch ptr null filter [0 x ptr] zeroinitializer
+  resume { ptr, i32 } %lp
+}
+"#;
+    let mut module = parse_module(source).expect("parse exception handling");
+    let bytes = write_bitcode(&mut module).expect("write exception handling");
+    let read = read_bitcode(&bytes).expect("read exception handling");
+    let text = print_module(&read);
+    assert!(
+        text.contains("personality ptr @__gxx_personality_v0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("%r = invoke i32 @may_throw() to label %normal unwind label %lpad"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "landingpad { ptr, i32 } cleanup catch ptr null filter [0 x ptr] zeroinitializer"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("resume { ptr, i32 } %lp"), "{text}");
+}
+
+#[test]
+fn round_trips_windows_exception_handling() {
+    let source = r#"
+declare void @may_throw()
+declare i32 @__CxxFrameHandler3(...)
+declare void @dtor(ptr)
+
+define void @f() personality ptr @__CxxFrameHandler3 {
+entry:
+  invoke void @may_throw() to label %cont unwind label %dispatch
+
+dispatch:
+  %cs = catchswitch within none [label %catch1, label %catch2] unwind label %cleanup
+
+catch1:
+  %cp1 = catchpad within %cs [ptr null, i32 64, ptr null]
+  catchret from %cp1 to label %cont
+
+catch2:
+  %cp2 = catchpad within %cs [ptr null, i32 64, ptr null]
+  catchret from %cp2 to label %cont
+
+cleanup:
+  %lp = cleanuppad within none [ptr @dtor]
+  cleanupret from %lp unwind to caller
+
+cont:
+  ret void
+}
+"#;
+    let mut module = parse_module(source).expect("parse windows exception handling");
+    let bytes = write_bitcode(&mut module).expect("write windows exception handling");
+    let read = read_bitcode(&bytes).expect("read windows exception handling");
+    let text = print_module(&read);
+    assert!(
+        text.contains(
+            "%cs = catchswitch within none [label %catch1, label %catch2] unwind label %cleanup"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("%cp1 = catchpad within %cs [ptr null, i32 64, ptr null]"),
+        "{text}"
+    );
+    assert!(text.contains("catchret from %cp1 to label %cont"), "{text}");
+    assert!(
+        text.contains("%lp = cleanuppad within none [ptr @dtor]"),
+        "{text}"
+    );
+    assert!(
+        text.contains("cleanupret from %lp unwind to caller"),
+        "{text}"
+    );
+}
+
+#[test]
 fn scoped_memory_overrides_are_visible_after_round_trip() {
     let source = r#"declare void @callee()
 declare void @inline_legacy(ptr) readnone #0
@@ -406,5 +500,188 @@ fn collapse_alignments_ignores_quoted_strings() {
     assert_eq!(
         collapse_alignments("declare void @f() align 16 align 32".to_string()),
         "declare void @f() align 32"
+    );
+}
+
+#[test]
+fn round_trips_function_local_aggregate_constants() {
+    let source = r#"
+define i32 @literal_extract() {
+entry:
+  %x = extractvalue { i32, i32 } { i32 7, i32 8 }, 1
+  ret i32 %x
+}
+
+define { i32, i32 } @literal_insert() {
+entry:
+  %x = insertvalue { i32, i32 } { i32 7, i32 8 }, i32 9, 0
+  ret { i32, i32 } %x
+}
+"#;
+    let mut module = parse_module(source).expect("parse local aggregate constants");
+    let bytes = write_bitcode(&mut module).expect("write local aggregate constants");
+    let read = read_bitcode(&bytes).expect("read local aggregate constants");
+    let text = print_module(&read);
+    assert!(
+        text.contains("%x = extractvalue { i32, i32 } { i32 7, i32 8 }, 1"),
+        "{text}"
+    );
+    assert!(
+        text.contains("%x = insertvalue { i32, i32 } { i32 7, i32 8 }, i32 9, 0"),
+        "{text}"
+    );
+}
+
+#[test]
+fn round_trips_va_arg() {
+    let source = r#"
+%struct.S = type { i32, i64 }
+
+define void @f(ptr %ap) {
+entry:
+  %a = va_arg ptr %ap, i32
+  %b = va_arg ptr %ap, <4 x i32>
+  %c = va_arg ptr %ap, %struct.S
+  ret void
+}
+"#;
+    let mut module = parse_module(source).expect("parse va_arg");
+    let bytes = write_bitcode(&mut module).expect("write va_arg");
+    let read = read_bitcode(&bytes).expect("read va_arg");
+    let text = print_module(&read);
+    assert!(text.contains("%a = va_arg ptr %ap, i32"), "{text}");
+    assert!(text.contains("%b = va_arg ptr %ap, <4 x i32>"), "{text}");
+    assert!(text.contains("%c = va_arg ptr %ap, %struct.S"), "{text}");
+}
+
+#[test]
+fn round_trips_forward_element_operands() {
+    let source = r#"
+define i32 @f(i32 %n) {
+entry:
+  br label %def
+use:
+  %x = extractelement <2 x i32> %v, i32 0
+  ret i32 %x
+def:
+  %v = insertelement <2 x i32> zeroinitializer, i32 %n, i32 0
+  ret i32 0
+}
+"#;
+    let mut module = parse_module(source).expect("parse forward element operand");
+    let bytes = write_bitcode(&mut module).expect("write forward element operand");
+    let read = read_bitcode(&bytes).expect("read forward element operand");
+    let text = print_module(&read);
+    assert!(
+        text.contains("%x = extractelement <2 x i32> %v, i32 0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("%v = insertelement <2 x i32> zeroinitializer, i32 %n, i32 0"),
+        "{text}"
+    );
+}
+
+#[test]
+fn round_trips_blockaddress_and_indirectbr() {
+    let source = r#"
+@dispatch = global ptr blockaddress(@f, %case_a)
+@dispatch_aligned = global ptr blockaddress(@f, %case_b), align 8
+
+define void @f(i1 %c) {
+entry:
+  br i1 %c, label %case_a, label %case_b
+
+case_a:
+  br label %exit
+
+case_b:
+  br label %exit
+
+exit:
+  %target = phi ptr [ blockaddress(@f, %case_a), %case_a ], [ blockaddress(@f, %case_b), %case_b ]
+  indirectbr ptr %target, [label %case_a, label %case_b]
+}
+
+define void @empty(ptr %target) {
+entry:
+  indirectbr ptr %target, []
+}
+"#;
+    let mut module = parse_module(source).expect("parse blockaddress");
+    let bytes = write_bitcode(&mut module).expect("write blockaddress");
+    let read = read_bitcode(&bytes).expect("read blockaddress");
+    let text = print_module(&read);
+    assert!(
+        text.contains("@dispatch = global ptr blockaddress(@f, %case_a)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("@dispatch_aligned = global ptr blockaddress(@f, %case_b), align 8"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "%target = phi ptr [ blockaddress(@f, %case_a), %case_a ], [ blockaddress(@f, %case_b), %case_b ]"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("indirectbr ptr %target, [label %case_a, label %case_b]"),
+        "{text}"
+    );
+    assert!(text.contains("indirectbr ptr %target, []"), "{text}");
+}
+
+#[test]
+fn round_trips_inline_asm_and_callbr() {
+    let source = r#"
+define void @jump() {
+entry:
+  callbr void asm sideeffect "jmp ${0:l}", "!i"() to label %fallthrough [label %indirect]
+
+fallthrough:
+  ret void
+
+indirect:
+  ret void
+}
+
+define i32 @with_result(i32 %x) {
+entry:
+  %r = callbr i32 asm "add $0, $1", "=r,r,!i"(i32 %x) to label %fallthrough [label %indirect]
+
+fallthrough:
+  ret i32 %r
+
+indirect:
+  ret i32 0
+}
+
+define void @asm_call() {
+entry:
+  call void asm sideeffect "nop", ""()
+  ret void
+}
+"#;
+    let mut module = parse_module(source).expect("parse inline asm");
+    let bytes = write_bitcode(&mut module).expect("write inline asm");
+    let read = read_bitcode(&bytes).expect("read inline asm");
+    let text = print_module(&read);
+    assert!(
+        text.contains(
+            "callbr void asm sideeffect \"jmp ${0:l}\", \"!i\"() to label %fallthrough [label %indirect]"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "%r = callbr i32 asm \"add $0, $1\", \"=r,r,!i\"(i32 %x) to label %fallthrough [label %indirect]"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("call void asm sideeffect \"nop\", \"\"()"),
+        "{text}"
     );
 }

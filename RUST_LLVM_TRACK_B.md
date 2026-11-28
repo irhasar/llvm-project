@@ -129,13 +129,30 @@ Do not start M3/M4 before M1/M2 prove the architecture.
 M1 spike status (2026-11-26): `llvm-rust/` implements `support`, `ir`, and a
 bitcode reader/writer plus `llvm-as-rust` and `llvm-dis-rust`. The differential
 corpus in `llvm-rust/tests/corpus/` matches LLVM 19.1.7 in both directions, and
-the build/runtime/memory numbers are recorded in `llvm-rust/README.md`. The
-bitcode layer now covers function, return, parameter, and call-site attributes,
-including `#N` groups, common enum/integer/string attributes, and the legacy
-memory attributes. This is not an M2 parity claim: the upstream `llvm/test`
-suite is still not vendored, and the slice does not cover metadata, type
-attributes (`byval`, `sret`, `elementtype`), constant expressions, atomics, or
-aggregate/vector instructions.
+the build/runtime/memory numbers are recorded in `llvm-rust/README.md`. On the
+1000-function parser/printer/bitcode corpus, the current Rust tools are about
+2.6x faster for assembly and 2.1x faster for disassembly than the LLVM 19 C++
+tools and use about 4.1x/3.0x less peak RSS. The parser streams tokens through
+a two-token window instead of retaining the whole file; that change alone cut
+assembly RSS from 26.0 MiB to 14.8 MiB on the same corpus.
+Those are throughput and memory measurements for the migrated M1 surface, not
+a generated-code claim. The bitcode layer now covers function, return,
+parameter, and call-site attributes, including `#N` groups, common
+enum/integer/string attributes, and the legacy memory attributes. This is not
+an M2 parity claim: the upstream `llvm/test` suite is still not vendored. Type
+attributes (`byval`, `sret`, `elementtype`), aggregate/vector element
+extraction and insertion, vector integer and floating-point arithmetic,
+vector comparisons and `select`, `shufflevector`, `freeze`, `fence`, and
+atomic `load`/`store` with system and single-thread sync scopes, `atomicrmw`,
+`cmpxchg`, `va_arg`, `blockaddress` constants, `indirectbr`, inline asm
+constants, the `callbr` asm-goto terminator, and the exception-handling
+instructions `invoke`, `landingpad` (legacy `cleanup`/`catch`/`filter`), and
+`resume` with the `personality` function attribute, the Windows funclet
+instructions `catchswitch`, `catchpad`, `cleanuppad`, `catchret`, and
+`cleanupret`, plus `getelementptr` and cast constant expressions, are covered,
+including function-local aggregate constants, cross-function block addresses,
+and forward local element operands. The slice still does not cover metadata,
+other constant expressions, scalable-vector shuffles, or other sync scopes.
 
 ## Gates and kill criteria
 

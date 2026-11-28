@@ -6,7 +6,7 @@
 
 use core::fmt;
 use core::fmt::Write as _;
-use std::collections::HashMap;
+use llvm_rust_support::FastHashMap;
 use std::rc::Rc;
 
 use crate::names::write_name;
@@ -155,12 +155,52 @@ impl TypeKey {
 }
 
 /// Interned type storage.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct TypeTable {
     types: Vec<Type>,
     defined: Vec<bool>,
     opaque: Vec<bool>,
-    map: HashMap<TypeKey, TypeId>,
+    map: FastHashMap<TypeKey, TypeId>,
+    named: FastHashMap<Rc<str>, TypeId>,
+    int_cache: Vec<Option<TypeId>>,
+    float_cache: [Option<TypeId>; 7],
+    simple_cache: [Option<TypeId>; 6],
+}
+
+impl Default for TypeTable {
+    fn default() -> Self {
+        Self {
+            types: Vec::new(),
+            defined: Vec::new(),
+            opaque: Vec::new(),
+            map: FastHashMap::default(),
+            named: FastHashMap::default(),
+            int_cache: vec![None; 129],
+            float_cache: [None; 7],
+            simple_cache: [None; 6],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PrimitiveSlot {
+    Simple(usize),
+    Int(usize),
+    Float(usize),
+}
+
+fn primitive_slot(ty: &Type) -> Option<PrimitiveSlot> {
+    match ty {
+        Type::Void => Some(PrimitiveSlot::Simple(0)),
+        Type::Label => Some(PrimitiveSlot::Simple(1)),
+        Type::Token => Some(PrimitiveSlot::Simple(2)),
+        Type::Metadata => Some(PrimitiveSlot::Simple(3)),
+        Type::Opaque => Some(PrimitiveSlot::Simple(4)),
+        Type::Pointer => Some(PrimitiveSlot::Simple(5)),
+        Type::Int(bits) if (*bits as usize) < 129 => Some(PrimitiveSlot::Int(*bits as usize)),
+        Type::Float(kind) => Some(PrimitiveSlot::Float(float_index(*kind))),
+        _ => None,
+    }
 }
 
 impl TypeTable {
@@ -174,8 +214,18 @@ impl TypeTable {
     /// A struct with a name is keyed by that name. Use [`Self::define_named`]
     /// to attach the field list.
     pub fn intern(&mut self, ty: Type) -> TypeId {
+        let slot = primitive_slot(&ty);
+        let named = match &ty {
+            Type::Struct {
+                name: Some(name), ..
+            } => Some(Rc::clone(name)),
+            _ => None,
+        };
         let key = TypeKey::from_type(&ty);
         if let Some(&id) = self.map.get(&key) {
+            if let Some(slot) = slot {
+                self.cache_primitive(slot, id);
+            }
             return id;
         }
         let defined = !matches!(&ty, Type::Struct { name: Some(_), .. });
@@ -184,13 +234,26 @@ impl TypeTable {
         self.defined.push(defined);
         self.opaque.push(false);
         self.map.insert(key, id);
+        if let Some(name) = named {
+            self.named.insert(name, id);
+        }
+        if let Some(slot) = slot {
+            self.cache_primitive(slot, id);
+        }
         id
+    }
+
+    fn cache_primitive(&mut self, slot: PrimitiveSlot, id: TypeId) {
+        match slot {
+            PrimitiveSlot::Simple(index) => self.simple_cache[index] = Some(id),
+            PrimitiveSlot::Int(bits) => self.int_cache[bits] = Some(id),
+            PrimitiveSlot::Float(index) => self.float_cache[index] = Some(id),
+        }
     }
 
     /// Returns the handle for a named struct, creating a placeholder if needed.
     pub fn named(&mut self, name: &str) -> TypeId {
-        let key = TypeKey::Named(Rc::from(name));
-        if let Some(&id) = self.map.get(&key) {
+        if let Some(&id) = self.named.get(name) {
             return id;
         }
         let stored: Rc<str> = Rc::from(name);
@@ -202,7 +265,8 @@ impl TypeTable {
         });
         self.defined.push(false);
         self.opaque.push(false);
-        self.map.insert(TypeKey::Named(stored), id);
+        self.map.insert(TypeKey::Named(Rc::clone(&stored)), id);
+        self.named.insert(stored, id);
         id
     }
 
@@ -278,6 +342,38 @@ impl TypeTable {
         }
     }
 
+    /// Resolves the type reached by indexing an aggregate.
+    pub fn aggregate_indexed(&self, mut ty: TypeId, indices: &[u32]) -> Option<TypeId> {
+        if indices.is_empty() {
+            return None;
+        }
+        for &index in indices {
+            ty = match self.get(ty) {
+                Type::Array { elem, len } if u64::from(index) < *len => *elem,
+                Type::Struct { fields, .. } => *fields.get(index as usize)?,
+                _ => return None,
+            };
+        }
+        Some(ty)
+    }
+
+    /// Returns the element type, length, and scalability of a vector.
+    pub fn vector_info(&self, ty: TypeId) -> Option<(TypeId, u32, bool)> {
+        match self.get(ty) {
+            Type::Vector {
+                elem,
+                len,
+                scalable,
+            } => Some((*elem, *len, *scalable)),
+            _ => None,
+        }
+    }
+
+    /// Returns the element type of a vector.
+    pub fn vector_element(&self, ty: TypeId) -> Option<TypeId> {
+        self.vector_info(ty).map(|(elem, _, _)| elem)
+    }
+
     /// Returns the number of interned types.
     pub fn len(&self) -> usize {
         self.types.len()
@@ -303,22 +399,56 @@ impl TypeTable {
 
     /// Convenience constructors.
     pub fn void(&mut self) -> TypeId {
+        if let Some(id) = self.simple_cache[0] {
+            return id;
+        }
         self.intern(Type::Void)
+    }
+
+    /// Returns `token`.
+    pub fn token(&mut self) -> TypeId {
+        if let Some(id) = self.simple_cache[2] {
+            return id;
+        }
+        self.intern(Type::Token)
     }
 
     /// Returns `iN`.
     pub fn int(&mut self, bits: u32) -> TypeId {
+        if let Some(id) = self.int_cache.get(bits as usize).copied().flatten() {
+            return id;
+        }
         self.intern(Type::Int(bits))
+    }
+
+    /// Returns a floating-point type.
+    pub fn float(&mut self, kind: FloatKind) -> TypeId {
+        if let Some(id) = self.float_cache[float_index(kind)] {
+            return id;
+        }
+        self.intern(Type::Float(kind))
     }
 
     /// Returns `ptr`.
     pub fn pointer(&mut self) -> TypeId {
+        if let Some(id) = self.simple_cache[5] {
+            return id;
+        }
         self.intern(Type::Pointer)
     }
 
     /// Returns an array type.
     pub fn array(&mut self, elem: TypeId, len: u64) -> TypeId {
         self.intern(Type::Array { elem, len })
+    }
+
+    /// Returns a vector type.
+    pub fn vector(&mut self, elem: TypeId, len: u32, scalable: bool) -> TypeId {
+        self.intern(Type::Vector {
+            elem,
+            len,
+            scalable,
+        })
     }
 
     /// Returns a function type.
@@ -328,6 +458,18 @@ impl TypeTable {
             params,
             varargs,
         })
+    }
+}
+
+fn float_index(kind: FloatKind) -> usize {
+    match kind {
+        FloatKind::Half => 0,
+        FloatKind::BFloat => 1,
+        FloatKind::Float => 2,
+        FloatKind::Double => 3,
+        FloatKind::Fp128 => 4,
+        FloatKind::X86Fp80 => 5,
+        FloatKind::PpcFp128 => 6,
     }
 }
 
@@ -440,6 +582,24 @@ mod tests {
         assert!(types.is_defined(node));
         assert_eq!(types.display(node).to_string(), "%node");
         assert!(types.define_named("node", vec![ptr], false).is_err());
+    }
+
+    #[test]
+    fn aggregate_indexed_rejects_empty_and_invalid_paths() {
+        let mut types = TypeTable::new();
+        let i32_ty = types.int(32);
+        let i8_ty = types.int(8);
+        let arr = types.array(i8_ty, 2);
+        let st = types.intern(Type::Struct {
+            fields: vec![i32_ty, arr],
+            packed: false,
+            name: None,
+        });
+        assert_eq!(types.aggregate_indexed(st, &[]), None);
+        assert_eq!(types.aggregate_indexed(st, &[0]), Some(i32_ty));
+        assert_eq!(types.aggregate_indexed(st, &[1, 1]), Some(i8_ty));
+        assert_eq!(types.aggregate_indexed(st, &[2]), None);
+        assert_eq!(types.aggregate_indexed(st, &[1, 2]), None);
     }
 
     #[test]

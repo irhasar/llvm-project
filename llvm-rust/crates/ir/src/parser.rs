@@ -5,19 +5,20 @@
 //! and raw attribute spellings. Metadata is accepted and skipped; MC, debug
 //! info, and constant expressions are later milestones.
 
-use std::collections::HashMap;
+use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::sync::Arc;
 
-use llvm_rust_support::{Error, Result, Span, Symbol};
+use llvm_rust_support::{Error, FastHashMap, Result, Span, Symbol};
 
-use crate::constant::{ConstId, ConstKind, Constant};
+use crate::constant::{ConstExpr, ConstId, ConstKind, Constant};
 use crate::function::{BlockId, Function, LocalId};
 use crate::inst::{
-    Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred, InstKind, Instruction,
-    IntFlags, TailKind,
+    AtomicOrdering, AtomicRmwOp, Attribute, BinOp, CastOp, FastMath, FcmpPred, GepIndex, IcmpPred,
+    InstKind, Instruction, IntFlags, LandingPadClause, SyncScope, TailKind,
 };
 use crate::linkage::{Linkage, Visibility};
-use crate::module::{Global, Module, ThreadLocal};
+use crate::module::{Global, GlobalKind, Module, ThreadLocal};
 use crate::names::quote_bytes;
 use crate::ty::{FloatKind, INVALID_TYPE, Type, TypeId};
 use crate::value::{Operand, OperandKind};
@@ -27,9 +28,12 @@ pub type ParseError = Error;
 
 /// Parses one textual IR module.
 pub fn parse_module(source: &str) -> core::result::Result<Module, ParseError> {
-    let tokens = Lexer::new(source).tokenize()?;
-    let mut parser = Parser::new(source, tokens);
+    let mut parser = Parser::new(Lexer::new(source));
+    parser.ensure(2);
     parser.parse_top_level()?;
+    if let Some(error) = parser.lex_error {
+        return Err(error);
+    }
     parser.module.resolve_forward_references();
     parser.module.resolve_forward_operands();
     parser.module.assign_unnamed_slots();
@@ -37,14 +41,14 @@ pub fn parse_module(source: &str) -> core::result::Result<Module, ParseError> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum TokenKind {
-    Local(String),
-    Global(String),
-    Meta(String),
+enum TokenKind<'a> {
+    Local(Cow<'a, str>),
+    Global(Cow<'a, str>),
+    Meta(Cow<'a, str>),
     AttrGroup(u32),
-    Ident(String),
+    Ident(Cow<'a, str>),
     Int(u128),
-    Float(String),
+    Float(Cow<'a, str>),
     Str(Vec<u8>),
     CStr(Vec<u8>),
     Punct(char),
@@ -54,8 +58,8 @@ enum TokenKind {
 }
 
 #[derive(Clone, Debug)]
-struct Token {
-    kind: TokenKind,
+struct Token<'a> {
+    kind: TokenKind<'a>,
     span: Span,
     quoted: bool,
 }
@@ -64,7 +68,6 @@ struct Lexer<'a> {
     source: &'a str,
     bytes: &'a [u8],
     pos: usize,
-    tokens: Vec<Token>,
 }
 
 impl<'a> Lexer<'a> {
@@ -73,11 +76,20 @@ impl<'a> Lexer<'a> {
             source,
             bytes: source.as_bytes(),
             pos: 0,
-            tokens: Vec::new(),
         }
     }
 
-    fn tokenize(mut self) -> Result<Vec<Token>> {
+    #[cfg(test)]
+    fn tokenize(mut self) -> Result<Vec<Token<'a>>> {
+        let mut tokens = Vec::with_capacity(self.bytes.len() / 8);
+        while let Some(token) = self.next_token()? {
+            tokens.push(token);
+        }
+        tokens.push(self.eof_token());
+        Ok(tokens)
+    }
+
+    fn next_token(&mut self) -> Result<Option<Token<'a>>> {
         while self.pos < self.bytes.len() {
             let start = self.pos;
             let byte = self.bytes[self.pos];
@@ -85,7 +97,7 @@ impl<'a> Lexer<'a> {
                 b' ' | b'\t' | b'\r' => self.pos += 1,
                 b'\n' => {
                     self.pos += 1;
-                    self.push(TokenKind::Eol, start);
+                    return Ok(Some(self.token(TokenKind::Eol, start)));
                 }
                 b';' => {
                     while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
@@ -100,16 +112,15 @@ impl<'a> Lexer<'a> {
                     } else {
                         TokenKind::Global(name)
                     };
-                    self.push(kind, start);
+                    return Ok(Some(self.token(kind, start)));
                 }
                 b'!' => {
                     self.pos += 1;
                     if self.peek_byte() == Some(b'{') {
-                        self.push(TokenKind::Punct('!'), start);
-                    } else {
-                        let name = self.read_sigil_name(start)?;
-                        self.push(TokenKind::Meta(name), start);
+                        return Ok(Some(self.token(TokenKind::Punct('!'), start)));
                     }
+                    let name = self.read_sigil_name(start)?;
+                    return Ok(Some(self.token(TokenKind::Meta(name), start)));
                 }
                 b'#' => {
                     self.pos += 1;
@@ -120,33 +131,33 @@ impl<'a> Lexer<'a> {
                             Span::new(start, self.pos),
                         )
                     })?;
-                    self.push(TokenKind::AttrGroup(value), start);
+                    return Ok(Some(self.token(TokenKind::AttrGroup(value), start)));
                 }
                 b'"' => {
                     let bytes = self.read_quoted(start)?;
-                    self.push(TokenKind::Str(bytes), start);
+                    return Ok(Some(self.token(TokenKind::Str(bytes), start)));
                 }
                 b'c' if self.peek_byte_at(1) == Some(b'"') => {
                     self.pos += 1;
                     let bytes = self.read_quoted(start)?;
-                    self.push(TokenKind::CStr(bytes), start);
+                    return Ok(Some(self.token(TokenKind::CStr(bytes), start)));
                 }
                 b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'<' | b'>' | b',' | b'=' | b':'
                 | b'*' => {
                     self.pos += 1;
-                    self.push(TokenKind::Punct(byte as char), start);
+                    return Ok(Some(self.token(TokenKind::Punct(byte as char), start)));
                 }
                 b'.' if self.bytes[self.pos..].starts_with(b"...") => {
                     self.pos += 3;
-                    self.push(TokenKind::Ellipsis, start);
+                    return Ok(Some(self.token(TokenKind::Ellipsis, start)));
                 }
                 b'-' if self.peek_byte_at(1).is_some_and(|b| b.is_ascii_digit()) => {
-                    self.read_number(start)?;
+                    return Ok(Some(self.read_number(start)?));
                 }
-                b'0'..=b'9' => self.read_number(start)?,
+                b'0'..=b'9' => return Ok(Some(self.read_number(start)?)),
                 b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'$' | b'.' | b'-' => {
-                    let ident = self.read_while(is_ident_char);
-                    self.push(TokenKind::Ident(ident), start);
+                    let ident = Cow::Borrowed(self.read_while(is_ident_char));
+                    return Ok(Some(self.token(TokenKind::Ident(ident), start)));
                 }
                 _ => {
                     return Err(Error::parse_at(
@@ -156,19 +167,25 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        let end = self.bytes.len();
-        self.push(TokenKind::Eof, end);
-        Ok(self.tokens)
+        Ok(None)
     }
 
-    fn push(&mut self, kind: TokenKind, start: usize) {
+    fn token(&self, kind: TokenKind<'a>, start: usize) -> Token<'a> {
         let quoted = matches!(kind, TokenKind::Global(_) | TokenKind::Local(_))
             && self.bytes.get(start + 1) == Some(&b'"');
-        self.tokens.push(Token {
+        Token {
             kind,
             span: Span::new(start, self.pos),
             quoted,
-        });
+        }
+    }
+
+    fn eof_token(&self) -> Token<'a> {
+        Token {
+            kind: TokenKind::Eof,
+            span: Span::point(self.bytes.len()),
+            quoted: false,
+        }
     }
 
     fn peek_byte(&self) -> Option<u8> {
@@ -179,18 +196,18 @@ impl<'a> Lexer<'a> {
         self.bytes.get(self.pos + offset).copied()
     }
 
-    fn read_while(&mut self, predicate: impl Fn(u8) -> bool) -> String {
+    fn read_while(&mut self, predicate: impl Fn(u8) -> bool) -> &'a str {
         let start = self.pos;
         while self.pos < self.bytes.len() && predicate(self.bytes[self.pos]) {
             self.pos += 1;
         }
-        self.source[start..self.pos].to_string()
+        &self.source[start..self.pos]
     }
 
-    fn read_sigil_name(&mut self, start: usize) -> Result<String> {
+    fn read_sigil_name(&mut self, start: usize) -> Result<Cow<'a, str>> {
         if self.peek_byte() == Some(b'"') {
             let bytes = self.read_quoted(start)?;
-            return String::from_utf8(bytes).map_err(|_| {
+            return String::from_utf8(bytes).map(Cow::Owned).map_err(|_| {
                 Error::parse_at("name is not valid UTF-8", Span::new(start, self.pos))
             });
         }
@@ -201,7 +218,7 @@ impl<'a> Lexer<'a> {
                 Span::new(start, self.pos),
             ));
         }
-        Ok(name)
+        Ok(Cow::Borrowed(name))
     }
 
     fn read_quoted(&mut self, start: usize) -> Result<Vec<u8>> {
@@ -240,7 +257,7 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn read_number(&mut self, start: usize) -> Result<()> {
+    fn read_number(&mut self, start: usize) -> Result<Token<'a>> {
         let text = self.read_while(|byte| {
             !matches!(
                 byte,
@@ -262,10 +279,10 @@ impl<'a> Lexer<'a> {
                     | b'!'
             )
         });
-        let kind = if is_float_literal(&text) {
-            TokenKind::Float(text)
+        let kind = if is_float_literal(text) {
+            TokenKind::Float(Cow::Borrowed(text))
         } else {
-            let value = parse_int_literal(&text).ok_or_else(|| {
+            let value = parse_int_literal(text).ok_or_else(|| {
                 Error::parse_at(
                     format!("invalid integer literal `{text}`"),
                     Span::new(start, self.pos),
@@ -273,8 +290,7 @@ impl<'a> Lexer<'a> {
             })?;
             TokenKind::Int(value)
         };
-        self.push(kind, start);
-        Ok(())
+        Ok(self.token(kind, start))
     }
 }
 
@@ -510,15 +526,15 @@ fn normalize_group_attribute(attr: Attribute) -> Attribute {
     Attribute(text)
 }
 
-fn token_text(kind: &TokenKind) -> String {
+fn token_text(kind: &TokenKind<'_>) -> String {
     match kind {
         TokenKind::Local(name) => format!("%{name}"),
         TokenKind::Global(name) => format!("@{name}"),
         TokenKind::Meta(name) => format!("!{name}"),
         TokenKind::AttrGroup(value) => format!("#{value}"),
-        TokenKind::Ident(text) => text.clone(),
+        TokenKind::Ident(text) => text.to_string(),
         TokenKind::Int(value) => value.to_string(),
-        TokenKind::Float(text) => text.clone(),
+        TokenKind::Float(text) => text.to_string(),
         TokenKind::Str(bytes) => quote_bytes(bytes),
         TokenKind::CStr(bytes) => format!("c{}", quote_bytes(bytes)),
         TokenKind::Punct(ch) => ch.to_string(),
@@ -624,28 +640,58 @@ fn is_attr_keyword(text: &str) -> bool {
     )
 }
 
+struct ParsedCall {
+    fastmath: FastMath,
+    attrs: Vec<Attribute>,
+    ret_attrs: Vec<Attribute>,
+    ret_ty: TypeId,
+    fn_ty: TypeId,
+    callee: Operand,
+    args: Vec<Operand>,
+    arg_attrs: Vec<Arc<Vec<Attribute>>>,
+}
+
 struct Parser<'a> {
-    _source: &'a str,
-    tokens: Vec<Token>,
-    pos: usize,
+    lexer: Lexer<'a>,
+    tokens: VecDeque<Token<'a>>,
+    lex_error: Option<Error>,
+    finished: bool,
     module: Module,
-    local_names: HashMap<Symbol, LocalId>,
+    local_names: FastHashMap<Symbol, LocalId>,
     next_value: u32,
     next_unnamed: u64,
-    unnamed_symbols: HashMap<u32, Symbol>,
+    unnamed_symbols: FastHashMap<u32, Symbol>,
 }
 
 impl<'a> Parser<'a> {
-    fn new(source: &'a str, tokens: Vec<Token>) -> Self {
+    fn new(lexer: Lexer<'a>) -> Self {
         Self {
-            _source: source,
-            tokens,
-            pos: 0,
+            lexer,
+            tokens: VecDeque::with_capacity(2),
+            lex_error: None,
+            finished: false,
             module: Module::new(),
-            local_names: HashMap::new(),
+            local_names: FastHashMap::with_capacity_and_hasher(64, Default::default()),
             next_value: 0,
             next_unnamed: 0,
-            unnamed_symbols: HashMap::new(),
+            unnamed_symbols: FastHashMap::default(),
+        }
+    }
+
+    fn ensure(&mut self, lookahead: usize) {
+        while self.tokens.len() < lookahead && !self.finished {
+            match self.lexer.next_token() {
+                Ok(Some(token)) => self.tokens.push_back(token),
+                Ok(None) => {
+                    self.tokens.push_back(self.lexer.eof_token());
+                    self.finished = true;
+                }
+                Err(error) => {
+                    self.lex_error = Some(error);
+                    self.tokens.push_back(self.lexer.eof_token());
+                    self.finished = true;
+                }
+            }
         }
     }
 
@@ -656,7 +702,7 @@ impl<'a> Parser<'a> {
                 return Ok(());
             }
             match self.peek_kind().clone() {
-                TokenKind::Ident(text) => match text.as_str() {
+                TokenKind::Ident(text) => match &*text {
                     "source_filename" => {
                         self.advance();
                         self.expect_punct('=')?;
@@ -779,6 +825,7 @@ impl<'a> Parser<'a> {
         let mut unnamed_addr = false;
         let mut local_unnamed_addr = false;
         let mut is_const = false;
+        let mut kind = GlobalKind::Variable;
         let mut saw_kind = false;
         loop {
             let text = match self.peek_kind() {
@@ -795,9 +842,9 @@ impl<'a> Parser<'a> {
                 self.advance();
                 continue;
             }
-            match text.as_str() {
+            match &*text {
                 "dso_local" | "dso_preemptable" => {
-                    dso_local = text == "dso_local";
+                    dso_local = &*text == "dso_local";
                     self.advance();
                 }
                 "thread_local" => {
@@ -849,17 +896,48 @@ impl<'a> Parser<'a> {
                     self.advance();
                     break;
                 }
+                "alias" => {
+                    kind = GlobalKind::Alias;
+                    saw_kind = true;
+                    self.advance();
+                    break;
+                }
+                "ifunc" => {
+                    kind = GlobalKind::IFunc;
+                    saw_kind = true;
+                    self.advance();
+                    break;
+                }
                 _ => break,
             }
         }
         if !saw_kind {
-            return Err(self.error("expected `global` or `constant` in global definition"));
+            return Err(self
+                .error("expected `global`, `constant`, `alias`, or `ifunc` in global definition"));
         }
-        let ty = self.parse_type()?;
-        let init = if self.at_eol() || self.at_punct(',') || self.at_eof() {
-            None
+        let (ty, init) = if kind.is_alias() {
+            let value_ty = self.parse_type()?;
+            self.expect_punct(',')?;
+            // Constant expressions are self-typed in this position; LLVM omits
+            // the pointer type before them.
+            let aliasee_ty = if self.at_type_start() {
+                self.parse_type()?
+            } else {
+                self.module.types.pointer()
+            };
+            if !matches!(self.module.types.get(aliasee_ty), Type::Pointer) {
+                return Err(self.error("alias and ifunc targets must have pointer type"));
+            }
+            let aliasee = self.parse_constant(aliasee_ty)?;
+            (value_ty, Some(aliasee))
         } else {
-            Some(self.parse_constant(ty)?)
+            let ty = self.parse_type()?;
+            let init = if self.at_eol() || self.at_punct(',') || self.at_eof() {
+                None
+            } else {
+                Some(self.parse_constant(ty)?)
+            };
+            (ty, init)
         };
         let mut align = None;
         let mut section = None;
@@ -886,8 +964,13 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect_eol()?;
+        dso_local |= visibility.implies_dso_local();
+        if kind == GlobalKind::IFunc {
+            tls_model = ThreadLocal::None;
+        }
         let global = Global {
             name: symbol,
+            kind,
             ty,
             init,
             linkage,
@@ -937,9 +1020,9 @@ impl<'a> Parser<'a> {
                 self.advance();
                 continue;
             }
-            match text.as_str() {
+            match &*text {
                 "dso_local" | "dso_preemptable" => {
-                    dso_local = text == "dso_local";
+                    dso_local = &*text == "dso_local";
                     self.advance();
                 }
                 "unnamed_addr" => {
@@ -963,7 +1046,7 @@ impl<'a> Parser<'a> {
         let mut function = Function::new(symbol, 0);
         function.linkage = linkage;
         function.visibility = visibility;
-        function.dso_local = dso_local;
+        function.dso_local = dso_local || visibility.implies_dso_local();
         function.unnamed_addr = unnamed_addr;
         function.local_unnamed_addr = local_unnamed_addr;
         function.is_declaration = is_declaration;
@@ -1005,7 +1088,7 @@ impl<'a> Parser<'a> {
         self.expect_punct(')')?;
         function.ty = self.module.types.function(ret_ty, param_types, varargs);
         let mut function_attrs = Vec::new();
-        self.parse_trailing_attrs(&mut function_attrs, !is_declaration)?;
+        self.parse_trailing_attrs(&mut function, &mut function_attrs, !is_declaration)?;
         if let Some(index) = function_attrs
             .iter()
             .position(|attr| attr.0 == "local_unnamed_addr")
@@ -1074,6 +1157,7 @@ impl<'a> Parser<'a> {
 
     fn parse_trailing_attrs(
         &mut self,
+        function: &mut Function,
         attrs: &mut Vec<Attribute>,
         stop_at_brace: bool,
     ) -> Result<()> {
@@ -1101,8 +1185,13 @@ impl<'a> Parser<'a> {
                     if is_attr_keyword(&text) {
                         attrs.push(self.parse_attribute()?);
                     } else {
-                        match text.as_str() {
-                            "section" | "gc" | "prefix" | "prologue" | "personality" => {
+                        match &*text {
+                            "personality" => {
+                                self.advance();
+                                let ty = self.parse_type()?;
+                                function.personality = Some(self.parse_value(function, ty)?);
+                            }
+                            "section" | "gc" | "prefix" | "prologue" => {
                                 let value = self.expect_string()?;
                                 attrs.push(Attribute(format!(
                                     "{text} {}",
@@ -1114,7 +1203,7 @@ impl<'a> Parser<'a> {
                                 attrs.push(Attribute(format!("align {value}")));
                             }
                             "unnamed_addr" | "local_unnamed_addr" => {
-                                attrs.push(Attribute(text.clone()));
+                                attrs.push(Attribute(text.to_string()));
                                 self.advance();
                             }
                             "comdat" => {
@@ -1208,8 +1297,7 @@ impl<'a> Parser<'a> {
             if self.at_eof() {
                 return Err(self.error("unterminated attribute argument list"));
             }
-            let token = self.tokens[self.pos].clone();
-            self.pos += 1;
+            let token = self.take();
             match token.kind {
                 TokenKind::Punct('(') => {
                     depth += 1;
@@ -1236,7 +1324,7 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn local_symbol(&mut self, name: Option<String>) -> Result<Symbol> {
+    fn local_symbol(&mut self, name: Option<Cow<'a, str>>) -> Result<Symbol> {
         match name {
             Some(name) => {
                 if let Ok(value) = name.parse::<u32>() {
@@ -1303,6 +1391,13 @@ impl<'a> Parser<'a> {
                         if !function.local(existing).is_param
                             && function.local(existing).def.is_none() =>
                     {
+                        let previous = function.local(existing).ty;
+                        if previous != INVALID_TYPE && previous != ty {
+                            return Err(self.error(format!(
+                                "forward reference type mismatch for %{}",
+                                self.module.name(symbol)
+                            )));
+                        }
                         function.define_local(existing, ty, inst_id);
                         existing
                     }
@@ -1327,15 +1422,16 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_label_name(&mut self) -> Result<Symbol> {
-        let name = match self.peek_kind().clone() {
+        let token = self.take();
+        let name = match token.kind {
             TokenKind::Ident(name) | TokenKind::Local(name) => name,
-            TokenKind::Int(value) => value.to_string(),
-            TokenKind::Str(bytes) => {
-                String::from_utf8(bytes).map_err(|_| self.error("label is not valid UTF-8"))?
-            }
-            _ => return Err(self.error("expected a basic block label")),
+            TokenKind::Int(value) => Cow::Owned(value.to_string()),
+            TokenKind::Str(bytes) => Cow::Owned(
+                String::from_utf8(bytes)
+                    .map_err(|_| Error::parse_at("label is not valid UTF-8", token.span))?,
+            ),
+            _ => return Err(Error::parse_at("expected a basic block label", token.span)),
         };
-        self.advance();
         self.expect_punct(':')?;
         if let Ok(value) = name.parse::<u32>() {
             self.next_value = self.next_value.max(value.saturating_add(1));
@@ -1358,55 +1454,78 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_type(&mut self) -> Result<TypeId> {
-        let base = match self.peek_kind().clone() {
+    fn at_type_start(&self) -> bool {
+        match self.peek_kind() {
             TokenKind::Ident(text) => {
-                self.advance();
-                match text.as_str() {
-                    "void" => self.module.types.void(),
-                    "label" => self.module.types.intern(Type::Label),
-                    "token" => self.module.types.intern(Type::Token),
-                    "metadata" => self.module.types.intern(Type::Metadata),
-                    "opaque" => self.module.types.intern(Type::Opaque),
-                    "ptr" => {
-                        if self.eat_ident("addrspace") {
-                            self.expect_punct('(')?;
-                            let address_space = self.expect_int()?;
-                            self.expect_punct(')')?;
-                            if address_space != 0 {
-                                return Err(
-                                    self.error("nonzero pointer address spaces are not supported")
-                                );
-                            }
+                matches!(
+                    &**text,
+                    "void"
+                        | "label"
+                        | "token"
+                        | "metadata"
+                        | "opaque"
+                        | "ptr"
+                        | "half"
+                        | "bfloat"
+                        | "float"
+                        | "double"
+                        | "fp128"
+                        | "x86_fp80"
+                        | "ppc_fp128"
+                ) || text
+                    .strip_prefix('i')
+                    .is_some_and(|bits| bits.parse::<u32>().is_ok())
+            }
+            TokenKind::Local(_) => true,
+            TokenKind::Punct('[') | TokenKind::Punct('<') | TokenKind::Punct('{') => true,
+            _ => false,
+        }
+    }
+
+    fn parse_type(&mut self) -> Result<TypeId> {
+        let token = self.take();
+        let span = token.span;
+        let base = match token.kind {
+            TokenKind::Ident(text) => match &*text {
+                "void" => self.module.types.void(),
+                "label" => self.module.types.intern(Type::Label),
+                "token" => self.module.types.intern(Type::Token),
+                "metadata" => self.module.types.intern(Type::Metadata),
+                "opaque" => self.module.types.intern(Type::Opaque),
+                "ptr" => {
+                    if self.eat_ident("addrspace") {
+                        self.expect_punct('(')?;
+                        let address_space = self.expect_int()?;
+                        self.expect_punct(')')?;
+                        if address_space != 0 {
+                            return Err(
+                                self.error("nonzero pointer address spaces are not supported")
+                            );
                         }
-                        self.module.types.pointer()
                     }
-                    "half" => self.module.types.intern(Type::Float(FloatKind::Half)),
-                    "bfloat" => self.module.types.intern(Type::Float(FloatKind::BFloat)),
-                    "float" => self.module.types.intern(Type::Float(FloatKind::Float)),
-                    "double" => self.module.types.intern(Type::Float(FloatKind::Double)),
-                    "fp128" => self.module.types.intern(Type::Float(FloatKind::Fp128)),
-                    "x86_fp80" => self.module.types.intern(Type::Float(FloatKind::X86Fp80)),
-                    "ppc_fp128" => self.module.types.intern(Type::Float(FloatKind::PpcFp128)),
-                    other => {
-                        if let Some(bits) = other.strip_prefix('i') {
-                            if let Ok(bits) = bits.parse::<u32>() {
-                                self.module.types.int(bits)
-                            } else {
-                                return Err(self.error(format!("invalid integer type `{other}`")));
-                            }
+                    self.module.types.pointer()
+                }
+                "half" => self.module.types.float(FloatKind::Half),
+                "bfloat" => self.module.types.float(FloatKind::BFloat),
+                "float" => self.module.types.float(FloatKind::Float),
+                "double" => self.module.types.float(FloatKind::Double),
+                "fp128" => self.module.types.float(FloatKind::Fp128),
+                "x86_fp80" => self.module.types.float(FloatKind::X86Fp80),
+                "ppc_fp128" => self.module.types.float(FloatKind::PpcFp128),
+                other => {
+                    if let Some(bits) = other.strip_prefix('i') {
+                        if let Ok(bits) = bits.parse::<u32>() {
+                            self.module.types.int(bits)
                         } else {
-                            return Err(self.error(format!("expected a type, found `{other}`")));
+                            return Err(self.error(format!("invalid integer type `{other}`")));
                         }
+                    } else {
+                        return Err(self.error(format!("expected a type, found `{other}`")));
                     }
                 }
-            }
-            TokenKind::Local(name) => {
-                self.advance();
-                self.module.types.named(&name)
-            }
+            },
+            TokenKind::Local(name) => self.module.types.named(&name),
             TokenKind::Punct('[') => {
-                self.advance();
                 let len = self.expect_int()? as u64;
                 self.expect_ident_is("x")?;
                 let elem = self.parse_type()?;
@@ -1414,7 +1533,6 @@ impl<'a> Parser<'a> {
                 self.module.types.array(elem, len)
             }
             TokenKind::Punct('<') => {
-                self.advance();
                 if self.eat_punct('{') {
                     let fields = self.parse_struct_fields('}')?;
                     self.expect_punct('>')?;
@@ -1440,7 +1558,6 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Punct('{') => {
-                self.advance();
                 let fields = self.parse_struct_fields('}')?;
                 self.module.types.intern(Type::Struct {
                     fields,
@@ -1449,7 +1566,10 @@ impl<'a> Parser<'a> {
                 })
             }
             other => {
-                return Err(self.error(format!("expected a type, found {other:?}")));
+                return Err(Error::parse_at(
+                    format!("expected a type, found {other:?}"),
+                    span,
+                ));
             }
         };
         if self.at_punct('(') {
@@ -1490,9 +1610,11 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_constant(&mut self, ty: TypeId) -> Result<ConstId> {
-        match self.peek_kind().clone() {
+        let token = self.take();
+        let span = token.span;
+        let quoted = token.quoted;
+        match token.kind {
             TokenKind::Int(value) => {
-                self.advance();
                 let bits =
                     self.module.types.get(ty).int_bits().ok_or_else(|| {
                         self.error("integer constant used with a non-integer type")
@@ -1506,7 +1628,6 @@ impl<'a> Parser<'a> {
                 Ok(self.module.const_int(ty, value))
             }
             TokenKind::Float(text) => {
-                self.advance();
                 let kind = match self.module.types.get(ty) {
                     Type::Float(kind) => *kind,
                     _ => return Err(self.error("floating constant used with a non-float type")),
@@ -1515,22 +1636,14 @@ impl<'a> Parser<'a> {
                     .ok_or_else(|| self.error(format!("invalid floating literal `{text}`")))?;
                 Ok(self.module.const_float_bits(ty, bits))
             }
-            TokenKind::CStr(bytes) => {
-                self.advance();
-                Ok(self
-                    .module
-                    .add_constant(Constant::new(ty, ConstKind::String(bytes))))
-            }
-            TokenKind::Meta(name) => {
-                self.advance();
-                Ok(self
-                    .module
-                    .add_constant(Constant::new(ty, ConstKind::MetadataString(name))))
-            }
+            TokenKind::CStr(bytes) => Ok(self
+                .module
+                .add_constant(Constant::new(ty, ConstKind::String(bytes)))),
+            TokenKind::Meta(name) => Ok(self.module.add_constant(Constant::new(
+                ty,
+                ConstKind::MetadataString(name.into_owned()),
+            ))),
             TokenKind::Global(name) => {
-                let span = self.peek().span;
-                let quoted = self.peek().quoted;
-                self.advance();
                 let symbol = self.reference_symbol(&name, quoted, span)?;
                 let kind = if let Some(id) = self.module.function_named(symbol) {
                     ConstKind::Function(id)
@@ -1542,8 +1655,16 @@ impl<'a> Parser<'a> {
                 Ok(self.module.add_constant(Constant::new(ty, kind)))
             }
             TokenKind::Ident(text) => {
-                self.advance();
-                let kind = match text.as_str() {
+                if &*text == "getelementptr" {
+                    return self.parse_const_gep(ty, span);
+                }
+                if &*text == "blockaddress" {
+                    return self.parse_const_blockaddress(ty, span);
+                }
+                if let Some(op) = CastOp::parse(&text) {
+                    return self.parse_const_cast(ty, op, span);
+                }
+                let kind = match &*text {
                     "true" => ConstKind::Int(1),
                     "false" => ConstKind::Int(0),
                     "null" => ConstKind::Null,
@@ -1557,7 +1678,6 @@ impl<'a> Parser<'a> {
                 Ok(self.module.add_constant(Constant::new(ty, kind)))
             }
             TokenKind::Punct('[') => {
-                self.advance();
                 let elem_ty = match self.module.types.get(ty) {
                     Type::Array { elem, .. } | Type::Vector { elem, .. } => *elem,
                     _ => return Err(self.error("array constant used with a non-array type")),
@@ -1576,7 +1696,6 @@ impl<'a> Parser<'a> {
                 Ok(self.module.const_aggregate(ty, elems))
             }
             TokenKind::Punct('<') => {
-                self.advance();
                 if self.eat_punct('{') {
                     let id = self.parse_struct_constant(ty)?;
                     self.expect_punct('>')?;
@@ -1600,30 +1719,123 @@ impl<'a> Parser<'a> {
                     Ok(self.module.const_aggregate(ty, elems))
                 }
             }
-            TokenKind::Punct('{') => {
-                self.advance();
-                self.parse_struct_constant(ty)
-            }
-            TokenKind::Local(name) => {
-                Err(self.error(format!("local value %{name} is not a constant")))
-            }
-            other => Err(self.error(format!("expected a constant, found {other:?}"))),
+            TokenKind::Punct('{') => self.parse_struct_constant(ty),
+            TokenKind::Local(name) => Err(Error::parse_at(
+                format!("local value %{name} is not a constant"),
+                span,
+            )),
+            other => Err(Error::parse_at(
+                format!("expected a constant, found {other:?}"),
+                span,
+            )),
         }
     }
 
-    fn parse_struct_constant(&mut self, ty: TypeId) -> Result<ConstId> {
-        let (fields, _) = self
+    fn parse_const_blockaddress(&mut self, result_ty: TypeId, span: Span) -> Result<ConstId> {
+        if !matches!(self.module.types.get(result_ty), Type::Pointer) {
+            return Err(Error::parse_at("blockaddress must produce a pointer", span));
+        }
+        self.expect_punct('(')?;
+        let (name, name_span, quoted) = self.expect_global()?;
+        let symbol = self.reference_symbol(&name, quoted, name_span)?;
+        let function = self
             .module
-            .types
-            .struct_body(ty)
-            .ok_or_else(|| self.error("struct constant used with a non-struct type"))?;
-        let fields = fields.to_vec();
+            .function_named(symbol)
+            .unwrap_or_else(|| self.module.function_or_insert(symbol));
+        self.expect_punct(',')?;
+        let block = self.expect_local()?.0;
+        let block = self.module.intern(&block);
+        self.expect_punct(')')?;
+        Ok(self.module.add_constant(Constant::new(
+            result_ty,
+            ConstKind::BlockAddress { function, block },
+        )))
+    }
+
+    fn parse_const_gep(&mut self, result_ty: TypeId, span: Span) -> Result<ConstId> {
+        if !matches!(self.module.types.get(result_ty), Type::Pointer) {
+            return Err(Error::parse_at(
+                "getelementptr constant expression must produce a pointer",
+                span,
+            ));
+        }
+        let inbounds = self.eat_ident("inbounds");
+        self.expect_punct('(')?;
+        let source_ty = self.parse_type()?;
+        self.expect_punct(',')?;
+        let ptr_ty = self.parse_type()?;
+        if !matches!(self.module.types.get(ptr_ty), Type::Pointer) {
+            return Err(Error::parse_at(
+                "getelementptr constant expression base must be a scalar pointer",
+                span,
+            ));
+        }
+        let ptr_const = self.parse_constant(ptr_ty)?;
+        let ptr = Operand::constant(ptr_ty, ptr_const);
+        let mut indices = Vec::new();
+        while self.eat_punct(',') {
+            let index_ty = self.parse_type()?;
+            let index = self.parse_constant(index_ty)?;
+            indices.push(GepIndex {
+                ty: index_ty,
+                value: Operand::constant(index_ty, index),
+            });
+        }
+        self.expect_punct(')')?;
+        if indices.is_empty() {
+            return Err(Error::parse_at(
+                "getelementptr constant expression needs at least one index",
+                span,
+            ));
+        }
+        Ok(self.module.add_constant(Constant::new(
+            result_ty,
+            ConstKind::Expr(ConstExpr::Gep {
+                inbounds,
+                source_ty,
+                ptr,
+                indices,
+            }),
+        )))
+    }
+
+    fn parse_const_cast(&mut self, result_ty: TypeId, op: CastOp, span: Span) -> Result<ConstId> {
+        self.expect_punct('(')?;
+        let value_ty = self.parse_type()?;
+        let value = self.parse_constant(value_ty)?;
+        self.expect_ident_is("to")?;
+        let declared_ty = self.parse_type()?;
+        self.expect_punct(')')?;
+        if declared_ty != result_ty {
+            return Err(Error::parse_at(
+                "constant expression result type does not match its use",
+                span,
+            ));
+        }
+        Ok(self.module.add_constant(Constant::new(
+            result_ty,
+            ConstKind::Expr(ConstExpr::Cast {
+                op,
+                value: Operand::constant(value_ty, value),
+            }),
+        )))
+    }
+
+    fn parse_struct_constant(&mut self, ty: TypeId) -> Result<ConstId> {
+        if self.module.types.struct_body(ty).is_none() {
+            return Err(self.error("struct constant used with a non-struct type"));
+        }
         let mut elems = Vec::new();
         if !self.eat_punct('}') {
             let mut index = 0;
             loop {
                 let _ = self.parse_type()?;
-                let field_ty = fields.get(index).copied().unwrap_or(ty);
+                let field_ty = self
+                    .module
+                    .types
+                    .struct_body(ty)
+                    .and_then(|(fields, _)| fields.get(index).copied())
+                    .unwrap_or(ty);
                 elems.push(self.parse_constant(field_ty)?);
                 index += 1;
                 if !self.eat_punct(',') {
@@ -1636,79 +1848,102 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_value(&mut self, function: &mut Function, ty: TypeId) -> Result<Operand> {
-        match self.peek_kind().clone() {
-            TokenKind::Local(name) => {
-                self.advance();
-                let symbol = self.module.intern(&name);
-                let local = *self
-                    .local_names
-                    .get(&symbol)
-                    .ok_or_else(|| self.error(format!("use of undefined local value %{name}")))?;
-                Ok(Operand::local(function.local_type(local), local))
-            }
-            TokenKind::Global(name) => {
-                let span = self.peek().span;
-                let quoted = self.peek().quoted;
-                self.advance();
-                let symbol = self.reference_symbol(&name, quoted, span)?;
-                if let Some(id) = self.module.function_named(symbol) {
-                    Ok(Operand::function(ty, id))
-                } else {
-                    let id = self.module.global_or_insert(symbol);
-                    Ok(Operand::global(ty, id))
-                }
-            }
-            _ => {
-                let id = self.parse_constant(ty)?;
-                Ok(Operand::constant(ty, id))
-            }
+        if matches!(self.peek_kind(), TokenKind::Local(_)) {
+            let (name, _) = self.expect_local()?;
+            let symbol = self.module.intern(&name);
+            let local = *self
+                .local_names
+                .get(&symbol)
+                .ok_or_else(|| self.error(format!("use of undefined local value %{name}")))?;
+            return Ok(Operand::local(function.local_type(local), local));
         }
+        if matches!(self.peek_kind(), TokenKind::Global(_)) {
+            let (name, span, quoted) = self.expect_global()?;
+            let symbol = self.reference_symbol(&name, quoted, span)?;
+            return Ok(if let Some(id) = self.module.function_named(symbol) {
+                Operand::function(ty, id)
+            } else {
+                let id = self.module.global_or_insert(symbol);
+                Operand::global(ty, id)
+            });
+        }
+        let id = self.parse_constant(ty)?;
+        Ok(Operand::constant(ty, id))
+    }
+
+    fn parse_value_forward(&mut self, function: &mut Function, ty: TypeId) -> Result<Operand> {
+        if matches!(self.peek_kind(), TokenKind::Local(_)) {
+            let (name, _) = self.expect_local()?;
+            let symbol = self.module.intern(&name);
+            let local = match self.local_names.get(&symbol).copied() {
+                Some(local) => local,
+                None => {
+                    let local = function.forward_local(symbol, ty);
+                    self.local_names.insert(symbol, local);
+                    local
+                }
+            };
+            if function.local_type(local) == INVALID_TYPE {
+                function.locals[local as usize].ty = ty;
+            }
+            return Ok(Operand::local(function.local_type(local), local));
+        }
+        self.parse_value(function, ty)
     }
 
     fn parse_phi_value(&mut self, function: &mut Function, ty: TypeId) -> Result<Operand> {
-        match self.peek_kind().clone() {
-            TokenKind::Local(name) => {
-                self.advance();
-                let symbol = self.module.intern(&name);
-                let local = match self.local_names.get(&symbol).copied() {
-                    Some(local) => local,
-                    None => {
-                        let local = function.forward_local(symbol, ty);
-                        self.local_names.insert(symbol, local);
-                        local
-                    }
-                };
-                Ok(Operand::local(function.local_type(local), local))
-            }
-            _ => self.parse_value(function, ty),
+        if matches!(self.peek_kind(), TokenKind::Local(_)) {
+            let (name, _) = self.expect_local()?;
+            let symbol = self.module.intern(&name);
+            let local = match self.local_names.get(&symbol).copied() {
+                Some(local) => local,
+                None => {
+                    let local = function.forward_local(symbol, ty);
+                    self.local_names.insert(symbol, local);
+                    local
+                }
+            };
+            return Ok(Operand::local(function.local_type(local), local));
         }
+        self.parse_value(function, ty)
     }
 
     fn parse_phi_block(&mut self, function: &mut Function) -> Result<BlockId> {
-        let name = match self.peek_kind().clone() {
-            TokenKind::Local(name) => name,
-            TokenKind::Int(value) => value.to_string(),
-            _ => return Err(self.error("expected a phi predecessor block")),
+        let name = if matches!(self.peek_kind(), TokenKind::Local(_)) {
+            self.expect_local()?.0
+        } else if let TokenKind::Int(value) = self.peek_kind() {
+            let name = Cow::Owned(value.to_string());
+            self.advance();
+            name
+        } else {
+            return Err(self.error("expected a phi predecessor block"));
         };
-        self.advance();
         let symbol = self.module.intern(&name);
         Ok(function.block_or_insert(symbol))
     }
 
     fn parse_block_ref(&mut self, function: &mut Function) -> Result<BlockId> {
         self.expect_ident_is("label")?;
-        let name = match self.peek_kind().clone() {
-            TokenKind::Local(name) => name,
-            TokenKind::Int(value) => value.to_string(),
-            _ => return Err(self.error("expected a basic block reference")),
+        let name = if matches!(self.peek_kind(), TokenKind::Local(_)) {
+            self.expect_local()?.0
+        } else if let TokenKind::Int(value) = self.peek_kind() {
+            let name = Cow::Owned(value.to_string());
+            self.advance();
+            name
+        } else {
+            return Err(self.error("expected a basic block reference"));
         };
-        self.advance();
         let symbol = self.module.intern(&name);
         Ok(function.block_or_insert(symbol))
     }
 
     fn parse_callee(&mut self, function: &mut Function) -> Result<Operand> {
         match self.peek_kind().clone() {
+            TokenKind::Ident(text) if &*text == "asm" => {
+                let constant = self.parse_inline_asm(INVALID_TYPE)?;
+                let ty = self.module.types.pointer();
+                Ok(Operand::constant(ty, constant))
+            }
             TokenKind::Global(name) => {
                 let span = self.peek().span;
                 let quoted = self.peek().quoted;
@@ -1723,8 +1958,8 @@ impl<'a> Parser<'a> {
                     Ok(Operand::function(INVALID_TYPE, id))
                 }
             }
-            TokenKind::Local(name) => {
-                self.advance();
+            TokenKind::Local(_) => {
+                let (name, _) = self.expect_local()?;
                 let symbol = self.module.intern(&name);
                 let local = match self.local_names.get(&symbol).copied() {
                     Some(local) => local,
@@ -1743,6 +1978,51 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn parse_inline_asm(&mut self, fn_ty: TypeId) -> Result<ConstId> {
+        self.expect_ident_is("asm")?;
+        let mut sideeffect = false;
+        let mut alignstack = false;
+        let mut inteldialect = false;
+        let mut unwind = false;
+        loop {
+            match self.peek_kind() {
+                TokenKind::Ident(text) if &**text == "sideeffect" => {
+                    sideeffect = true;
+                    self.advance();
+                }
+                TokenKind::Ident(text) if &**text == "alignstack" => {
+                    alignstack = true;
+                    self.advance();
+                }
+                TokenKind::Ident(text) if &**text == "inteldialect" => {
+                    inteldialect = true;
+                    self.advance();
+                }
+                TokenKind::Ident(text) if &**text == "unwind" => {
+                    unwind = true;
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+        let asm = self.expect_string_bytes()?;
+        self.expect_punct(',')?;
+        let constraints = self.expect_string_bytes()?;
+        let ty = self.module.types.pointer();
+        Ok(self.module.add_constant(Constant::new(
+            ty,
+            ConstKind::InlineAsm {
+                fn_ty,
+                asm,
+                constraints,
+                sideeffect,
+                alignstack,
+                inteldialect,
+                unwind,
+            },
+        )))
+    }
+
     fn parse_instruction(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
         let mnemonic = match self.peek_kind() {
             TokenKind::Ident(text) => text.clone(),
@@ -1757,15 +2037,15 @@ impl<'a> Parser<'a> {
             } else {
                 loop {
                     match self.peek_kind() {
-                        TokenKind::Ident(text) if text == "nsw" => {
+                        TokenKind::Ident(text) if &**text == "nsw" => {
                             flags.nsw = true;
                             self.advance();
                         }
-                        TokenKind::Ident(text) if text == "nuw" => {
+                        TokenKind::Ident(text) if &**text == "nuw" => {
                             flags.nuw = true;
                             self.advance();
                         }
-                        TokenKind::Ident(text) if text == "exact" => {
+                        TokenKind::Ident(text) if &**text == "exact" => {
                             flags.exact = true;
                             self.advance();
                         }
@@ -1788,7 +2068,7 @@ impl<'a> Parser<'a> {
                 Some(ty),
             ));
         }
-        match mnemonic.as_str() {
+        match &*mnemonic {
             "fneg" => {
                 self.advance();
                 let flags = self.parse_fastmath()?;
@@ -1805,8 +2085,8 @@ impl<'a> Parser<'a> {
                 let lhs = self.parse_value(function, ty)?;
                 self.expect_punct(',')?;
                 let rhs = self.parse_value(function, ty)?;
-                let i1 = self.module.types.int(1);
-                Ok((InstKind::ICmp { pred, lhs, rhs }, Some(i1)))
+                let result_ty = self.comparison_result_type(ty);
+                Ok((InstKind::ICmp { pred, lhs, rhs }, Some(result_ty)))
             }
             "fcmp" => {
                 self.advance();
@@ -1818,7 +2098,7 @@ impl<'a> Parser<'a> {
                 let lhs = self.parse_value(function, ty)?;
                 self.expect_punct(',')?;
                 let rhs = self.parse_value(function, ty)?;
-                let i1 = self.module.types.int(1);
+                let result_ty = self.comparison_result_type(ty);
                 Ok((
                     InstKind::FCmp {
                         pred,
@@ -1826,7 +2106,7 @@ impl<'a> Parser<'a> {
                         lhs,
                         rhs,
                     },
-                    Some(i1),
+                    Some(result_ty),
                 ))
             }
             "alloca" => {
@@ -1858,39 +2138,156 @@ impl<'a> Parser<'a> {
             }
             "load" => {
                 self.advance();
+                let atomic = self.eat_ident("atomic");
                 let volatile = self.eat_ident("volatile");
                 let ty = self.parse_type()?;
                 self.expect_punct(',')?;
                 let ptr_ty = self.parse_type()?;
                 let ptr = self.parse_value(function, ptr_ty)?;
+                let (syncscope, ordering) = if atomic {
+                    let syncscope = self.parse_syncscope()?;
+                    let ordering = self.parse_atomic_ordering()?;
+                    if !ordering.is_load_valid() {
+                        return Err(self.error("invalid atomic load ordering"));
+                    }
+                    (syncscope, ordering)
+                } else {
+                    (SyncScope::System, AtomicOrdering::NotAtomic)
+                };
                 let align = self.parse_optional_align()?;
+                if atomic && align.is_none() {
+                    return Err(self.error("atomic load requires an explicit alignment"));
+                }
                 Ok((
                     InstKind::Load {
                         ty,
                         ptr,
                         align,
                         volatile,
+                        ordering,
+                        syncscope,
                     },
                     Some(ty),
                 ))
             }
             "store" => {
                 self.advance();
+                let atomic = self.eat_ident("atomic");
                 let volatile = self.eat_ident("volatile");
                 let ty = self.parse_type()?;
                 let value = self.parse_value(function, ty)?;
                 self.expect_punct(',')?;
                 let ptr_ty = self.parse_type()?;
                 let ptr = self.parse_value(function, ptr_ty)?;
+                let (syncscope, ordering) = if atomic {
+                    let syncscope = self.parse_syncscope()?;
+                    let ordering = self.parse_atomic_ordering()?;
+                    if !ordering.is_store_valid() {
+                        return Err(self.error("invalid atomic store ordering"));
+                    }
+                    (syncscope, ordering)
+                } else {
+                    (SyncScope::System, AtomicOrdering::NotAtomic)
+                };
                 let align = self.parse_optional_align()?;
+                if atomic && align.is_none() {
+                    return Err(self.error("atomic store requires an explicit alignment"));
+                }
                 Ok((
                     InstKind::Store {
                         value,
                         ptr,
                         align,
                         volatile,
+                        ordering,
+                        syncscope,
                     },
                     None,
+                ))
+            }
+            "atomicrmw" => {
+                self.advance();
+                let volatile = self.eat_ident("volatile");
+                let op_text = self.expect_ident()?;
+                let op = AtomicRmwOp::parse(&op_text).ok_or_else(|| {
+                    self.error(format!("unknown atomicrmw operation `{op_text}`"))
+                })?;
+                let ptr_ty = self.parse_type()?;
+                let ptr = self.parse_value(function, ptr_ty)?;
+                self.expect_punct(',')?;
+                let ty = self.parse_type()?;
+                let value = self.parse_value(function, ty)?;
+                let syncscope = self.parse_syncscope()?;
+                let ordering = self.parse_atomic_ordering()?;
+                if !ordering.is_rmw_valid() {
+                    return Err(self.error("invalid atomicrmw ordering"));
+                }
+                let align = self.parse_optional_align()?;
+                if align.is_none() {
+                    return Err(self.error("atomicrmw requires an explicit alignment"));
+                }
+                Ok((
+                    InstKind::AtomicRmw {
+                        op,
+                        ptr,
+                        value,
+                        align,
+                        volatile,
+                        ordering,
+                        syncscope,
+                    },
+                    Some(ty),
+                ))
+            }
+            "cmpxchg" => {
+                self.advance();
+                let weak = self.eat_ident("weak");
+                let volatile = self.eat_ident("volatile");
+                let ptr_ty = self.parse_type()?;
+                let ptr = self.parse_value(function, ptr_ty)?;
+                self.expect_punct(',')?;
+                let ty = self.parse_type()?;
+                let cmp = self.parse_value(function, ty)?;
+                self.expect_punct(',')?;
+                let new_ty = self.parse_type()?;
+                if new_ty != ty {
+                    return Err(
+                        self.error("cmpxchg compare and new values must have the same type")
+                    );
+                }
+                let new = self.parse_value(function, new_ty)?;
+                let syncscope = self.parse_syncscope()?;
+                let success = self.parse_atomic_ordering()?;
+                let failure = self.parse_atomic_ordering()?;
+                if !success.is_cmpxchg_success_valid() {
+                    return Err(self.error("invalid cmpxchg success ordering"));
+                }
+                if !failure.is_cmpxchg_failure_valid() {
+                    return Err(self.error("invalid cmpxchg failure ordering"));
+                }
+                let align = self.parse_optional_align()?;
+                if align.is_none() {
+                    return Err(self.error("cmpxchg requires an explicit alignment"));
+                }
+                let i1 = self.module.types.int(1);
+                let result_ty = self.module.types.intern(Type::Struct {
+                    name: None,
+                    fields: vec![ty, i1],
+                    packed: false,
+                });
+                Ok((
+                    InstKind::CmpXchg {
+                        ptr,
+                        cmp,
+                        new,
+                        align,
+                        volatile,
+                        success,
+                        failure,
+                        syncscope,
+                        weak,
+                    },
+                    Some(result_ty),
                 ))
             }
             "getelementptr" => {
@@ -1918,8 +2315,22 @@ impl<'a> Parser<'a> {
                 ))
             }
             "call" => self.parse_call(function, TailKind::None),
+            "callbr" => self.parse_callbr(function),
+            "invoke" => self.parse_invoke(function),
+            "landingpad" => self.parse_landingpad(function),
+            "resume" => {
+                self.advance();
+                let ty = self.parse_type()?;
+                let value = self.parse_value(function, ty)?;
+                Ok((InstKind::Resume { value }, None))
+            }
+            "catchswitch" => self.parse_catchswitch(function),
+            "catchpad" => self.parse_catchpad(function),
+            "cleanuppad" => self.parse_cleanuppad(function),
+            "catchret" => self.parse_catchret(function),
+            "cleanupret" => self.parse_cleanupret(function),
             "tail" | "musttail" | "notail" => {
-                let tail = match mnemonic.as_str() {
+                let tail = match &*mnemonic {
                     "tail" => TailKind::Tail,
                     "musttail" => TailKind::MustTail,
                     _ => TailKind::NoTail,
@@ -2030,6 +2441,212 @@ impl<'a> Parser<'a> {
                     None,
                 ))
             }
+            "extractvalue" => {
+                self.advance();
+                let aggregate_ty = self.parse_type()?;
+                let aggregate = self.parse_value_forward(function, aggregate_ty)?;
+                let aggregate_ty =
+                    self.require_operand_type(aggregate, aggregate_ty, "extractvalue aggregate")?;
+                let indices = self.parse_aggregate_indices()?;
+                let result_ty = self
+                    .module
+                    .types
+                    .aggregate_indexed(aggregate_ty, &indices)
+                    .ok_or_else(|| self.error("invalid extractvalue indices"))?;
+                Ok((
+                    InstKind::ExtractValue { aggregate, indices },
+                    Some(result_ty),
+                ))
+            }
+            "insertvalue" => {
+                self.advance();
+                let aggregate_ty = self.parse_type()?;
+                let aggregate = self.parse_value_forward(function, aggregate_ty)?;
+                let aggregate_ty =
+                    self.require_operand_type(aggregate, aggregate_ty, "insertvalue aggregate")?;
+                self.expect_punct(',')?;
+                let value_ty = self.parse_type()?;
+                let value = self.parse_value_forward(function, value_ty)?;
+                let value_ty = self.require_operand_type(value, value_ty, "insertvalue value")?;
+                let indices = self.parse_aggregate_indices()?;
+                let expected = self
+                    .module
+                    .types
+                    .aggregate_indexed(aggregate_ty, &indices)
+                    .ok_or_else(|| self.error("invalid insertvalue indices"))?;
+                if expected != value_ty {
+                    return Err(self.error("insertvalue element type does not match the index"));
+                }
+                Ok((
+                    InstKind::InsertValue {
+                        aggregate,
+                        value,
+                        indices,
+                    },
+                    Some(aggregate_ty),
+                ))
+            }
+            "extractelement" => {
+                self.advance();
+                let vector_ty = self.parse_type()?;
+                let vector = self.parse_value_forward(function, vector_ty)?;
+                let vector_ty =
+                    self.require_operand_type(vector, vector_ty, "extractelement vector")?;
+                self.expect_punct(',')?;
+                let index_ty = self.parse_type()?;
+                let index = self.parse_value_forward(function, index_ty)?;
+                let index_ty =
+                    self.require_operand_type(index, index_ty, "extractelement index")?;
+                if !matches!(self.module.types.get(index_ty), Type::Int(_)) {
+                    return Err(self.error("extractelement index is not an integer"));
+                }
+                let result_ty = self
+                    .module
+                    .types
+                    .vector_element(vector_ty)
+                    .ok_or_else(|| self.error("extractelement requires a vector operand"))?;
+                Ok((InstKind::ExtractElement { vector, index }, Some(result_ty)))
+            }
+            "insertelement" => {
+                self.advance();
+                let vector_ty = self.parse_type()?;
+                let vector = self.parse_value_forward(function, vector_ty)?;
+                let vector_ty =
+                    self.require_operand_type(vector, vector_ty, "insertelement vector")?;
+                self.expect_punct(',')?;
+                let value_ty = self.parse_type()?;
+                let value = self.parse_value_forward(function, value_ty)?;
+                let value_ty = self.require_operand_type(value, value_ty, "insertelement value")?;
+                self.expect_punct(',')?;
+                let index_ty = self.parse_type()?;
+                let index = self.parse_value_forward(function, index_ty)?;
+                let index_ty = self.require_operand_type(index, index_ty, "insertelement index")?;
+                if !matches!(self.module.types.get(index_ty), Type::Int(_)) {
+                    return Err(self.error("insertelement index is not an integer"));
+                }
+                if self.module.types.vector_element(vector_ty) != Some(value_ty) {
+                    return Err(self.error("insertelement value type does not match the vector"));
+                }
+                Ok((
+                    InstKind::InsertElement {
+                        vector,
+                        value,
+                        index,
+                    },
+                    Some(vector_ty),
+                ))
+            }
+            "shufflevector" => {
+                self.advance();
+                let first_ty = self.parse_type()?;
+                let first = self.parse_value_forward(function, first_ty)?;
+                let first_ty =
+                    self.require_operand_type(first, first_ty, "shufflevector first vector")?;
+                self.expect_punct(',')?;
+                let second_ty = self.parse_type()?;
+                let second = self.parse_value_forward(function, second_ty)?;
+                let second_ty =
+                    self.require_operand_type(second, second_ty, "shufflevector second vector")?;
+                self.expect_punct(',')?;
+                let mask_ty = self.parse_type()?;
+                let mask = self.parse_value(function, mask_ty)?;
+                let mask_ty = self.require_operand_type(mask, mask_ty, "shufflevector mask")?;
+                if !matches!(mask.kind, OperandKind::Const(_)) {
+                    return Err(self.error("shufflevector mask must be a constant"));
+                }
+                let mask = self.canonicalize_shuffle_mask(mask);
+                let (first_elem, _, first_scalable) = self
+                    .module
+                    .types
+                    .vector_info(first_ty)
+                    .ok_or_else(|| self.error("shufflevector first operand is not a vector"))?;
+                if first_scalable {
+                    return Err(self.error("scalable shufflevector is not supported"));
+                }
+                if second_ty != first_ty {
+                    return Err(self.error("shufflevector operands must have the same type"));
+                }
+                let (mask_elem, mask_len, mask_scalable) =
+                    self.module
+                        .types
+                        .vector_info(mask_ty)
+                        .ok_or_else(|| self.error("shufflevector mask is not a vector"))?;
+                if mask_scalable {
+                    return Err(self.error("scalable shufflevector masks are not supported"));
+                }
+                if !matches!(self.module.types.get(mask_elem), Type::Int(32)) {
+                    return Err(self.error("shufflevector mask element type must be i32"));
+                }
+                let result_ty = self.module.types.vector(first_elem, mask_len, false);
+                Ok((
+                    InstKind::ShuffleVector {
+                        first,
+                        second,
+                        mask,
+                    },
+                    Some(result_ty),
+                ))
+            }
+            "freeze" => {
+                self.advance();
+                let ty = self.parse_type()?;
+                let value = self.parse_value_forward(function, ty)?;
+                let ty = self.require_operand_type(value, ty, "freeze value")?;
+                Ok((InstKind::Freeze { value }, Some(ty)))
+            }
+            "fence" => {
+                self.advance();
+                let syncscope = self.parse_syncscope()?;
+                let ordering = self.parse_atomic_ordering()?;
+                if !ordering.is_fence_valid() {
+                    return Err(self.error("fence requires acquire, release, acq_rel, or seq_cst"));
+                }
+                Ok((
+                    InstKind::Fence {
+                        ordering,
+                        syncscope,
+                    },
+                    None,
+                ))
+            }
+            "va_arg" => {
+                self.advance();
+                let list_ty = self.parse_type()?;
+                let list = self.parse_value(function, list_ty)?;
+                if !matches!(self.module.types.get(list_ty), Type::Pointer) {
+                    return Err(self.error("va_arg list is not a pointer"));
+                }
+                self.expect_punct(',')?;
+                let ty = self.parse_type()?;
+                Ok((InstKind::VaArg { list, ty }, Some(ty)))
+            }
+            "indirectbr" => {
+                self.advance();
+                let address_ty = self.parse_type()?;
+                let address = self.parse_value(function, address_ty)?;
+                if !matches!(self.module.types.get(address_ty), Type::Pointer) {
+                    return Err(self.error("indirectbr address is not a pointer"));
+                }
+                self.expect_punct(',')?;
+                self.expect_punct('[')?;
+                let mut destinations = Vec::new();
+                if !self.eat_punct(']') {
+                    loop {
+                        destinations.push(self.parse_block_ref(function)?);
+                        if !self.eat_punct(',') {
+                            break;
+                        }
+                    }
+                    self.expect_punct(']')?;
+                }
+                Ok((
+                    InstKind::IndirectBr {
+                        address,
+                        destinations,
+                    },
+                    None,
+                ))
+            }
             "unreachable" => {
                 self.advance();
                 Ok((InstKind::Unreachable, None))
@@ -2049,24 +2666,369 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn canonicalize_shuffle_mask(&mut self, mask: Operand) -> Operand {
+        let OperandKind::Const(id) = mask.kind else {
+            return mask;
+        };
+        let ty = mask.ty;
+        let kind = self.module.constant(id).kind.clone();
+        match kind {
+            ConstKind::Undef => Operand::constant(ty, self.module.const_poison(ty)),
+            ConstKind::Aggregate(elems) => {
+                let mut changed = false;
+                let mut canonical = Vec::with_capacity(elems.len());
+                for elem in elems {
+                    let elem_ty = self.module.constant(elem).ty;
+                    if matches!(self.module.constant(elem).kind, ConstKind::Undef) {
+                        canonical.push(self.module.const_poison(elem_ty));
+                        changed = true;
+                    } else {
+                        canonical.push(elem);
+                    }
+                }
+                if changed {
+                    Operand::constant(ty, self.module.const_aggregate(ty, canonical))
+                } else {
+                    mask
+                }
+            }
+            _ => mask,
+        }
+    }
+
+    fn comparison_result_type(&mut self, ty: TypeId) -> TypeId {
+        let vector = match self.module.types.get(ty) {
+            Type::Vector { len, scalable, .. } => Some((*len, *scalable)),
+            _ => None,
+        };
+        let i1 = self.module.types.int(1);
+        match vector {
+            Some((len, scalable)) => self.module.types.vector(i1, len, scalable),
+            None => i1,
+        }
+    }
+
+    fn parse_syncscope(&mut self) -> Result<SyncScope> {
+        if !self.eat_ident("syncscope") {
+            return Ok(SyncScope::System);
+        }
+        self.expect_punct('(')?;
+        let name = self.expect_string()?;
+        self.expect_punct(')')?;
+        match name.as_str() {
+            "system" => Ok(SyncScope::System),
+            "singlethread" => Ok(SyncScope::SingleThread),
+            _ => Err(self.error(format!("unsupported syncscope `{name}`"))),
+        }
+    }
+
+    fn parse_atomic_ordering(&mut self) -> Result<AtomicOrdering> {
+        let text = self.expect_ident()?;
+        AtomicOrdering::parse(&text)
+            .ok_or_else(|| self.error(format!("unknown atomic ordering `{text}`")))
+    }
+
+    fn resolved_operand_type(&mut self, operand: Operand) -> TypeId {
+        match operand.kind {
+            OperandKind::Global(_) | OperandKind::Function(_) => self.module.types.pointer(),
+            _ => operand.ty,
+        }
+    }
+
+    fn require_operand_type(
+        &mut self,
+        operand: Operand,
+        written: TypeId,
+        what: &str,
+    ) -> Result<TypeId> {
+        let actual = self.resolved_operand_type(operand);
+        if actual != written {
+            return Err(self.error(format!("{what} type does not match the operand")));
+        }
+        Ok(actual)
+    }
+
+    fn parse_aggregate_indices(&mut self) -> Result<Vec<u32>> {
+        let mut indices = Vec::new();
+        loop {
+            self.skip_eol();
+            if !self.eat_punct(',') {
+                break;
+            }
+            self.skip_eol();
+            let index = self.expect_int()?;
+            indices.push(
+                u32::try_from(index).map_err(|_| self.error("aggregate index is out of range"))?,
+            );
+        }
+        if indices.is_empty() {
+            return Err(self.error("aggregate instruction requires at least one index"));
+        }
+        Ok(indices)
+    }
+
     fn parse_call(
         &mut self,
         function: &mut Function,
         tail: TailKind,
     ) -> Result<(InstKind, Option<TypeId>)> {
-        self.expect_ident_is("call")?;
+        let call = self.parse_call_common(function, "call")?;
+        let result_ty = if self.module.types.get(call.ret_ty).is_void() {
+            None
+        } else {
+            Some(call.ret_ty)
+        };
+        Ok((
+            InstKind::Call {
+                tail,
+                ret_ty: call.ret_ty,
+                fn_ty: call.fn_ty,
+                callee: call.callee,
+                args: call.args,
+                arg_attrs: call.arg_attrs,
+                fastmath: call.fastmath,
+                ret_attrs: call.ret_attrs.into(),
+                attrs: call.attrs.into(),
+            },
+            result_ty,
+        ))
+    }
+
+    fn parse_callbr(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        let call = self.parse_call_common(function, "callbr")?;
+        self.skip_eol();
+        self.expect_ident_is("to")?;
+        let default_dest = self.parse_block_ref(function)?;
+        self.expect_punct('[')?;
+        let mut indirect_dests = Vec::new();
+        if self.eat_punct(']') {
+            return Err(self.error("callbr requires at least one indirect destination"));
+        }
+        loop {
+            indirect_dests.push(self.parse_block_ref(function)?);
+            if !self.eat_punct(',') {
+                break;
+            }
+        }
+        self.expect_punct(']')?;
+        let result_ty = if self.module.types.get(call.ret_ty).is_void() {
+            None
+        } else {
+            Some(call.ret_ty)
+        };
+        Ok((
+            InstKind::CallBr {
+                ret_ty: call.ret_ty,
+                fn_ty: call.fn_ty,
+                callee: call.callee,
+                args: call.args,
+                arg_attrs: call.arg_attrs,
+                fastmath: call.fastmath,
+                ret_attrs: call.ret_attrs.into(),
+                attrs: call.attrs.into(),
+                default_dest,
+                indirect_dests,
+            },
+            result_ty,
+        ))
+    }
+
+    fn parse_invoke(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        let call = self.parse_call_common(function, "invoke")?;
+        self.skip_eol();
+        self.expect_ident_is("to")?;
+        let normal_dest = self.parse_block_ref(function)?;
+        self.skip_eol();
+        self.expect_ident_is("unwind")?;
+        let unwind_dest = self.parse_block_ref(function)?;
+        let result_ty = if self.module.types.get(call.ret_ty).is_void() {
+            None
+        } else {
+            Some(call.ret_ty)
+        };
+        Ok((
+            InstKind::Invoke {
+                ret_ty: call.ret_ty,
+                fn_ty: call.fn_ty,
+                callee: call.callee,
+                args: call.args,
+                arg_attrs: call.arg_attrs,
+                fastmath: call.fastmath,
+                ret_attrs: call.ret_attrs.into(),
+                attrs: call.attrs.into(),
+                normal_dest,
+                unwind_dest,
+            },
+            result_ty,
+        ))
+    }
+
+    fn parse_landingpad(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        let ty = self.parse_type()?;
+        self.skip_eol();
+        let cleanup = self.eat_ident("cleanup");
+        let mut clauses = Vec::new();
+        loop {
+            self.skip_eol();
+            let clause = if self.eat_ident("catch") {
+                LandingPadClause::Catch
+            } else if self.eat_ident("filter") {
+                LandingPadClause::Filter
+            } else {
+                break;
+            };
+            let clause_ty = self.parse_type()?;
+            let value = self.parse_value(function, clause_ty)?;
+            clauses.push((clause, value));
+        }
+        Ok((
+            InstKind::LandingPad {
+                ty,
+                cleanup,
+                clauses,
+            },
+            Some(ty),
+        ))
+    }
+
+    fn parse_parent_pad(&mut self, function: &mut Function) -> Result<Option<Operand>> {
+        self.skip_eol();
+        self.expect_ident_is("within")?;
+        self.skip_eol();
+        if self.eat_ident("none") {
+            return Ok(None);
+        }
+        let ty = self.module.types.intern(Type::Token);
+        Ok(Some(self.parse_value_forward(function, ty)?))
+    }
+
+    fn parse_unwind_dest(&mut self, function: &mut Function) -> Result<Option<BlockId>> {
+        self.skip_eol();
+        self.expect_ident_is("unwind")?;
+        self.skip_eol();
+        if self.eat_ident("to") {
+            self.skip_eol();
+            self.expect_ident_is("caller")?;
+            return Ok(None);
+        }
+        Ok(Some(self.parse_block_ref(function)?))
+    }
+
+    fn parse_catchswitch(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        let parent_pad = self.parse_parent_pad(function)?;
+        self.skip_eol();
+        self.expect_punct('[')?;
+        let mut handlers = Vec::new();
+        loop {
+            self.skip_eol();
+            if self.eat_punct(']') {
+                break;
+            }
+            handlers.push(self.parse_block_ref(function)?);
+            self.skip_eol();
+            if self.eat_punct(']') {
+                break;
+            }
+            self.expect_punct(',')?;
+        }
+        let unwind_dest = self.parse_unwind_dest(function)?;
+        let ty = self.module.types.intern(Type::Token);
+        Ok((
+            InstKind::CatchSwitch {
+                parent_pad,
+                handlers,
+                unwind_dest,
+            },
+            Some(ty),
+        ))
+    }
+
+    fn parse_pad_args(&mut self, function: &mut Function) -> Result<Vec<Operand>> {
+        self.skip_eol();
+        self.expect_punct('[')?;
+        let mut args = Vec::new();
+        loop {
+            self.skip_eol();
+            if self.eat_punct(']') {
+                break;
+            }
+            let ty = self.parse_type()?;
+            args.push(self.parse_value_forward(function, ty)?);
+            self.skip_eol();
+            if self.eat_punct(']') {
+                break;
+            }
+            self.expect_punct(',')?;
+        }
+        Ok(args)
+    }
+
+    fn parse_catchpad(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        let parent_pad = self.parse_parent_pad(function)?;
+        let args = self.parse_pad_args(function)?;
+        let ty = self.module.types.intern(Type::Token);
+        Ok((InstKind::CatchPad { parent_pad, args }, Some(ty)))
+    }
+
+    fn parse_cleanuppad(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        let parent_pad = self.parse_parent_pad(function)?;
+        let args = self.parse_pad_args(function)?;
+        let ty = self.module.types.intern(Type::Token);
+        Ok((InstKind::CleanupPad { parent_pad, args }, Some(ty)))
+    }
+
+    fn parse_catchret(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        self.skip_eol();
+        self.expect_ident_is("from")?;
+        let ty = self.module.types.intern(Type::Token);
+        let catch_pad = self.parse_value_forward(function, ty)?;
+        self.skip_eol();
+        self.expect_ident_is("to")?;
+        let successor = self.parse_block_ref(function)?;
+        Ok((
+            InstKind::CatchRet {
+                catch_pad,
+                successor,
+            },
+            None,
+        ))
+    }
+
+    fn parse_cleanupret(&mut self, function: &mut Function) -> Result<(InstKind, Option<TypeId>)> {
+        self.advance();
+        self.skip_eol();
+        self.expect_ident_is("from")?;
+        let ty = self.module.types.intern(Type::Token);
+        let cleanup_pad = self.parse_value_forward(function, ty)?;
+        let unwind_dest = self.parse_unwind_dest(function)?;
+        Ok((
+            InstKind::CleanupRet {
+                cleanup_pad,
+                unwind_dest,
+            },
+            None,
+        ))
+    }
+
+    fn parse_call_common(&mut self, function: &mut Function, mnemonic: &str) -> Result<ParsedCall> {
+        self.expect_ident_is(mnemonic)?;
         let fastmath = self.parse_fastmath()?;
         let mut attrs = Vec::new();
         if let TokenKind::Ident(text) = self.peek_kind() {
-            if text == "cc" {
+            if &**text == "cc" {
                 self.advance();
                 let value = self.expect_int()?;
                 attrs.push(Attribute(format!("cc {value}")));
             } else if matches!(
-                text.as_str(),
+                &**text,
                 "fastcc" | "coldcc" | "swiftcc" | "tailcc" | "preserve_mostcc" | "preserve_allcc"
             ) {
-                attrs.push(Attribute(text.clone()));
+                attrs.push(Attribute(text.to_string()));
                 self.advance();
             }
         }
@@ -2081,9 +3043,9 @@ impl<'a> Parser<'a> {
             }
         }
         let ty = self.parse_type()?;
-        let (ret_ty, _explicit_params) = match self.module.types.get(ty) {
-            Type::Function { ret, params, .. } => (*ret, Some(params.clone())),
-            _ => (ty, None),
+        let ret_ty = match self.module.types.get(ty) {
+            Type::Function { ret, .. } => *ret,
+            _ => ty,
         };
         let callee = self.parse_callee(function)?;
         self.expect_punct('(')?;
@@ -2101,11 +3063,6 @@ impl<'a> Parser<'a> {
         }
         self.expect_punct(')')?;
         self.parse_call_attrs(&mut attrs)?;
-        let result_ty = if self.module.types.get(ret_ty).is_void() {
-            None
-        } else {
-            Some(ret_ty)
-        };
         let fn_ty = if matches!(self.module.types.get(ty), Type::Function { .. }) {
             ty
         } else if let OperandKind::Function(id) = callee.kind {
@@ -2119,20 +3076,24 @@ impl<'a> Parser<'a> {
             let params = args.iter().map(|arg| arg.ty).collect();
             self.module.types.function(ret_ty, params, false)
         };
-        Ok((
-            InstKind::Call {
-                tail,
-                ret_ty,
-                fn_ty,
-                callee,
-                args,
-                arg_attrs: arg_attrs.into_iter().map(Arc::new).collect(),
-                fastmath,
-                ret_attrs: ret_attrs.into(),
-                attrs: attrs.into(),
-            },
-            result_ty,
-        ))
+        if let OperandKind::Const(id) = callee.kind {
+            if let ConstKind::InlineAsm {
+                fn_ty: asm_fn_ty, ..
+            } = &mut self.module.constants[id].kind
+            {
+                *asm_fn_ty = fn_ty;
+            }
+        }
+        Ok(ParsedCall {
+            fastmath,
+            attrs,
+            ret_attrs,
+            ret_ty,
+            fn_ty,
+            callee,
+            args,
+            arg_attrs: arg_attrs.into_iter().map(Arc::new).collect(),
+        })
     }
 
     fn parse_call_attrs(&mut self, attrs: &mut Vec<Attribute>) -> Result<()> {
@@ -2179,31 +3140,45 @@ impl<'a> Parser<'a> {
         Ok(Some(self.expect_int()? as u64))
     }
 
-    fn peek(&self) -> &Token {
-        &self.tokens[self.pos]
+    fn peek(&self) -> &Token<'a> {
+        self.tokens.front().expect("parser always keeps a token")
     }
 
-    fn peek_kind(&self) -> &TokenKind {
-        &self.tokens[self.pos].kind
+    fn peek_kind(&self) -> &TokenKind<'a> {
+        &self.peek().kind
     }
 
-    fn peek_kind_at(&self, offset: usize) -> &TokenKind {
-        self.tokens
-            .get(self.pos + offset)
-            .map(|token| &token.kind)
-            .unwrap_or(&self.tokens[self.tokens.len() - 1].kind)
-    }
-
-    fn advance(&mut self) {
-        if self.pos + 1 < self.tokens.len() {
-            self.pos += 1;
+    fn peek_kind_at(&self, offset: usize) -> &TokenKind<'a> {
+        match self.tokens.get(offset) {
+            Some(token) => &token.kind,
+            None => {
+                &self
+                    .tokens
+                    .back()
+                    .expect("parser always keeps a token")
+                    .kind
+            }
         }
     }
 
-    fn take(&mut self) -> Token {
-        let token = self.tokens[self.pos].clone();
-        self.advance();
-        token
+    fn advance(&mut self) {
+        if self.tokens.len() > 1 {
+            self.tokens.pop_front();
+        }
+        self.ensure(2);
+    }
+
+    fn take(&mut self) -> Token<'a> {
+        if self.tokens.len() > 1 {
+            let token = self
+                .tokens
+                .pop_front()
+                .expect("parser always keeps a token");
+            self.ensure(2);
+            token
+        } else {
+            self.peek().clone()
+        }
     }
 
     fn at_eol(&self) -> bool {
@@ -2219,7 +3194,7 @@ impl<'a> Parser<'a> {
     }
 
     fn at_ident(&self, text: &str) -> bool {
-        matches!(self.peek_kind(), TokenKind::Ident(found) if found == text)
+        matches!(self.peek_kind(), TokenKind::Ident(found) if &**found == text)
     }
 
     fn eat_punct(&mut self, ch: char) -> bool {
@@ -2258,32 +3233,35 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_ident(&mut self) -> Result<String> {
-        match self.peek_kind().clone() {
-            TokenKind::Ident(text) => {
-                self.advance();
-                Ok(text)
-            }
-            other => Err(self.error(format!("expected an identifier, found {other:?}"))),
+        let token = self.take();
+        match token.kind {
+            TokenKind::Ident(text) => Ok(text.into_owned()),
+            other => Err(Error::parse_at(
+                format!("expected an identifier, found {other:?}"),
+                token.span,
+            )),
         }
     }
 
     fn expect_ident_is(&mut self, expected: &str) -> Result<()> {
-        let text = self.expect_ident()?;
-        if text == expected {
-            Ok(())
-        } else {
-            Err(self.error(format!("expected `{expected}`, found `{text}`")))
+        if self.at_ident(expected) {
+            self.advance();
+            return Ok(());
         }
+        Err(self.error(format!(
+            "expected `{expected}`, found {:?}",
+            self.peek_kind()
+        )))
     }
 
-    fn expect_local(&mut self) -> Result<(String, Span)> {
-        match self.peek_kind().clone() {
-            TokenKind::Local(name) => {
-                let span = self.peek().span;
-                self.advance();
-                Ok((name, span))
-            }
-            other => Err(self.error(format!("expected a local name, found {other:?}"))),
+    fn expect_local(&mut self) -> Result<(Cow<'a, str>, Span)> {
+        let token = self.take();
+        match token.kind {
+            TokenKind::Local(name) => Ok((name, token.span)),
+            other => Err(Error::parse_at(
+                format!("expected a local name, found {other:?}"),
+                token.span,
+            )),
         }
     }
 
@@ -2344,25 +3322,25 @@ impl<'a> Parser<'a> {
         symbol
     }
 
-    fn expect_global(&mut self) -> Result<(String, Span, bool)> {
-        match self.peek_kind().clone() {
-            TokenKind::Global(name) => {
-                let span = self.peek().span;
-                let quoted = self.peek().quoted;
-                self.advance();
-                Ok((name, span, quoted))
-            }
-            other => Err(self.error(format!("expected a global name, found {other:?}"))),
+    fn expect_global(&mut self) -> Result<(Cow<'a, str>, Span, bool)> {
+        let token = self.take();
+        match token.kind {
+            TokenKind::Global(name) => Ok((name, token.span, token.quoted)),
+            other => Err(Error::parse_at(
+                format!("expected a global name, found {other:?}"),
+                token.span,
+            )),
         }
     }
 
     fn expect_int(&mut self) -> Result<u128> {
-        match self.peek_kind().clone() {
-            TokenKind::Int(value) => {
-                self.advance();
-                Ok(value)
-            }
-            other => Err(self.error(format!("expected an integer, found {other:?}"))),
+        let token = self.take();
+        match token.kind {
+            TokenKind::Int(value) => Ok(value),
+            other => Err(Error::parse_at(
+                format!("expected an integer, found {other:?}"),
+                token.span,
+            )),
         }
     }
 
@@ -2374,6 +3352,17 @@ impl<'a> Parser<'a> {
                     .map_err(|_| self.error("string literal is not valid UTF-8"))
             }
             other => Err(self.error(format!("expected a string, found {other:?}"))),
+        }
+    }
+
+    fn expect_string_bytes(&mut self) -> Result<Vec<u8>> {
+        let token = self.take();
+        match token.kind {
+            TokenKind::Str(bytes) => Ok(bytes),
+            other => Err(Error::parse_at(
+                format!("expected a string, found {other:?}"),
+                token.span,
+            )),
         }
     }
 
@@ -2425,7 +3414,10 @@ mod tests {
         let tokens = Lexer::new("attributes #0 = { nounwind }\n")
             .tokenize()
             .expect("lex");
-        assert_eq!(tokens[0].kind, TokenKind::Ident("attributes".to_string()));
+        assert_eq!(
+            tokens[0].kind,
+            TokenKind::Ident(Cow::Borrowed("attributes"))
+        );
         assert_eq!(tokens[1].kind, TokenKind::AttrGroup(0));
     }
 

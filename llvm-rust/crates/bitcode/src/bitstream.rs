@@ -4,7 +4,9 @@
 //! significant bit first. Records are either unabbreviated (a fixed layout) or
 //! described by a per-block abbreviation.
 
-use llvm_rust_support::{Error, Result};
+use std::sync::Arc;
+
+use llvm_rust_support::{Error, FastHashMap, Result};
 
 /// Raw bitcode magic, stored as the first little-endian word.
 pub const MAGIC: u32 = 0xDEC0_4342;
@@ -208,20 +210,38 @@ impl<'a> BitReader<'a> {
     }
 
     pub fn read_bits(&mut self, bits: u32) -> Result<u64> {
-        if bits == 0 || bits > 32 {
+        if bits > 32 {
             return Err(Error::bitcode("invalid bit width"));
+        }
+        if bits == 0 {
+            return Ok(0);
         }
         if self.bit + bits as usize > self.bytes.len() * 8 {
             return Err(Error::bitcode("unexpected end of bitstream"));
         }
-        let mut value = 0u64;
-        for i in 0..bits {
-            let byte = self.bytes[(self.bit + i as usize) / 8];
-            let bit = (byte >> ((self.bit + i as usize) % 8)) & 1;
-            value |= (bit as u64) << i;
+        let byte = self.bit / 8;
+        let offset = (self.bit % 8) as u32;
+        let needed = ((offset + bits) as usize).div_ceil(8);
+        let mut word = 0u64;
+        for index in 0..needed {
+            word |= (self.bytes[byte + index] as u64) << (index * 8);
         }
         self.bit += bits as usize;
-        Ok(value)
+        Ok((word >> offset) & ((1u64 << bits) - 1))
+    }
+
+    fn read_aligned_bytes(&mut self, len: usize) -> Result<&'a [u8]> {
+        debug_assert_eq!(self.bit % 8, 0);
+        let start = self.bit / 8;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| Error::bitcode("bitcode blob is too large"))?;
+        let bytes = self
+            .bytes
+            .get(start..end)
+            .ok_or_else(|| Error::bitcode("unexpected end of bitstream"))?;
+        self.bit += len * 8;
+        Ok(bytes)
     }
 
     pub fn read_vbr(&mut self, chunk_bits: u32) -> Result<u64> {
@@ -262,11 +282,121 @@ impl<'a> BitReader<'a> {
     }
 }
 
+const INLINE_OPERANDS: usize = 4;
+
+/// Record operands, keeping small records inline to avoid a heap allocation.
+#[derive(Clone, Debug)]
+pub struct Operands {
+    inline: [u64; INLINE_OPERANDS],
+    len: usize,
+    heap: Vec<u64>,
+}
+
+impl Operands {
+    pub fn new() -> Self {
+        Self {
+            inline: [0; INLINE_OPERANDS],
+            len: 0,
+            heap: Vec::new(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        let mut operands = Self::new();
+        if capacity > INLINE_OPERANDS {
+            operands.heap.reserve(capacity);
+        }
+        operands
+    }
+
+    pub fn clear(&mut self) {
+        self.len = 0;
+        self.heap.clear();
+    }
+
+    pub fn push(&mut self, value: u64) {
+        if self.heap.capacity() == 0 {
+            if self.len < INLINE_OPERANDS {
+                self.inline[self.len] = value;
+                self.len += 1;
+                return;
+            }
+            let mut heap = Vec::with_capacity(INLINE_OPERANDS * 2);
+            heap.extend_from_slice(&self.inline[..self.len]);
+            self.heap = heap;
+        }
+        self.heap.push(value);
+    }
+}
+
+impl Default for Operands {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl core::ops::Deref for Operands {
+    type Target = [u64];
+
+    fn deref(&self) -> &Self::Target {
+        if self.heap.capacity() == 0 {
+            &self.inline[..self.len]
+        } else {
+            &self.heap
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a Operands {
+    type Item = &'a u64;
+    type IntoIter = core::slice::Iter<'a, u64>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl Extend<u64> for Operands {
+    fn extend<T: IntoIterator<Item = u64>>(&mut self, iter: T) {
+        for value in iter {
+            self.push(value);
+        }
+    }
+}
+
+impl FromIterator<u64> for Operands {
+    fn from_iter<T: IntoIterator<Item = u64>>(iter: T) -> Self {
+        let mut operands = Operands::new();
+        for value in iter {
+            operands.push(value);
+        }
+        operands
+    }
+}
+
+impl PartialEq for Operands {
+    fn eq(&self, other: &Self) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for Operands {}
+
+impl From<Vec<u64>> for Operands {
+    fn from(values: Vec<u64>) -> Self {
+        let mut operands = Self::with_capacity(values.len());
+        for value in values {
+            operands.push(value);
+        }
+        operands
+    }
+}
+
 /// One decoded record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub code: u64,
-    pub operands: Vec<u64>,
+    pub operands: Operands,
     pub blob: Option<Vec<u8>>,
 }
 
@@ -315,8 +445,7 @@ pub struct Bitstream {
 impl Bitstream {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let mut reader = BitReader::new(bytes)?;
-        let mut blockinfo: std::collections::HashMap<u32, Vec<Abbrev>> =
-            std::collections::HashMap::new();
+        let mut blockinfo: FastHashMap<u32, Arc<Vec<Abbrev>>> = FastHashMap::default();
         let mut blocks = Vec::new();
         while !reader.at_end() {
             let abbrev = reader.read_bits(2)?;
@@ -338,20 +467,20 @@ impl Bitstream {
 
 fn parse_block(
     reader: &mut BitReader<'_>,
-    blockinfo: &mut std::collections::HashMap<u32, Vec<Abbrev>>,
+    blockinfo: &mut FastHashMap<u32, Arc<Vec<Abbrev>>>,
     _is_blockinfo: bool,
 ) -> Result<Block> {
     let id = reader.read_vbr(BLOCK_ID_WIDTH)? as u32;
     let is_blockinfo = id == 0;
     let code_len = reader.read_vbr(CODE_LEN_WIDTH)? as u32;
     reader.align32();
-    let _size = reader.read_u32()?;
+    let size = reader.read_u32()?;
     let mut abbrevs = if is_blockinfo {
-        Vec::new()
+        Arc::new(Vec::new())
     } else {
         blockinfo.get(&id).cloned().unwrap_or_default()
     };
-    let mut items = Vec::new();
+    let mut items = Vec::with_capacity((size as usize / 2).clamp(4, 4096));
     let mut current_blockinfo_id = None;
     loop {
         let abbrev = reader.read_bits(code_len)?;
@@ -368,10 +497,10 @@ fn parse_block(
                 let abbrev = read_abbrev(reader)?;
                 if is_blockinfo {
                     if let Some(bid) = current_blockinfo_id {
-                        blockinfo.entry(bid).or_default().push(abbrev);
+                        Arc::make_mut(blockinfo.entry(bid).or_default()).push(abbrev);
                     }
                 } else {
-                    abbrevs.push(abbrev);
+                    Arc::make_mut(&mut abbrevs).push(abbrev);
                 }
             }
             3 => {
@@ -387,9 +516,8 @@ fn parse_block(
                     .ok_or_else(|| Error::bitcode("invalid abbreviation id"))?;
                 let abbrev = abbrevs
                     .get(index)
-                    .ok_or_else(|| Error::bitcode("unknown abbreviation"))?
-                    .clone();
-                let record = read_abbreviated(reader, &abbrev)?;
+                    .ok_or_else(|| Error::bitcode("unknown abbreviation"))?;
+                let record = read_abbreviated(reader, abbrev)?;
                 items.push(Item::Record(record));
             }
         }
@@ -404,7 +532,7 @@ fn parse_block(
 fn read_unabbreviated(reader: &mut BitReader<'_>) -> Result<Record> {
     let code = reader.read_vbr(6)?;
     let count = reader.read_vbr(6)? as usize;
-    let mut operands = Vec::with_capacity(count);
+    let mut operands = Operands::with_capacity(count);
     for _ in 0..count {
         operands.push(reader.read_vbr(6)?);
     }
@@ -461,7 +589,7 @@ fn read_abbreviated(reader: &mut BitReader<'_>, abbrev: &Abbrev) -> Result<Recor
         AbbrevOp::Literal(value) => *value,
         other => decode_field(reader, other)?,
     };
-    let mut operands = Vec::new();
+    let mut operands = Operands::with_capacity(abbrev.ops.len());
     let mut blob = None;
     for op in ops {
         match op {
@@ -475,10 +603,7 @@ fn read_abbreviated(reader: &mut BitReader<'_>, abbrev: &Abbrev) -> Result<Recor
             AbbrevOp::Blob => {
                 let len = reader.read_vbr(6)? as usize;
                 reader.align32();
-                let mut bytes = Vec::with_capacity(len);
-                for _ in 0..len {
-                    bytes.push(reader.read_bits(8)? as u8);
-                }
+                let bytes = reader.read_aligned_bytes(len)?.to_vec();
                 reader.align32();
                 blob = Some(bytes);
             }
@@ -502,5 +627,19 @@ fn decode_field(reader: &mut BitReader<'_>, op: &AbbrevOp) -> Result<u64> {
             Ok(b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"[value] as u64)
         }
         AbbrevOp::Array(_) | AbbrevOp::Blob => Err(Error::bitcode("invalid scalar abbreviation")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_width_fields_decode_as_zero() {
+        let bytes = b"BC\xc0\xde\x00\x00\x00\x00";
+        let mut reader = BitReader::new(bytes).expect("bitcode header");
+        let bit = reader.bit;
+        assert_eq!(reader.read_bits(0).expect("zero width"), 0);
+        assert_eq!(reader.bit, bit);
     }
 }
