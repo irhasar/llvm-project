@@ -899,3 +899,153 @@ entry:
 "#;
     parse_module(source).expect_err("indirectbr address must be a pointer");
 }
+
+#[test]
+fn aliases_and_ifuncs() {
+    let source = r#"
+@target = global i32 7, align 4
+@arr = global [4 x i8] zeroinitializer, align 1
+@alias_int = alias i32, ptr @target
+@weak_alias = weak alias i32, ptr @target
+@hidden_alias = hidden alias i32, ptr @target
+@gep_alias = alias i8, getelementptr ([4 x i8], ptr @arr, i64 0, i64 2)
+@tls_alias = thread_local(initialexec) alias i32, ptr @target
+
+define void @f() {
+  ret void
+}
+
+@alias_fn = alias void (), ptr @f
+@foo = thread_local ifunc i32 (), ptr @resolver
+
+define ptr @resolver() {
+  ret ptr @impl
+}
+
+define i32 @impl() {
+  ret i32 7
+}
+"#;
+    let printed = roundtrip(source);
+    let globals = printed.find("@target = global").expect("global");
+    let aliases = printed.find("@alias_int = alias").expect("alias");
+    let functions = printed.find("define void @f").expect("function");
+    assert!(globals < aliases && aliases < functions);
+    assert!(printed.contains("@weak_alias = weak alias i32, ptr @target"));
+    assert!(printed.contains("@hidden_alias = hidden alias i32, ptr @target"));
+    assert!(
+        printed.contains("@gep_alias = alias i8, getelementptr ([4 x i8], ptr @arr, i64 0, i64 2)")
+    );
+    assert!(printed.contains("@tls_alias = thread_local(initialexec) alias i32, ptr @target"));
+    assert!(printed.contains("@alias_fn = alias void (), ptr @f"));
+    assert!(printed.contains("@foo = ifunc i32 (), ptr @resolver"));
+}
+
+#[test]
+fn verifier_rejects_alias_to_declaration() {
+    let source = r#"
+@target = external global i32
+@alias_int = alias i32, ptr @target
+"#;
+    let module = parse_module(source).expect("parse alias");
+    verify_module(&module).expect_err("alias to a declaration must fail verification");
+}
+
+#[test]
+fn verifier_rejects_alias_without_target() {
+    let source = r#"
+@alias_int = alias i32, ptr @missing
+"#;
+    let module = parse_module(source).expect("parse alias");
+    verify_module(&module).expect_err("alias to a missing target must fail verification");
+}
+
+#[test]
+fn verifier_checks_ifunc_resolvers() {
+    let bad_return = r#"
+define i32 @resolver() {
+  ret i32 0
+}
+
+@foo = ifunc i32 (), ptr @resolver
+"#;
+    let module = parse_module(bad_return).expect("parse ifunc");
+    let errors = verify_module(&module).expect_err("resolver must return a pointer");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("return a pointer"))
+    );
+
+    let bad_resolver = r#"
+@g = global i32 1
+@foo = ifunc i32 (), ptr @g
+"#;
+    let module = parse_module(bad_resolver).expect("parse ifunc");
+    let errors = verify_module(&module).expect_err("resolver must be a function");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("function resolver"))
+    );
+
+    let declaration = r#"
+declare ptr @resolver()
+
+@foo = ifunc i32 (), ptr @resolver
+"#;
+    let module = parse_module(declaration).expect("parse ifunc");
+    let errors = verify_module(&module).expect_err("resolver must be defined");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("must be a definition"))
+    );
+
+    let through_alias = r#"
+define ptr @impl() {
+  ret ptr null
+}
+
+@resolver = alias ptr (), ptr @impl
+@foo = ifunc i32 (), ptr @resolver
+"#;
+    let module = parse_module(through_alias).expect("parse ifunc alias resolver");
+    verify_module(&module).expect("alias resolver should verify");
+}
+
+#[test]
+fn verifier_checks_alias_linkage_and_interposition() {
+    let interposable = r#"
+@g = global i32 1
+@first = alias i32, ptr @g
+@second = alias i32, ptr @first
+"#;
+    let module = parse_module(interposable).expect("parse aliases");
+    let errors = verify_module(&module).expect_err("alias to an interposable alias must fail");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("interposable alias"))
+    );
+
+    let hidden_target = r#"
+@g = global i32 1
+@first = hidden alias i32, ptr @g
+@second = alias i32, ptr @first
+"#;
+    let module = parse_module(hidden_target).expect("parse aliases");
+    verify_module(&module).expect("hidden alias target is not interposable");
+
+    let common = r#"
+@g = global i32 1
+@a = common alias i32, ptr @g
+"#;
+    let module = parse_module(common).expect("parse alias");
+    let errors = verify_module(&module).expect_err("common alias linkage must fail");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.to_string().contains("invalid linkage"))
+    );
+}

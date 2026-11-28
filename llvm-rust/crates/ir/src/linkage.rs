@@ -73,6 +73,11 @@ impl Visibility {
         }
     }
 
+    /// Hidden and protected symbols are dso_local even without the keyword.
+    pub const fn implies_dso_local(self) -> bool {
+        matches!(self, Self::Hidden | Self::Protected)
+    }
+
     /// Parses a visibility keyword.
     pub fn parse(text: &str) -> Option<Self> {
         Some(match text {

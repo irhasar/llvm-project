@@ -2,7 +2,7 @@
 
 use llvm_rust_ir::{
     Attribute, BinOp, BlockId, CastOp, ConstExpr, ConstId, ConstKind, FastMath, FcmpPred, FuncId,
-    Function, GlobalId, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand,
+    Function, GlobalId, GlobalKind, IcmpPred, InstId, InstKind, IntFlags, Linkage, Module, Operand,
     OperandKind, TailKind, Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, FastHashMap, Result};
@@ -32,6 +32,8 @@ const MODULE_DATALAYOUT: u32 = 3;
 const MODULE_SECTIONNAME: u32 = 5;
 const MODULE_GLOBALVAR: u32 = 7;
 const MODULE_FUNCTION: u32 = 8;
+const MODULE_ALIAS: u32 = 14;
+const MODULE_IFUNC: u32 = 18;
 const MODULE_SOURCE_FILENAME: u32 = 16;
 
 const TYPE_NUMENTRY: u32 = 1;
@@ -249,14 +251,25 @@ impl<'a> Writer<'a> {
             type_ids[id as usize] = index as u32;
         }
         let global_ids: Vec<GlobalId> = module.ordered_globals().into_iter().collect();
+        let function_ids: Vec<FuncId> = module.ordered_functions().into_iter().collect();
+        let alias_ids: Vec<GlobalId> = module.ordered_aliases().into_iter().collect();
+        let ifunc_ids: Vec<GlobalId> = module.ordered_ifuncs().into_iter().collect();
         let mut globals = vec![u32::MAX; module.globals.len()];
         for (index, id) in global_ids.iter().enumerate() {
             globals[id.index()] = index as u32;
         }
-        let function_ids: Vec<FuncId> = module.ordered_functions().into_iter().collect();
+        let function_base = global_ids.len() as u32;
         let mut functions = vec![u32::MAX; module.functions.len()];
         for (index, id) in function_ids.iter().enumerate() {
-            functions[id.index()] = global_ids.len() as u32 + index as u32;
+            functions[id.index()] = function_base + index as u32;
+        }
+        let alias_base = function_base + function_ids.len() as u32;
+        for (index, id) in alias_ids.iter().enumerate() {
+            globals[id.index()] = alias_base + index as u32;
+        }
+        let ifunc_base = alias_base + alias_ids.len() as u32;
+        for (index, id) in ifunc_ids.iter().enumerate() {
+            globals[id.index()] = ifunc_base + index as u32;
         }
         let mut constants = Vec::new();
         for (id, constant) in module.constants.iter() {
@@ -264,7 +277,7 @@ impl<'a> Writer<'a> {
                 constants.push(id);
             }
         }
-        let base_const = global_ids.len() as u32 + function_ids.len() as u32;
+        let base_const = ifunc_base + ifunc_ids.len() as u32;
         let mut const_ids = vec![u32::MAX; module.constants.len()];
         for (index, id) in constants.iter().enumerate() {
             const_ids[id.index()] = base_const + index as u32;
@@ -304,6 +317,18 @@ impl<'a> Writer<'a> {
             let function = &module.functions[id];
             if !module.is_unnamed_function(id) {
                 intern_string(&mut strtab, &mut str_offsets, module.name(function.name));
+            }
+        }
+        for id in module.ordered_aliases() {
+            let alias = &module.globals[id];
+            if !module.is_unnamed_global(id) {
+                intern_string(&mut strtab, &mut str_offsets, module.name(alias.name));
+            }
+        }
+        for id in module.ordered_ifuncs() {
+            let ifunc = &module.globals[id];
+            if !module.is_unnamed_global(id) {
+                intern_string(&mut strtab, &mut str_offsets, module.name(ifunc.name));
             }
         }
         let mut sections = Vec::new();
@@ -368,6 +393,7 @@ impl<'a> Writer<'a> {
         self.write_sections();
         self.write_globals()?;
         self.write_functions()?;
+        self.write_aliases()?;
         self.write_constants()?;
         self.write_bodies()?;
         self.stream.exit_block();
@@ -763,6 +789,54 @@ impl<'a> Writer<'a> {
                 0,
             ];
             self.stream.emit_record(MODULE_GLOBALVAR, &operands);
+        }
+        Ok(())
+    }
+
+    fn write_aliases(&mut self) -> Result<()> {
+        let ids = self
+            .module
+            .ordered_aliases()
+            .into_iter()
+            .chain(self.module.ordered_ifuncs());
+        for alias_id in ids {
+            let alias = self.module.globals[alias_id].clone();
+            let name = self.module.name(alias.name).to_string();
+            let (name_offset, name_len) = if self.module.is_unnamed_global(alias_id) {
+                (0, 0)
+            } else {
+                (self.add_string(&name) as u64, name.len() as u64)
+            };
+            let type_id = self.type_index(alias.ty)? as u64;
+            let aliasee = match alias.init {
+                Some(init) => self.const_value_id(init)? as u64,
+                None => return Err(Error::bitcode("alias is missing its target")),
+            };
+            let ifunc = alias.kind == GlobalKind::IFunc;
+            let mut operands = vec![
+                name_offset,
+                name_len,
+                type_id,
+                0,
+                aliasee,
+                linkage_code(alias.linkage) as u64,
+                visibility_code(alias.visibility) as u64,
+            ];
+            if ifunc {
+                operands.push(alias.dso_local as u64);
+                operands.extend([0, 0]);
+            } else {
+                operands.extend([
+                    0,
+                    alias.tls_model.bitcode_code(),
+                    unnamed_addr_code(alias.unnamed_addr, alias.local_unnamed_addr),
+                    alias.dso_local as u64,
+                    0,
+                    0,
+                ]);
+            }
+            let code = if ifunc { MODULE_IFUNC } else { MODULE_ALIAS };
+            self.stream.emit_record(code, &operands);
         }
         Ok(())
     }

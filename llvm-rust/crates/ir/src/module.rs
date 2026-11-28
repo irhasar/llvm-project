@@ -14,11 +14,30 @@ use crate::value::{Operand, OperandKind};
 /// Handle to a global variable.
 pub type GlobalId = Idx<Global>;
 
-/// A global variable or constant definition.
+/// The kind of a module-level global value.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GlobalKind {
+    #[default]
+    Variable,
+    Alias,
+    IFunc,
+}
+
+impl GlobalKind {
+    pub const fn is_alias(self) -> bool {
+        matches!(self, Self::Alias | Self::IFunc)
+    }
+}
+
+/// A global variable, alias, or ifunc definition.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Global {
     pub name: Symbol,
+    pub kind: GlobalKind,
+    /// Value type. For aliases and ifuncs this is the aliased value type, not
+    /// the pointer type stored in `init`.
     pub ty: TypeId,
+    /// Initializer for a variable, or the aliasee/resolver for an alias/ifunc.
     pub init: Option<ConstId>,
     pub linkage: Linkage,
     pub visibility: Visibility,
@@ -139,6 +158,7 @@ impl Module {
         }
         let id = self.globals.alloc(Global {
             name,
+            kind: GlobalKind::Variable,
             ty: INVALID_TYPE,
             init: None,
             linkage: Linkage::External,
@@ -342,7 +362,7 @@ impl Module {
         self.unnamed_functions.contains(&id)
     }
 
-    /// Returns the emitted slot number for an unnamed global.
+    /// Returns the emitted slot number for an unnamed global or alias.
     pub fn unnamed_global_slot(&self, id: GlobalId) -> Option<u32> {
         if let Some(slot) = self.unnamed_global_slots.get(&id) {
             return Some(*slot);
@@ -354,6 +374,22 @@ impl Module {
         for global in self.ordered_globals() {
             if self.is_unnamed_global(global) {
                 if global == id {
+                    return Some(slot);
+                }
+                slot += 1;
+            }
+        }
+        for alias in self.ordered_aliases() {
+            if self.is_unnamed_global(alias) {
+                if alias == id {
+                    return Some(slot);
+                }
+                slot += 1;
+            }
+        }
+        for ifunc in self.ordered_ifuncs() {
+            if self.is_unnamed_global(ifunc) {
+                if ifunc == id {
                     return Some(slot);
                 }
                 slot += 1;
@@ -373,6 +409,8 @@ impl Module {
         let mut slot = self
             .ordered_globals()
             .into_iter()
+            .chain(self.ordered_aliases())
+            .chain(self.ordered_ifuncs())
             .filter(|global| self.is_unnamed_global(*global))
             .count() as u32;
         for function in self.ordered_functions() {
@@ -392,7 +430,7 @@ impl Module {
     }
 
     /// Assigns unnamed slots in the order the printer and bitcode writer emit
-    /// definitions: all globals first, then all functions.
+    /// definitions: variables, aliases, ifuncs, then functions.
     pub fn assign_unnamed_slots(&mut self) {
         self.unnamed_global_slots.clear();
         self.unnamed_function_slots.clear();
@@ -401,6 +439,18 @@ impl Module {
         }
         let mut slot = 0;
         for id in self.ordered_globals() {
+            if self.is_unnamed_global(id) {
+                self.unnamed_global_slots.insert(id, slot);
+                slot += 1;
+            }
+        }
+        for id in self.ordered_aliases() {
+            if self.is_unnamed_global(id) {
+                self.unnamed_global_slots.insert(id, slot);
+                slot += 1;
+            }
+        }
+        for id in self.ordered_ifuncs() {
             if self.is_unnamed_global(id) {
                 self.unnamed_global_slots.insert(id, slot);
                 slot += 1;
@@ -434,13 +484,35 @@ impl Module {
         }
     }
 
-    /// Globals in definition order, skipping unresolved placeholders.
+    /// Global variables in definition order, skipping unresolved placeholders.
     pub fn ordered_globals(&self) -> Vec<GlobalId> {
         let mut ids = Vec::with_capacity(self.globals.len());
         ids.extend(
             self.globals
                 .iter()
-                .filter(|(_, global)| self.types.is_valid(global.ty))
+                .filter(|(_, global)| !global.kind.is_alias() && self.types.is_valid(global.ty))
+                .map(|(id, _)| id),
+        );
+        ids.sort_unstable_by_key(|id| self.global_order.get(id).copied().unwrap_or(u32::MAX));
+        ids
+    }
+
+    /// Aliases in definition order, skipping unresolved placeholders.
+    pub fn ordered_aliases(&self) -> Vec<GlobalId> {
+        self.ordered_globals_of(GlobalKind::Alias)
+    }
+
+    /// IFuncs in definition order, skipping unresolved placeholders.
+    pub fn ordered_ifuncs(&self) -> Vec<GlobalId> {
+        self.ordered_globals_of(GlobalKind::IFunc)
+    }
+
+    fn ordered_globals_of(&self, kind: GlobalKind) -> Vec<GlobalId> {
+        let mut ids = Vec::with_capacity(self.globals.len());
+        ids.extend(
+            self.globals
+                .iter()
+                .filter(|(_, global)| global.kind == kind && self.types.is_valid(global.ty))
                 .map(|(id, _)| id),
         );
         ids.sort_unstable_by_key(|id| self.global_order.get(id).copied().unwrap_or(u32::MAX));
@@ -630,6 +702,7 @@ mod tests {
         let global_name = module.intern("\0unnamed1");
         let global = Global {
             name: global_name,
+            kind: GlobalKind::Variable,
             ty: i32_ty,
             init: None,
             linkage: Linkage::External,
@@ -652,6 +725,7 @@ mod tests {
         let named_name = module.intern("named");
         let named = Global {
             name: named_name,
+            kind: GlobalKind::Variable,
             ty: i32_ty,
             init: None,
             linkage: Linkage::External,

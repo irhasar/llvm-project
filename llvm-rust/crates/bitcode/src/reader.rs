@@ -6,9 +6,9 @@ use std::sync::Arc;
 use llvm_rust_ir::ty::INVALID_TYPE;
 use llvm_rust_ir::{
     AtomicOrdering, AtomicRmwOp, Attribute, BinOp, BlockId, CastOp, ConstExpr, ConstId, ConstKind,
-    Constant, FastMath, FcmpPred, FuncId, Function, GepIndex, Global, GlobalId, IcmpPred, InstId,
-    InstKind, IntFlags, LandingPadClause, Linkage, Module, Operand, OperandKind, SyncScope,
-    TailKind, ThreadLocal, Type, TypeId, Visibility,
+    Constant, FastMath, FcmpPred, FuncId, Function, GepIndex, Global, GlobalId, GlobalKind,
+    IcmpPred, InstId, InstKind, IntFlags, LandingPadClause, Linkage, Module, Operand, OperandKind,
+    SyncScope, TailKind, ThreadLocal, Type, TypeId, Visibility,
 };
 use llvm_rust_support::{Error, FastHashMap, Result, Symbol};
 
@@ -33,7 +33,9 @@ const MODULE_DATALAYOUT: u64 = 3;
 const MODULE_SECTIONNAME: u64 = 5;
 const MODULE_GLOBALVAR: u64 = 7;
 const MODULE_FUNCTION: u64 = 8;
+const MODULE_ALIAS: u64 = 14;
 const MODULE_SOURCE_FILENAME: u64 = 16;
+const MODULE_IFUNC: u64 = 18;
 
 const TYPE_VOID: u64 = 2;
 const TYPE_FLOAT: u64 = 3;
@@ -258,6 +260,7 @@ impl Reader {
                     }
                     MODULE_GLOBALVAR => self.read_global(record)?,
                     MODULE_FUNCTION => self.read_function(record)?,
+                    MODULE_ALIAS | MODULE_IFUNC => self.read_alias(record)?,
                     _ => {}
                 },
                 Item::Block(child) => match child.id {
@@ -505,6 +508,7 @@ impl Reader {
             id,
             Global {
                 name: symbol,
+                kind: GlobalKind::Variable,
                 ty,
                 init: None,
                 linkage,
@@ -525,6 +529,75 @@ impl Reader {
         if init != 0 {
             self.pending_globals.push((id, (init - 1) as u32));
         }
+        Ok(())
+    }
+
+    fn read_alias(&mut self, record: &Record) -> Result<()> {
+        let name = self.name_from(
+            record.operands.first().copied().unwrap_or(0),
+            record.operands.get(1).copied().unwrap_or(0),
+        )?;
+        let unnamed = name.is_empty();
+        let name = if unnamed { self.unnamed_name() } else { name };
+        let ty = self.type_at(record.operands.get(2).copied().unwrap_or(0))?;
+        if record.operands.get(3).copied().unwrap_or(0) != 0 {
+            return Err(Error::bitcode(
+                "nonzero alias address spaces are not supported",
+            ));
+        }
+        let aliasee = record.operands.get(4).copied().unwrap_or(0);
+        let linkage = decode_linkage(record.operands.get(5).copied().unwrap_or(0));
+        let visibility = decode_visibility(record.operands.get(6).copied().unwrap_or(0));
+        let ifunc = record.code == MODULE_IFUNC;
+        // IFUNCs encode DSO locality where aliases put the DLL storage class,
+        // and have no thread-local or unnamed-address fields.
+        let tls_model = if ifunc {
+            ThreadLocal::None
+        } else {
+            ThreadLocal::from_bitcode(record.operands.get(8).copied().unwrap_or(0))
+        };
+        let unnamed_code = if ifunc {
+            0
+        } else {
+            record.operands.get(9).copied().unwrap_or(0)
+        };
+        let unnamed_addr = unnamed_code == 1;
+        let local_unnamed_addr = unnamed_code == 2;
+        let dso_local = record
+            .operands
+            .get(if ifunc { 7 } else { 10 })
+            .copied()
+            .unwrap_or(0)
+            != 0;
+        let symbol = self.module.intern(&name);
+        let id = self.module.global_or_insert(symbol);
+        self.module.define_global(
+            id,
+            Global {
+                name: symbol,
+                kind: if record.code == MODULE_IFUNC {
+                    GlobalKind::IFunc
+                } else {
+                    GlobalKind::Alias
+                },
+                ty,
+                init: None,
+                linkage,
+                visibility,
+                is_const: false,
+                tls_model,
+                unnamed_addr,
+                local_unnamed_addr,
+                dso_local,
+                align: None,
+                section: None,
+            },
+        );
+        if unnamed {
+            self.module.mark_unnamed_global(id);
+        }
+        self.values.push(ValueRef::Global(id));
+        self.pending_globals.push((id, aliasee as u32));
         Ok(())
     }
 

@@ -58,8 +58,12 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   numbering sequence, and `phi` accepts forward and self references.
   `local_unnamed_addr` and `unnamed_addr` are distinct on globals and
   functions. Forward global/function constants and instruction operands are
-  resolved after parsing, and globals/functions are emitted in definition
-  order. Empty and unquoted numeric symbol names are canonicalized to LLVM
+  resolved after parsing. Globals, aliases, ifuncs, and functions are emitted
+  in definition order within their group; the module printer and bitcode
+  writer use LLVM's variable, alias, ifunc, then function ordering. Aliases
+  and ifuncs accept weak/hidden/protected linkage and visibility, and
+  constant-expression aliasees print without a redundant pointer type.
+  Empty and unquoted numeric symbol names are canonicalized to LLVM
   unnamed slots (`@0`, `@1`, ...); quoted numeric names such as `@"0"` stay
   named, and slots are renumbered in the printer's global-then-function
   emission order. Nonzero global and pointer address spaces are rejected
@@ -68,11 +72,11 @@ The M1 spike is implemented and differential-tested against LLVM 19.1.7.
   return signed zero instead of shifting by more than 63 bits.
 - `bitcode`: LLVM bitstream writer and reader covering the module, type,
   constants, function, value-symbol-table, string-table, and
-  `PARAMATTR`/`PARAMATTR_GROUP` blocks. The reader handles abbreviations and
-  block-info abbreviations emitted by LLVM 19. The writer deduplicates
-  attribute groups and lists. The reader interns a default pointer type when
-  the on-disk type table has none, so direct calls do not require a pointer
-  type record.
+  `PARAMATTR`/`PARAMATTR_GROUP` blocks, including `ALIAS` and `IFUNC` records.
+  The reader handles abbreviations and block-info abbreviations emitted by
+  LLVM 19. The writer deduplicates attribute groups and lists. The reader
+  interns a default pointer type when the on-disk type table has none, so
+  direct calls do not require a pointer type record.
 - `bitcode` attributes: return, parameter, function, call-site, and
   argument-indexed call-site attributes; `#N` group references; common enum
   attributes (`noundef`, `signext`, `zeroext`, `nonnull`, `noalias`, `inreg`,
@@ -214,7 +218,9 @@ and multiple-group alignment, type attributes with quoted names, raw
 non-UTF-8 attribute strings, parameter memory attributes, argument-indexed
 call-site attributes,
 `local_unnamed_addr`, forward references in constants and instructions,
-UTF-8 section names, unnamed globals/functions, explicit quoted numeric
+UTF-8 section names, aliases with weak/hidden visibility and
+constant-expression aliasees, ifuncs with DSO locality, mixed alias/ifunc
+ordering, unnamed globals/functions, explicit quoted numeric
 global/function names, unnamed/global slot ordering, unnamed/name collisions,
 forward numbered references that must not consume definition slots, direct
 calls without pointer type records, repeated function memory effects,

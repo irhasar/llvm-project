@@ -24,7 +24,7 @@ pub use inst::{
     InstId, InstKind, Instruction, IntFlags, LandingPadClause, SyncScope, TailKind, UnOp,
 };
 pub use linkage::{Linkage, Visibility};
-pub use module::{Global, GlobalId, Module, ThreadLocal};
+pub use module::{Global, GlobalId, GlobalKind, Module, ThreadLocal};
 pub use parser::{ParseError, parse_module};
 pub use print::print_module;
 pub use ty::{FloatKind, Type, TypeId, TypeTable};

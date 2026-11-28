@@ -9,7 +9,7 @@ use crate::inst::{
     Attribute, FastMath, InstKind, Instruction, IntFlags, LandingPadClause, TailKind,
 };
 use crate::linkage::{Linkage, Visibility};
-use crate::module::{Global, GlobalId, Module};
+use crate::module::{Global, GlobalId, GlobalKind, Module};
 use crate::names::{quote_name, write_name, write_quoted_bytes};
 use crate::ty::{FloatKind, Type, TypeId};
 use crate::value::{Operand, OperandKind};
@@ -70,10 +70,25 @@ pub fn print_module(module: &Module) -> String {
         out.push('\n');
     }
 
-    for id in module.ordered_globals() {
-        print_global(module, id, &module.globals[id], &mut out);
+    let globals = module.ordered_globals();
+    for id in &globals {
+        print_global(module, *id, &module.globals[*id], &mut out);
     }
-    if !module.globals.is_empty() {
+    let aliases = module.ordered_aliases();
+    if !globals.is_empty() && !aliases.is_empty() {
+        out.push('\n');
+    }
+    for id in &aliases {
+        print_global(module, *id, &module.globals[*id], &mut out);
+    }
+    let ifuncs = module.ordered_ifuncs();
+    if !aliases.is_empty() && !ifuncs.is_empty() {
+        out.push('\n');
+    }
+    for id in &ifuncs {
+        print_global(module, *id, &module.globals[*id], &mut out);
+    }
+    if !globals.is_empty() || !aliases.is_empty() || !ifuncs.is_empty() {
         out.push('\n');
     }
 
@@ -153,7 +168,7 @@ fn print_global(module: &Module, id: GlobalId, global: &Global, out: &mut String
     if global.visibility != Visibility::Default {
         let _ = write!(out, "{} ", global.visibility.as_str());
     }
-    if global.dso_local {
+    if global.dso_local && !global.visibility.implies_dso_local() {
         out.push_str("dso_local ");
     }
     if global.tls_model.is_thread_local() {
@@ -163,6 +178,24 @@ fn print_global(module: &Module, id: GlobalId, global: &Global, out: &mut String
         out.push_str("local_unnamed_addr ");
     } else if global.unnamed_addr {
         out.push_str("unnamed_addr ");
+    }
+    if global.kind.is_alias() {
+        out.push_str(if global.kind == GlobalKind::IFunc {
+            "ifunc "
+        } else {
+            "alias "
+        });
+        let _ = write!(out, "{}", module.display_type(global.ty));
+        if let Some(init) = global.init {
+            let aliasee = module.constant(init);
+            out.push_str(", ");
+            if !matches!(aliasee.kind, ConstKind::Expr(_)) {
+                let _ = write!(out, "{} ", module.display_type(aliasee.ty));
+            }
+            write_constant(module, init, out);
+        }
+        out.push('\n');
+        return;
     }
     if global.init.is_none() && global.linkage == Linkage::External {
         out.push_str("external ");
@@ -202,7 +235,7 @@ fn print_function(module: &Module, id: FuncId, function: &Function, out: &mut St
     if function.visibility != Visibility::Default {
         let _ = write!(out, "{} ", function.visibility.as_str());
     }
-    if function.dso_local {
+    if function.dso_local && !function.visibility.implies_dso_local() {
         out.push_str("dso_local ");
     }
     for attr in function.ret_attrs.iter() {

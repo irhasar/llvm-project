@@ -335,6 +335,23 @@ the ratio while per-byte work improved. A naive 64-bit load fast path in
 `BitReader::read_bits` was measured slower than the byte loop; do not replace
 the loop without a component-level win.
 
+Alias and ifunc lesson: LLVM orders global values as variables, functions,
+aliases, then ifuncs, and the printer groups them the same way. The ALIAS
+record carries thirteen operands (including thread-local, unnamed-address, and
+DSO fields); the IFUNC record carries only ten and puts DSO locality where an
+alias has the DLL storage class, so sharing one decoder reads an ifunc as
+thread-local. Hidden and protected visibility imply `dso_local` in bitcode, but
+the printer suppresses the redundant keyword; the parser now sets the flag
+implicitly so a Rust-written module matches the C++ record. Constant-expression
+aliasees are self-typed in text, so the printer omits the pointer type and the
+parser must accept that form.
+
+Post-alias check: on a 261,725-byte mixed corpus with 200 functions (11 runs,
+3 warmups, `taskset -c 0`), assembly was 26.5 ms C++ / 8.1 ms Rust and
+disassembly 23.0 ms / 7.9 ms, with peak RSS 54.1/15.2 MiB and 53.5/15.2 MiB.
+Rust is 3.3x faster at assembly and 2.9x at disassembly with 3.6x less memory;
+alias support did not regress the existing path.
+
 Before merging a performance change: capture the component baseline, make the
 change, run `cargo test --workspace` and `tests/differential.sh`, rerun the
 11-run/3-warmup benchmark, compare median and peak RSS, and keep the change

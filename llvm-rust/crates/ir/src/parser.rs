@@ -18,7 +18,7 @@ use crate::inst::{
     InstKind, Instruction, IntFlags, LandingPadClause, SyncScope, TailKind,
 };
 use crate::linkage::{Linkage, Visibility};
-use crate::module::{Global, Module, ThreadLocal};
+use crate::module::{Global, GlobalKind, Module, ThreadLocal};
 use crate::names::quote_bytes;
 use crate::ty::{FloatKind, INVALID_TYPE, Type, TypeId};
 use crate::value::{Operand, OperandKind};
@@ -825,6 +825,7 @@ impl<'a> Parser<'a> {
         let mut unnamed_addr = false;
         let mut local_unnamed_addr = false;
         let mut is_const = false;
+        let mut kind = GlobalKind::Variable;
         let mut saw_kind = false;
         loop {
             let text = match self.peek_kind() {
@@ -895,17 +896,48 @@ impl<'a> Parser<'a> {
                     self.advance();
                     break;
                 }
+                "alias" => {
+                    kind = GlobalKind::Alias;
+                    saw_kind = true;
+                    self.advance();
+                    break;
+                }
+                "ifunc" => {
+                    kind = GlobalKind::IFunc;
+                    saw_kind = true;
+                    self.advance();
+                    break;
+                }
                 _ => break,
             }
         }
         if !saw_kind {
-            return Err(self.error("expected `global` or `constant` in global definition"));
+            return Err(self
+                .error("expected `global`, `constant`, `alias`, or `ifunc` in global definition"));
         }
-        let ty = self.parse_type()?;
-        let init = if self.at_eol() || self.at_punct(',') || self.at_eof() {
-            None
+        let (ty, init) = if kind.is_alias() {
+            let value_ty = self.parse_type()?;
+            self.expect_punct(',')?;
+            // Constant expressions are self-typed in this position; LLVM omits
+            // the pointer type before them.
+            let aliasee_ty = if self.at_type_start() {
+                self.parse_type()?
+            } else {
+                self.module.types.pointer()
+            };
+            if !matches!(self.module.types.get(aliasee_ty), Type::Pointer) {
+                return Err(self.error("alias and ifunc targets must have pointer type"));
+            }
+            let aliasee = self.parse_constant(aliasee_ty)?;
+            (value_ty, Some(aliasee))
         } else {
-            Some(self.parse_constant(ty)?)
+            let ty = self.parse_type()?;
+            let init = if self.at_eol() || self.at_punct(',') || self.at_eof() {
+                None
+            } else {
+                Some(self.parse_constant(ty)?)
+            };
+            (ty, init)
         };
         let mut align = None;
         let mut section = None;
@@ -932,8 +964,13 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect_eol()?;
+        dso_local |= visibility.implies_dso_local();
+        if kind == GlobalKind::IFunc {
+            tls_model = ThreadLocal::None;
+        }
         let global = Global {
             name: symbol,
+            kind,
             ty,
             init,
             linkage,
@@ -1009,7 +1046,7 @@ impl<'a> Parser<'a> {
         let mut function = Function::new(symbol, 0);
         function.linkage = linkage;
         function.visibility = visibility;
-        function.dso_local = dso_local;
+        function.dso_local = dso_local || visibility.implies_dso_local();
         function.unnamed_addr = unnamed_addr;
         function.local_unnamed_addr = local_unnamed_addr;
         function.is_declaration = is_declaration;
@@ -1413,6 +1450,34 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(_) | TokenKind::Int(_) | TokenKind::Str(_) => {
                 matches!(self.peek_kind_at(1), TokenKind::Punct(':'))
             }
+            _ => false,
+        }
+    }
+
+    fn at_type_start(&self) -> bool {
+        match self.peek_kind() {
+            TokenKind::Ident(text) => {
+                matches!(
+                    &**text,
+                    "void"
+                        | "label"
+                        | "token"
+                        | "metadata"
+                        | "opaque"
+                        | "ptr"
+                        | "half"
+                        | "bfloat"
+                        | "float"
+                        | "double"
+                        | "fp128"
+                        | "x86_fp80"
+                        | "ppc_fp128"
+                ) || text
+                    .strip_prefix('i')
+                    .is_some_and(|bits| bits.parse::<u32>().is_ok())
+            }
+            TokenKind::Local(_) => true,
+            TokenKind::Punct('[') | TokenKind::Punct('<') | TokenKind::Punct('{') => true,
             _ => false,
         }
     }

@@ -6,7 +6,7 @@ use crate::constant::{ConstExpr, ConstKind};
 use crate::function::{Function, LocalId};
 use crate::inst::{InstKind, Instruction, LandingPadClause};
 use crate::linkage::Linkage;
-use crate::module::Module;
+use crate::module::{Global, GlobalKind, Module};
 use crate::ty::Type;
 use crate::value::{Operand, OperandKind};
 
@@ -59,6 +59,62 @@ pub fn verify_module(module: &Module) -> Result<(), Vec<VerifyError>> {
                 "global @{} is referenced but never defined",
                 module.name(global.name)
             )));
+            continue;
+        }
+        if global.kind.is_alias() {
+            let valid_linkage = if global.kind == GlobalKind::IFunc {
+                matches!(
+                    global.linkage,
+                    Linkage::External
+                        | Linkage::Private
+                        | Linkage::Internal
+                        | Linkage::LinkOnce
+                        | Linkage::Weak
+                        | Linkage::LinkOnceOdr
+                        | Linkage::WeakOdr
+                )
+            } else {
+                matches!(
+                    global.linkage,
+                    Linkage::External
+                        | Linkage::Private
+                        | Linkage::Internal
+                        | Linkage::LinkOnce
+                        | Linkage::Weak
+                        | Linkage::LinkOnceOdr
+                        | Linkage::WeakOdr
+                        | Linkage::AvailableExternally
+                )
+            };
+            if !valid_linkage {
+                errors.push(Error::verify(format!(
+                    "{} @{} has invalid linkage",
+                    if global.kind == GlobalKind::IFunc {
+                        "ifunc"
+                    } else {
+                        "alias"
+                    },
+                    module.name(global.name)
+                )));
+            }
+            match global.init {
+                Some(init) => {
+                    if !matches!(module.types.get(module.constant(init).ty), Type::Pointer) {
+                        errors.push(Error::verify(format!(
+                            "alias @{} target is not a pointer",
+                            module.name(global.name)
+                        )));
+                    } else if global.kind == GlobalKind::IFunc {
+                        verify_ifunc_resolver(module, global, init, &mut errors);
+                    } else {
+                        verify_alias(module, global, init, &mut errors);
+                    }
+                }
+                None => errors.push(Error::verify(format!(
+                    "alias @{} has no target",
+                    module.name(global.name)
+                ))),
+            }
             continue;
         }
         match global.init {
@@ -1019,6 +1075,157 @@ fn check_operand(
             ))),
             None => errors.push(Error::verify(format!("{what} function is out of range"))),
         },
+    }
+}
+
+fn verify_alias(
+    module: &Module,
+    global: &Global,
+    aliasee: crate::constant::ConstId,
+    errors: &mut Vec<VerifyError>,
+) {
+    let name = module.name(global.name);
+    if aliasee_has_interposable_alias(module, aliasee, 0) {
+        errors.push(Error::verify(format!(
+            "alias @{name} cannot point to an interposable alias"
+        )));
+    }
+    if !aliasee_is_definition(module, aliasee, 0) {
+        errors.push(Error::verify(format!(
+            "alias @{name} must point to a definition"
+        )));
+    }
+}
+
+fn aliasee_has_interposable_alias(
+    module: &Module,
+    id: crate::constant::ConstId,
+    depth: u32,
+) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    match &module.constant(id).kind {
+        ConstKind::Global(global) => module.globals.try_get(*global).is_some_and(|global| {
+            if global.kind != GlobalKind::Alias {
+                return false;
+            }
+            alias_is_interposable(global)
+                || global
+                    .init
+                    .is_some_and(|init| aliasee_has_interposable_alias(module, init, depth + 1))
+        }),
+        ConstKind::Expr(ConstExpr::Cast { value, .. }) => match value.kind {
+            OperandKind::Const(id) => aliasee_has_interposable_alias(module, id, depth + 1),
+            _ => false,
+        },
+        ConstKind::Expr(ConstExpr::Gep { ptr, .. }) => match ptr.kind {
+            OperandKind::Const(id) => aliasee_has_interposable_alias(module, id, depth + 1),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn alias_is_interposable(global: &Global) -> bool {
+    if matches!(global.linkage, Linkage::Private | Linkage::Internal) {
+        return false;
+    }
+    if matches!(
+        global.linkage,
+        Linkage::Weak | Linkage::LinkOnce | Linkage::Common | Linkage::ExternWeak
+    ) {
+        return true;
+    }
+    !global.dso_local
+}
+
+fn verify_ifunc_resolver(
+    module: &Module,
+    global: &Global,
+    resolver: crate::constant::ConstId,
+    errors: &mut Vec<VerifyError>,
+) {
+    let name = module.name(global.name);
+    let Some(function) = resolver_function(module, resolver, 0) else {
+        errors.push(Error::verify(format!(
+            "ifunc @{name} must have a function resolver"
+        )));
+        return;
+    };
+    let Some(function) = module.functions.try_get(function) else {
+        errors.push(Error::verify(format!(
+            "ifunc @{name} resolver is undefined"
+        )));
+        return;
+    };
+    if function.is_declaration {
+        errors.push(Error::verify(format!(
+            "ifunc @{name} resolver must be a definition"
+        )));
+    }
+    let returns_pointer = match module.types.get(function.ty) {
+        Type::Function { ret, .. } => matches!(module.types.get(*ret), Type::Pointer),
+        _ => false,
+    };
+    if !returns_pointer {
+        errors.push(Error::verify(format!(
+            "ifunc @{name} resolver must return a pointer"
+        )));
+    }
+}
+
+fn resolver_function(
+    module: &Module,
+    id: crate::constant::ConstId,
+    depth: u32,
+) -> Option<crate::function::FuncId> {
+    if depth > 16 {
+        return None;
+    }
+    match &module.constant(id).kind {
+        ConstKind::Function(function) => Some(*function),
+        ConstKind::Global(global) => module
+            .globals
+            .try_get(*global)
+            .filter(|global| global.kind == GlobalKind::Alias)
+            .and_then(|global| global.init)
+            .and_then(|init| resolver_function(module, init, depth + 1)),
+        ConstKind::Expr(ConstExpr::Cast { value, .. }) => match value.kind {
+            OperandKind::Const(id) => resolver_function(module, id, depth + 1),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn aliasee_is_definition(module: &Module, id: crate::constant::ConstId, depth: u32) -> bool {
+    if depth > 16 {
+        return false;
+    }
+    match &module.constant(id).kind {
+        ConstKind::Global(global) => module.globals.try_get(*global).is_some_and(|global| {
+            if global.kind.is_alias() {
+                global
+                    .init
+                    .is_some_and(|init| aliasee_is_definition(module, init, depth + 1))
+            } else {
+                global.init.is_some()
+            }
+        }),
+        ConstKind::Function(function) => module
+            .functions
+            .try_get(*function)
+            .is_some_and(|function| !function.is_declaration),
+        ConstKind::Expr(ConstExpr::Cast { value, .. }) => match value.kind {
+            OperandKind::Const(id) => aliasee_is_definition(module, id, depth + 1),
+            _ => false,
+        },
+        ConstKind::Expr(ConstExpr::Gep { ptr, .. }) => match ptr.kind {
+            OperandKind::Const(id) => aliasee_is_definition(module, id, depth + 1),
+            _ => false,
+        },
+        _ => false,
     }
 }
 
